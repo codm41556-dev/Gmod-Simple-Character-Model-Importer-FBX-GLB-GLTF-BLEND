@@ -4051,7 +4051,16 @@
     "clear_workspace_cache_busy": "Дождитесь завершения текущего шага рабочего процесса перед очисткой файлов рабочей области.",
     "clear_workspace_cache_confirm": "Это навсегда удалит все созданные папки рабочих областей и отдельные файлы внутри:\n{path}\n\nТекущий размер: {size}\n\nПродолжить?",
     "clear_workspace_cache_complete": "Кэш рабочей области очищен.",
-    "clear_workspace_cache_failed": "При очистке кэша рабочей области возникли ошибки"
+    "clear_workspace_cache_failed": "При очистке кэша рабочей области возникли ошибки",
+    "update_link_label": "релизы GitHub",
+    "update_outdated": "Доступна более новая версия MMD Character Importer: {tag} ({published}). Загрузите ее на странице {link}.",
+    "update_status_outdated": "Доступна более новая версия.",
+    "update_status_unavailable": "Не удалось проверить обновления.",
+    "update_unavailable": "Не удалось проверить обновления. Проверьте релизы GitHub вручную: {link}.",
+    "contact_author": "Связаться с автором",
+    "watch_tutorial_youtube": "Смотреть руководство на Youtube",
+    "watch_tutorial_bilibili": "Смотреть руководство на Bilibili",
+    "report_issue": "Сообщить о проблеме"
   },
   "tabs": {
     "main": "Основной импорт в GMod",

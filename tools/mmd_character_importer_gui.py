@@ -14,6 +14,9 @@ import subprocess
 import sys
 import time
 import traceback
+import urllib.error
+import urllib.request
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Callable, Iterable
 
@@ -100,6 +103,16 @@ CATEGORY_DISPLAY_UNSAFE_RE = re.compile(r"[^\x20-\x7E]+")
 VRD_INTENSITY_DEFAULTS = {10: 1.0, 20: 1.0, 30: 0.70}
 VRD_WEIGHT_FRAMES = (10, 20, 30)
 VRD_WEIGHT_COLUMNS = {10: 4, 20: 5, 30: 6}
+UPDATE_RELEASES_PAGE_URL = "https://github.com/SheepyLord/Gmod-Simple-Character-Model-Importer/releases"
+UPDATE_LATEST_RELEASE_API_URL = (
+    "https://api.github.com/repos/SheepyLord/Gmod-Simple-Character-Model-Importer/releases/latest"
+)
+CONTACT_AUTHOR_URL = "https://steamcommunity.com/profiles/76561198282841113"
+YOUTUBE_TUTORIAL_URL = "https://www.youtube.com/watch?v=QlEMr2EG-gM"
+BILIBILI_TUTORIAL_URL = "https://space.bilibili.com/34378776"
+REPORT_ISSUE_URL = "https://github.com/SheepyLord/Gmod-Simple-Character-Model-Importer/issues"
+UPDATE_CHECK_TIMEOUT_SECONDS = 8
+UPDATE_OUTDATED_GRACE = timedelta(hours=1)
 
 
 def sanitize_internal_identifier_text(value: object) -> str:
@@ -112,6 +125,47 @@ def sanitize_display_name_text(value: object) -> str:
 
 def sanitize_category_display_name_text(value: object) -> str:
     return CATEGORY_DISPLAY_UNSAFE_RE.sub("", str(value or ""))
+
+
+def parse_utc_datetime(value: object) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def load_build_info() -> dict[str, object]:
+    candidates = [ROOT_DIR / "build_info.json"]
+    if getattr(sys, "frozen", False):
+        exe_dir = Path(sys.executable).resolve().parent
+        candidates.extend(
+            [
+                exe_dir / "build_info.json",
+                exe_dir / "MMDCharacterImporter_build_info.json",
+                exe_dir / "MMDCharacterImporter_dependency_manifest.json",
+                exe_dir / "dependency_manifest.json",
+            ]
+        )
+    for candidate in candidates:
+        try:
+            if not candidate.exists():
+                continue
+            data = json.loads(candidate.read_text(encoding="utf-8"))
+        except Exception:
+            continue
+        if isinstance(data, dict) and data.get("build_time_utc"):
+            data = dict(data)
+            data["build_info_path"] = str(candidate)
+            return data
+    return {}
 
 
 def is_valid_display_name_text(value: object, allow_blank: bool = True) -> bool:
@@ -2387,6 +2441,72 @@ class ReleaseGenerateWorker(QtCore.QThread):
             self.failed.emit(str(exc) + "\n\n" + traceback.format_exc())
 
 
+class UpdateCheckWorker(QtCore.QThread):
+    done = QtCore.Signal(dict)
+
+    def __init__(self, build_info: dict[str, object]) -> None:
+        super().__init__()
+        self.build_info = dict(build_info or {})
+
+    def run(self) -> None:
+        release_page_url = str(self.build_info.get("release_page_url") or UPDATE_RELEASES_PAGE_URL)
+        api_url = str(self.build_info.get("latest_release_api_url") or UPDATE_LATEST_RELEASE_API_URL)
+        try:
+            build_time = parse_utc_datetime(self.build_info.get("build_time_utc"))
+            if build_time is None:
+                self.done.emit(
+                    {
+                        "status": "unavailable",
+                        "reason": "Build time is unavailable.",
+                        "release_page_url": release_page_url,
+                    }
+                )
+                return
+            request = urllib.request.Request(
+                api_url,
+                headers={
+                    "Accept": "application/vnd.github+json",
+                    "User-Agent": "MMDCharacterImporter update checker",
+                },
+            )
+            with urllib.request.urlopen(request, timeout=UPDATE_CHECK_TIMEOUT_SECONDS) as response:
+                payload = response.read(512 * 1024).decode("utf-8", "replace")
+            data = json.loads(payload)
+            if not isinstance(data, dict):
+                raise RuntimeError("GitHub returned an unexpected response.")
+            published_time = parse_utc_datetime(data.get("published_at") or data.get("created_at"))
+            if published_time is None:
+                raise RuntimeError("Latest release time was not available.")
+            latest_url = str(data.get("html_url") or release_page_url)
+            latest_tag = str(data.get("tag_name") or data.get("name") or "latest")
+            self.done.emit(
+                {
+                    "status": "outdated" if published_time > build_time + UPDATE_OUTDATED_GRACE else "current",
+                    "build_time_utc": build_time.isoformat(),
+                    "latest_release_time_utc": published_time.isoformat(),
+                    "latest_tag": latest_tag,
+                    "latest_url": latest_url,
+                    "release_page_url": release_page_url,
+                }
+            )
+        except (urllib.error.URLError, TimeoutError, json.JSONDecodeError, RuntimeError, OSError) as exc:
+            self.done.emit(
+                {
+                    "status": "unavailable",
+                    "reason": str(exc) or exc.__class__.__name__,
+                    "release_page_url": release_page_url,
+                }
+            )
+        except Exception as exc:
+            self.done.emit(
+                {
+                    "status": "unavailable",
+                    "reason": str(exc) or exc.__class__.__name__,
+                    "release_page_url": release_page_url,
+                }
+            )
+
+
 class ImporterWindow(QtWidgets.QMainWindow):
     def __init__(self) -> None:
         super().__init__()
@@ -2397,6 +2517,9 @@ class ImporterWindow(QtWidgets.QMainWindow):
         self._i18n_exact_map: dict[str, str] = {}
         self._i18n_prefix_map: list[tuple[str, str]] = []
         self.worker: QtCore.QThread | None = None
+        self.build_info: dict[str, object] = load_build_info()
+        self.update_check_worker: UpdateCheckWorker | None = None
+        self.update_check_result: dict[str, object] | None = None
         self.current_analysis: core.PmxAnalysis | None = None
         self.current_workspace: core.Workspace | None = None
         self.current_spine_analysis: dict[str, object] | None = None
@@ -2522,6 +2645,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
         QtCore.QTimer.singleShot(0, self.populate_main_pmx_files)
         QtCore.QTimer.singleShot(0, self.refresh_workflow_statuses)
         QtCore.QTimer.singleShot(0, self.refresh_workspace_cache_size)
+        QtCore.QTimer.singleShot(1500, self.start_update_check)
         self.statusBar().showMessage(self._t("app.status.ready", "Ready"))
 
     def apply_startup_geometry(self) -> None:
@@ -3024,6 +3148,8 @@ class ImporterWindow(QtWidgets.QMainWindow):
                     "Advanced tabs remain available for manual correction when a step needs attention.",
                 )
             )
+        if hasattr(self, "main_update_label"):
+            self.render_update_check_result()
         if hasattr(self, "main_source_row"):
             self._set_path_row_text(
                 self.main_source_row,
@@ -3087,6 +3213,10 @@ class ImporterWindow(QtWidgets.QMainWindow):
             "main_reset_preview_button": self._t("preview.reset_view", "Reset View"),
             "main_copy_log_button": self._t("common.copy_log", "Copy Log"),
             "main_clear_workspace_cache_button": self._t("main.clear_workspace_cache", "Clear All Cache and Intermediate Files"),
+            "main_contact_author_button": self._t("main.contact_author", "Contact author"),
+            "main_youtube_tutorial_button": self._t("main.watch_tutorial_youtube", "Watch Tutorial on Youtube"),
+            "main_bilibili_tutorial_button": self._t("main.watch_tutorial_bilibili", "Watch Tutorial on Bilibili"),
+            "main_report_issue_button": self._t("main.report_issue", "Report Issue"),
         }
         for attr, text in button_texts.items():
             widget = getattr(self, attr, None)
@@ -3911,6 +4041,42 @@ class ImporterWindow(QtWidgets.QMainWindow):
         self.main_intro_label.setWordWrap(True)
         layout.addWidget(self.main_intro_label)
 
+        self.main_update_label = QtWidgets.QLabel("")
+        self.main_update_label.setObjectName("fieldHint")
+        self.main_update_label.setWordWrap(True)
+        self.main_update_label.setTextFormat(QtCore.Qt.TextFormat.RichText)
+        self.main_update_label.setOpenExternalLinks(True)
+        self.main_update_label.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextBrowserInteraction)
+        self.main_update_label.hide()
+        layout.addWidget(self.main_update_label)
+
+        external_links_layout = QtWidgets.QGridLayout()
+        external_links_layout.setHorizontalSpacing(8)
+        external_links_layout.setVerticalSpacing(6)
+        self.main_contact_author_button = QtWidgets.QPushButton("Contact author")
+        self.main_contact_author_button.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_DialogHelpButton))
+        self.main_youtube_tutorial_button = QtWidgets.QPushButton("Watch Tutorial on Youtube")
+        self.main_youtube_tutorial_button.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_MediaPlay))
+        self.main_bilibili_tutorial_button = QtWidgets.QPushButton("Watch Tutorial on Bilibili")
+        self.main_bilibili_tutorial_button.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_MediaPlay))
+        self.main_report_issue_button = QtWidgets.QPushButton("Report Issue")
+        self.main_report_issue_button.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_MessageBoxWarning))
+        external_buttons = [
+            self.main_contact_author_button,
+            self.main_youtube_tutorial_button,
+            self.main_bilibili_tutorial_button,
+            self.main_report_issue_button,
+        ]
+        for button in external_buttons:
+            button.setSizePolicy(QtWidgets.QSizePolicy.Policy.Expanding, QtWidgets.QSizePolicy.Policy.Fixed)
+        external_links_layout.addWidget(self.main_contact_author_button, 0, 0)
+        external_links_layout.addWidget(self.main_youtube_tutorial_button, 0, 1)
+        external_links_layout.addWidget(self.main_bilibili_tutorial_button, 1, 0)
+        external_links_layout.addWidget(self.main_report_issue_button, 1, 1)
+        external_links_layout.setColumnStretch(0, 1)
+        external_links_layout.setColumnStretch(1, 1)
+        layout.addLayout(external_links_layout)
+
         language_layout = QtWidgets.QHBoxLayout()
         self.main_language_label = QtWidgets.QLabel("Language")
         self.main_language_combo = QtWidgets.QComboBox()
@@ -4163,6 +4329,10 @@ class ImporterWindow(QtWidgets.QMainWindow):
         self.main_model_name_edit.textChanged.connect(lambda _value: self.update_main_display_placeholders())
         self.main_rtx_bodygroup_limit_check.toggled.connect(self.on_bodygroup_rtx_limit_changed)
         self.main_clear_custom_normals_check.toggled.connect(self.on_clear_custom_normals_changed)
+        self.main_contact_author_button.clicked.connect(lambda: self.open_external_url(CONTACT_AUTHOR_URL))
+        self.main_youtube_tutorial_button.clicked.connect(lambda: self.open_external_url(YOUTUBE_TUTORIAL_URL))
+        self.main_bilibili_tutorial_button.clicked.connect(lambda: self.open_external_url(BILIBILI_TUTORIAL_URL))
+        self.main_report_issue_button.clicked.connect(lambda: self.open_external_url(REPORT_ISSUE_URL))
         self.main_category_edit.editingFinished.connect(self.save_settings)
         self.main_category_display_edit.editingFinished.connect(self.save_settings)
         self.main_model_name_edit.editingFinished.connect(self.save_settings)
@@ -13732,6 +13902,85 @@ class ImporterWindow(QtWidgets.QMainWindow):
                     item.setToolTip(value)
                 self.proportion_files_table.setItem(row, column, item)
         self.proportion_files_table.resizeRowsToContents()
+
+    def start_update_check(self) -> None:
+        if not self.build_info.get("build_time_utc") and not getattr(sys, "frozen", False):
+            return
+        worker = self.update_check_worker
+        if worker is not None and worker.isRunning():
+            return
+        worker = UpdateCheckWorker(self.build_info)
+        self.update_check_worker = worker
+        worker.done.connect(self.update_check_finished)
+        worker.finished.connect(self.update_check_worker_finished)
+        worker.start()
+
+    def update_check_finished(self, result: dict) -> None:
+        self.update_check_result = dict(result or {})
+        self.render_update_check_result()
+        status = str(self.update_check_result.get("status") or "")
+        if status == "outdated":
+            self.statusBar().showMessage(self._t("main.update_status_outdated", "A newer release is available."))
+        elif status == "unavailable":
+            self.statusBar().showMessage(self._t("main.update_status_unavailable", "Unable to check for updates."))
+
+    def update_check_worker_finished(self) -> None:
+        self.update_check_worker = None
+
+    def format_update_check_time(self, raw_value: object) -> str:
+        parsed = parse_utc_datetime(raw_value)
+        if parsed is None:
+            return str(raw_value or "")
+        local = parsed.astimezone()
+        timezone_name = local.tzname() or "local"
+        return f"{local:%Y-%m-%d %H:%M} {timezone_name}"
+
+    def update_release_link_html(self, url: object = "") -> str:
+        target = str(url or UPDATE_RELEASES_PAGE_URL)
+        label = html.escape(self._t("main.update_link_label", "GitHub releases"))
+        return f'<a href="{html.escape(target, quote=True)}">{label}</a>'
+
+    def open_external_url(self, url: str) -> None:
+        if not QtGui.QDesktopServices.openUrl(QtCore.QUrl(url)):
+            self.statusBar().showMessage(url)
+
+    def render_update_check_result(self) -> None:
+        label = getattr(self, "main_update_label", None)
+        if not isinstance(label, QtWidgets.QLabel):
+            return
+        result = self.update_check_result if isinstance(self.update_check_result, dict) else {}
+        status = str(result.get("status") or "")
+        if status == "outdated":
+            latest_url = str(result.get("latest_url") or result.get("release_page_url") or UPDATE_RELEASES_PAGE_URL)
+            tag = html.escape(str(result.get("latest_tag") or "latest"))
+            published = html.escape(self.format_update_check_time(result.get("latest_release_time_utc")))
+            link = self.update_release_link_html(latest_url)
+            text = self._t(
+                "main.update_outdated",
+                "A newer MMD Character Importer release is available: {tag} ({published}). Download it from {link}.",
+                tag=tag,
+                published=published,
+                link=link,
+            )
+            label.setToolTip("")
+            label.setText(f'<span style="color:#d29922;">{text}</span>')
+            label.show()
+        elif status == "unavailable":
+            release_page_url = str(result.get("release_page_url") or UPDATE_RELEASES_PAGE_URL)
+            link = self.update_release_link_html(release_page_url)
+            text = self._t(
+                "main.update_unavailable",
+                "Unable to check for updates. Check GitHub releases manually: {link}.",
+                link=link,
+            )
+            reason = str(result.get("reason") or "")
+            label.setToolTip(reason)
+            label.setText(f'<span style="color:#d29922;">{text}</span>')
+            label.show()
+        else:
+            label.clear()
+            label.setToolTip("")
+            label.hide()
 
     def format_file_size(self, size: int) -> str:
         size = max(0, int(size))

@@ -4182,7 +4182,16 @@
     "clear_workspace_cache_busy": "請等待目前工作流程步驟完成後再清理工作區檔案。",
     "clear_workspace_cache_confirm": "這會永久刪除以下位置內所有產生的工作區資料夾和零散檔案：\n{path}\n\n目前大小：{size}\n\n是否繼續？",
     "clear_workspace_cache_complete": "工作區快取已清理。",
-    "clear_workspace_cache_failed": "工作區快取清理發生錯誤"
+    "clear_workspace_cache_failed": "工作區快取清理發生錯誤",
+    "update_link_label": "GitHub 發布頁面",
+    "update_outdated": "偵測到更新的 MMD Character Importer 版本：{tag}（{published}）。請從 {link} 下載。",
+    "update_status_outdated": "偵測到更新版本。",
+    "update_status_unavailable": "無法檢查更新。",
+    "update_unavailable": "無法檢查更新。請手動查看 GitHub 發布頁面：{link}。",
+    "contact_author": "聯絡作者",
+    "watch_tutorial_youtube": "觀看 Youtube 教學",
+    "watch_tutorial_bilibili": "觀看 Bilibili 教學",
+    "report_issue": "回報問題"
   },
   "tabs": {
     "main": "主界面：導入到 GMod",

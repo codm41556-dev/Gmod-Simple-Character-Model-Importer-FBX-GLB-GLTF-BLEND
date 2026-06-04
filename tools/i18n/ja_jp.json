@@ -4051,7 +4051,16 @@
     "clear_workspace_cache_busy": "現在のワークフロー手順が完了してから、ワークスペースファイルを削除してください。",
     "clear_workspace_cache_confirm": "次の場所にある生成済みワークスペースフォルダーと単独ファイルを完全に削除します:\n{path}\n\n現在のサイズ: {size}\n\n続行しますか?",
     "clear_workspace_cache_complete": "ワークスペースキャッシュを削除しました。",
-    "clear_workspace_cache_failed": "ワークスペースキャッシュの削除中にエラーが発生しました"
+    "clear_workspace_cache_failed": "ワークスペースキャッシュの削除中にエラーが発生しました",
+    "update_link_label": "GitHub リリース",
+    "update_outdated": "新しい MMD Character Importer リリースがあります: {tag} ({published})。{link} からダウンロードしてください。",
+    "update_status_outdated": "新しいリリースがあります。",
+    "update_status_unavailable": "更新を確認できません。",
+    "update_unavailable": "更新を確認できません。{link} で GitHub リリースを手動で確認してください。",
+    "contact_author": "作者に連絡",
+    "watch_tutorial_youtube": "Youtube チュートリアルを見る",
+    "watch_tutorial_bilibili": "Bilibili チュートリアルを見る",
+    "report_issue": "問題を報告"
   },
   "tabs": {
     "main": "GModへのメインインポート",

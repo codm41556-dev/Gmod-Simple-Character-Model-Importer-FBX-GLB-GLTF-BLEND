@@ -11,6 +11,9 @@ $Root = Resolve-Path (Join-Path $PSScriptRoot "..")
 $ReleaseRoot = Join-Path $Root "release"
 $PortableDir = Join-Path $ReleaseRoot "${Name}_portable"
 $StandaloneExe = Join-Path $ReleaseRoot "${Name}.exe"
+$UpdateReleasePageUrl = "https://github.com/SheepyLord/Gmod-Simple-Character-Model-Importer/releases"
+$UpdateLatestReleaseApiUrl = "https://api.github.com/repos/SheepyLord/Gmod-Simple-Character-Model-Importer/releases/latest"
+$GeneratedBuildInfoDir = $null
 
 function Resolve-ProjectPath([string]$RelativePath) {
     return Join-Path $Root $RelativePath
@@ -57,6 +60,18 @@ function Add-RequiredData([string]$SourceRelative, [string]$DestRelative) {
     Add-DataPackage $SourceRelative $DestRelative $true
 }
 
+function Add-DataFileAbsolute([string]$Source, [string]$DestRelative, [string]$SourceLabel) {
+    if (-not (Test-Path -LiteralPath $Source -PathType Leaf)) {
+        throw "Required generated package data was not found: $Source"
+    }
+    $script:DataArgs += @("--add-data", "$Source;$DestRelative")
+    $script:DataManifest += [ordered]@{
+        source = $SourceLabel
+        destination = $DestRelative
+        size_mb = [math]::Round((Get-PathSizeBytes $Source) / 1MB, 2)
+    }
+}
+
 function Assert-RequiredFile([string]$RelativePath) {
     $Path = Resolve-ProjectPath $RelativePath
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
@@ -98,6 +113,7 @@ function Invoke-NativeRelaxed([scriptblock]$Command) {
 
 Push-Location $Root
 try {
+    $BuildTimeUtc = (Get-Date).ToUniversalTime().ToString("o")
     $PyInstallerVersionExitCode = Invoke-NativeRelaxed { & $Python -m PyInstaller --version *> $null }
     if ($PyInstallerVersionExitCode -ne 0) {
         throw "PyInstaller is not installed. Run: $Python -m pip install pyinstaller"
@@ -111,6 +127,23 @@ try {
     $DataArgs = @()
     $DataManifest = @()
     $MissingData = @()
+    $GeneratedBuildInfoDir = Join-Path ([System.IO.Path]::GetTempPath()) ("mci_build_info_" + [System.Guid]::NewGuid().ToString("N"))
+    New-Item -ItemType Directory -Path $GeneratedBuildInfoDir | Out-Null
+    $BuildInfoPath = Join-Path $GeneratedBuildInfoDir "build_info.json"
+    $BuildInfo = [ordered]@{
+        app = $Name
+        build_time_utc = $BuildTimeUtc
+        release_page_url = $UpdateReleasePageUrl
+        latest_release_api_url = $UpdateLatestReleaseApiUrl
+        source = "pyinstaller"
+    }
+    $BuildInfoJson = $BuildInfo | ConvertTo-Json -Depth 4
+    [System.IO.File]::WriteAllText(
+        $BuildInfoPath,
+        $BuildInfoJson + [System.Environment]::NewLine,
+        [System.Text.UTF8Encoding]::new($false)
+    )
+    Add-DataFileAbsolute $BuildInfoPath "." "generated build_info.json"
     Assert-RequiredFile "external_tools\vtfcmd\VTFCmd.exe"
     Assert-RequiredFile "external_tools\vtfcmd\DevIL.dll"
     Assert-RequiredFile "external_tools\vtfcmd\HLLib.dll"
@@ -372,7 +405,9 @@ try {
     )
     $Manifest = [ordered]@{
         app = $Name
-        build_time_utc = (Get-Date).ToUniversalTime().ToString("o")
+        build_time_utc = $BuildTimeUtc
+        release_page_url = $UpdateReleasePageUrl
+        latest_release_api_url = $UpdateLatestReleaseApiUrl
         python_executable = (& $Python -c "import sys; print(sys.executable)")
         python_version = (& $Python -c "import sys; print(sys.version)")
         pyinstaller_mode = $BuildMode
@@ -423,5 +458,13 @@ try {
     Write-Host "Manifest: $ManifestPath"
 }
 finally {
+    if ($GeneratedBuildInfoDir -and (Test-Path -LiteralPath $GeneratedBuildInfoDir)) {
+        $ResolvedGeneratedBuildInfoDir = [System.IO.Path]::GetFullPath($GeneratedBuildInfoDir)
+        $ResolvedTempRoot = [System.IO.Path]::GetFullPath([System.IO.Path]::GetTempPath())
+        $TempPrefix = Join-Path $ResolvedTempRoot "mci_build_info_"
+        if ($ResolvedGeneratedBuildInfoDir.StartsWith($TempPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+            Remove-Item -LiteralPath $GeneratedBuildInfoDir -Recurse -Force
+        }
+    }
     Pop-Location
 }

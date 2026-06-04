@@ -4051,7 +4051,16 @@
     "clear_workspace_cache_busy": "Espera a que termine el paso actual del flujo antes de borrar los archivos del espacio de trabajo.",
     "clear_workspace_cache_confirm": "Esto eliminará permanentemente todas las carpetas de espacio de trabajo generadas y los archivos sueltos dentro de:\n{path}\n\nTamaño actual: {size}\n\n¿Continuar?",
     "clear_workspace_cache_complete": "Caché del espacio de trabajo borrada.",
-    "clear_workspace_cache_failed": "La limpieza de la caché del espacio de trabajo tuvo errores"
+    "clear_workspace_cache_failed": "La limpieza de la caché del espacio de trabajo tuvo errores",
+    "update_link_label": "versiones de GitHub",
+    "update_outdated": "Hay una versión más reciente de MMD Character Importer: {tag} ({published}). Descárgala desde {link}.",
+    "update_status_outdated": "Hay una versión más reciente disponible.",
+    "update_status_unavailable": "No se pudieron comprobar las actualizaciones.",
+    "update_unavailable": "No se pudieron comprobar las actualizaciones. Revisa manualmente las versiones de GitHub: {link}.",
+    "contact_author": "Contactar al autor",
+    "watch_tutorial_youtube": "Ver tutorial en Youtube",
+    "watch_tutorial_bilibili": "Ver tutorial en Bilibili",
+    "report_issue": "Reportar problema"
   },
   "tabs": {
     "main": "Importación principal a GMod",

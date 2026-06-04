@@ -405,7 +405,16 @@
     "clear_workspace_cache_busy": "Wait for the current workflow step to finish before clearing workspace files.",
     "clear_workspace_cache_confirm": "This will permanently delete all generated workspace folders and loose files inside:\n{path}\n\nCurrent size: {size}\n\nContinue?",
     "clear_workspace_cache_complete": "Workspace cache cleared.",
-    "clear_workspace_cache_failed": "Workspace cache cleanup had errors"
+    "clear_workspace_cache_failed": "Workspace cache cleanup had errors",
+    "update_link_label": "GitHub releases",
+    "update_outdated": "A newer MMD Character Importer release is available: {tag} ({published}). Download it from {link}.",
+    "update_status_outdated": "A newer release is available.",
+    "update_status_unavailable": "Unable to check for updates.",
+    "update_unavailable": "Unable to check for updates. Check GitHub releases manually: {link}.",
+    "contact_author": "Contact author",
+    "watch_tutorial_youtube": "Watch Tutorial on Youtube",
+    "watch_tutorial_bilibili": "Watch Tutorial on Bilibili",
+    "report_issue": "Report Issue"
   },
   "preview": {
     "bone_names": "Bone Names",

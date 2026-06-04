@@ -4051,7 +4051,16 @@
     "clear_workspace_cache_busy": "현재 워크플로 단계가 끝난 뒤 작업 공간 파일을 지우세요.",
     "clear_workspace_cache_confirm": "다음 위치 안의 생성된 작업 공간 폴더와 개별 파일을 영구적으로 삭제합니다:\n{path}\n\n현재 크기: {size}\n\n계속할까요?",
     "clear_workspace_cache_complete": "작업 공간 캐시를 지웠습니다.",
-    "clear_workspace_cache_failed": "작업 공간 캐시 정리 중 오류가 발생했습니다"
+    "clear_workspace_cache_failed": "작업 공간 캐시 정리 중 오류가 발생했습니다",
+    "update_link_label": "GitHub 릴리스",
+    "update_outdated": "새 MMD Character Importer 릴리스가 있습니다: {tag} ({published}). {link}에서 다운로드하세요.",
+    "update_status_outdated": "새 릴리스가 있습니다.",
+    "update_status_unavailable": "업데이트를 확인할 수 없습니다.",
+    "update_unavailable": "업데이트를 확인할 수 없습니다. {link}에서 GitHub 릴리스를 직접 확인하세요.",
+    "contact_author": "작성자에게 연락",
+    "watch_tutorial_youtube": "Youtube 튜토리얼 보기",
+    "watch_tutorial_bilibili": "Bilibili 튜토리얼 보기",
+    "report_issue": "문제 보고"
   },
   "tabs": {
     "main": "GMod으로 주요 가져오기",
