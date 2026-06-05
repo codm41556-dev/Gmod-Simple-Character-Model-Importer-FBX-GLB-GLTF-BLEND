@@ -1,6 +1,8 @@
 DynamicModelImporter = DynamicModelImporter or {}
 DynamicModelImporter.StaticRoot = "data_static/dynamic_model_importer/models"
 DynamicModelImporter.LegacyAutorunPattern = "lua/autorun/*_sheepylord.lua"
+DynamicModelImporter.OverrideDataPath = "dynamic_model_importer/model_overrides.json"
+DynamicModelImporter.InvisibleMaterialPath = "dynamic_model_importer/invisible"
 DynamicModelImporter.Translations = {
     ["zh-CN"] = {
         ["Model Importer"] = "模型导入器",
@@ -35,6 +37,60 @@ DynamicModelImporter.Translations = {
         ["Spawned ragdoll: %s"] = "已生成布娃娃：%s",
         ["Could not load model manifest."] = "无法加载模型清单。",
         ["Invalid model id."] = "模型 ID 无效。",
+        ["Dynamic Model Repair"] = "动态模型修复",
+        ["Repair imported model materials and jiggle bones."] = "修复导入模型的材质和摇摆骨骼。",
+        ["Select a model in the menu. Save repairs, then spawned NPCs, ragdolls, and matching player models use them automatically."] = "在菜单中选择模型。保存修复后，生成的 NPC、布娃娃和匹配的玩家模型会自动使用这些设置。",
+        ["Hide bad materials and disable jiggle bones for Dynamic Model Importer models. Settings are saved server-wide."] = "隐藏有问题的材质，并禁用 Dynamic Model Importer 模型的摇摆骨骼。设置会保存到服务器。",
+        ["Materials"] = "材质",
+        ["Index"] = "索引",
+        ["Material"] = "材质",
+        ["Hidden"] = "已隐藏",
+        ["Hide selected material"] = "隐藏所选材质",
+        ["Restore selected material"] = "还原所选材质",
+        ["Restore all materials"] = "还原所有材质",
+        ["Bones"] = "骨骼",
+        ["Bone"] = "骨骼",
+        ["No jiggle"] = "无摇摆",
+        ["Disable selected bone jiggle"] = "禁用所选骨骼摇摆",
+        ["Restore selected bone jiggle"] = "还原所选骨骼摇摆",
+        ["Disable all jiggle"] = "禁用所有摇摆",
+        ["Restore all jiggle"] = "还原所有摇摆",
+        ["Saved repair settings apply to NPCs, ragdolls, and matching player models."] = "保存的修复设置会应用到 NPC、布娃娃和匹配的玩家模型。",
+        ["Select a model first."] = "请先选择模型。",
+        ["Selected model has no inspectable model path."] = "所选模型没有可检查的模型路径。",
+        ["Could not inspect model: %s"] = "无法检查模型：%s",
+        ["Loaded repair settings."] = "已加载修复设置。",
+        ["No material selected."] = "未选择材质。",
+        ["No bone selected."] = "未选择骨骼。",
+        ["Target does not match the selected imported model."] = "目标与所选导入模型不匹配。",
+        ["Applied saved repairs to target."] = "已将保存的修复应用到目标。",
+        ["Only admins can save Dynamic Model Importer repairs on this server."] = "只有管理员可以在此服务器上保存 Dynamic Model Importer 修复。",
+        ["Saved repairs for: %s"] = "已保存修复：%s",
+        ["Hide Material Tool for Imported model"] = "导入模型隐藏材质工具",
+        ["Hide materials for any model path using the Dynamic Model Importer invisible material."] = "使用 Dynamic Model Importer 的隐形材质隐藏任意模型路径的材质。",
+        ["Left-click an NPC, ragdoll, or player to select its model."] = "左键点击 NPC、布娃娃或玩家以选择其模型。",
+        ["Right-click an NPC, ragdoll, or player to select its model. Left-click toggles the selected material."] = "右键点击 NPC、布娃娃或玩家以选择其模型。左键切换所选材质的隐藏状态。",
+        ["Right-click an NPC, ragdoll, or player to select its model. Left-click toggles all jigglebones."] = "右键点击 NPC、布娃娃或玩家以选择其模型。左键切换所有摇摆骨骼。",
+        ["Target has no valid model path."] = "目标没有有效的模型路径。",
+        ["Selected model: %s"] = "已选择模型：%s",
+        ["Selected material index"] = "所选材质索引",
+        ["Hide current material"] = "隐藏当前材质",
+        ["Restore current material"] = "还原当前材质",
+        ["Selected material preview"] = "所选材质预览",
+        ["Tool Material:"] = "工具材质：",
+        ["Original Material:"] = "原始材质：",
+        ["Current Material:"] = "当前材质：",
+        ["Select an NPC, ragdoll, or player. Saved material hides apply to every entity using the same model path."] = "选择 NPC、布娃娃或玩家。保存的隐藏材质会应用到所有使用相同模型路径的实体。",
+        ["Selected model path"] = "所选模型路径",
+        ["Select a model by left-clicking an NPC, ragdoll, or player."] = "左键点击 NPC、布娃娃或玩家来选择模型。",
+        ["Select a model by right-clicking an NPC, ragdoll, or player."] = "右键点击 NPC、布娃娃或玩家来选择模型。",
+        ["Jigglebone tool for Imported model"] = "导入模型摇摆骨骼工具",
+        ["Disable jigglebones for any model path."] = "禁用任意模型路径的摇摆骨骼。",
+        ["Select an NPC, ragdoll, or player. Saved jigglebone settings apply to every entity using the same model path."] = "选择 NPC、布娃娃或玩家。保存的摇摆骨骼设置会应用到所有使用相同模型路径的实体。",
+        ["Invalid model path."] = "模型路径无效。",
+        ["Saved repairs for model path: %s"] = "已保存模型路径修复：%s",
+        ["Spawn model without jigglebone"] = "生成模型时禁用摇摆骨骼",
+        ["When enabled, spawned/imported NPCs, ragdolls, and matching PMs will save and use all jigglebones disabled."] = "启用后，生成/导入的 NPC、布娃娃和匹配的玩家模型会保存并使用禁用所有摇摆骨骼的设置。",
     },
     ["fr"] = {
         ["Model Importer"] = "Importateur de modèles",
@@ -69,6 +125,60 @@ DynamicModelImporter.Translations = {
         ["Spawned ragdoll: %s"] = "Ragdoll créé : %s",
         ["Could not load model manifest."] = "Impossible de charger le manifeste du modèle.",
         ["Invalid model id."] = "ID de modèle invalide.",
+        ["Dynamic Model Repair"] = "Réparation de modèles dynamiques",
+        ["Repair imported model materials and jiggle bones."] = "Répare les matériaux et les os jiggle des modèles importés.",
+        ["Select a model in the menu. Save repairs, then spawned NPCs, ragdolls, and matching player models use them automatically."] = "Sélectionnez un modèle dans le menu. Enregistrez les corrections ; les PNJ, ragdolls et modèles joueur correspondants les utiliseront automatiquement.",
+        ["Hide bad materials and disable jiggle bones for Dynamic Model Importer models. Settings are saved server-wide."] = "Masque les matériaux incorrects et désactive les os jiggle des modèles Dynamic Model Importer. Les réglages sont enregistrés sur le serveur.",
+        ["Materials"] = "Matériaux",
+        ["Index"] = "Indice",
+        ["Material"] = "Matériau",
+        ["Hidden"] = "Masqué",
+        ["Hide selected material"] = "Masquer le matériau sélectionné",
+        ["Restore selected material"] = "Restaurer le matériau sélectionné",
+        ["Restore all materials"] = "Restaurer tous les matériaux",
+        ["Bones"] = "Os",
+        ["Bone"] = "Os",
+        ["No jiggle"] = "Sans jiggle",
+        ["Disable selected bone jiggle"] = "Désactiver le jiggle de l'os sélectionné",
+        ["Restore selected bone jiggle"] = "Restaurer le jiggle de l'os sélectionné",
+        ["Disable all jiggle"] = "Désactiver tout le jiggle",
+        ["Restore all jiggle"] = "Restaurer tout le jiggle",
+        ["Saved repair settings apply to NPCs, ragdolls, and matching player models."] = "Les réglages de réparation enregistrés s'appliquent aux PNJ, ragdolls et modèles joueur correspondants.",
+        ["Select a model first."] = "Sélectionnez d'abord un modèle.",
+        ["Selected model has no inspectable model path."] = "Le modèle sélectionné n'a pas de chemin inspectable.",
+        ["Could not inspect model: %s"] = "Impossible d'inspecter le modèle : %s",
+        ["Loaded repair settings."] = "Réglages de réparation chargés.",
+        ["No material selected."] = "Aucun matériau sélectionné.",
+        ["No bone selected."] = "Aucun os sélectionné.",
+        ["Target does not match the selected imported model."] = "La cible ne correspond pas au modèle importé sélectionné.",
+        ["Applied saved repairs to target."] = "Réparations enregistrées appliquées à la cible.",
+        ["Only admins can save Dynamic Model Importer repairs on this server."] = "Seuls les admins peuvent enregistrer les réparations Dynamic Model Importer sur ce serveur.",
+        ["Saved repairs for: %s"] = "Réparations enregistrées pour : %s",
+        ["Hide Material Tool for Imported model"] = "Outil de masquage de matériau pour modèle importé",
+        ["Hide materials for any model path using the Dynamic Model Importer invisible material."] = "Masque les matériaux de n'importe quel chemin de modèle avec le matériau invisible de Dynamic Model Importer.",
+        ["Left-click an NPC, ragdoll, or player to select its model."] = "Clic gauche sur un PNJ, un ragdoll ou un joueur pour sélectionner son modèle.",
+        ["Right-click an NPC, ragdoll, or player to select its model. Left-click toggles the selected material."] = "Clic droit sur un PNJ, un ragdoll ou un joueur pour sélectionner son modèle. Clic gauche bascule le matériau sélectionné.",
+        ["Right-click an NPC, ragdoll, or player to select its model. Left-click toggles all jigglebones."] = "Clic droit sur un PNJ, un ragdoll ou un joueur pour sélectionner son modèle. Clic gauche bascule tous les jigglebones.",
+        ["Target has no valid model path."] = "La cible n'a pas de chemin de modèle valide.",
+        ["Selected model: %s"] = "Modèle sélectionné : %s",
+        ["Selected material index"] = "Indice du matériau sélectionné",
+        ["Hide current material"] = "Masquer le matériau actuel",
+        ["Restore current material"] = "Restaurer le matériau actuel",
+        ["Selected material preview"] = "Aperçu du matériau sélectionné",
+        ["Tool Material:"] = "Matériau de l'outil :",
+        ["Original Material:"] = "Matériau d'origine :",
+        ["Current Material:"] = "Matériau actuel :",
+        ["Select an NPC, ragdoll, or player. Saved material hides apply to every entity using the same model path."] = "Sélectionnez un PNJ, un ragdoll ou un joueur. Les matériaux masqués enregistrés s'appliquent à toutes les entités utilisant le même chemin de modèle.",
+        ["Selected model path"] = "Chemin du modèle sélectionné",
+        ["Select a model by left-clicking an NPC, ragdoll, or player."] = "Sélectionnez un modèle par clic gauche sur un PNJ, un ragdoll ou un joueur.",
+        ["Select a model by right-clicking an NPC, ragdoll, or player."] = "Sélectionnez un modèle par clic droit sur un PNJ, un ragdoll ou un joueur.",
+        ["Jigglebone tool for Imported model"] = "Outil jigglebone pour modèle importé",
+        ["Disable jigglebones for any model path."] = "Désactive les jigglebones pour n'importe quel chemin de modèle.",
+        ["Select an NPC, ragdoll, or player. Saved jigglebone settings apply to every entity using the same model path."] = "Sélectionnez un PNJ, un ragdoll ou un joueur. Les réglages jigglebone enregistrés s'appliquent à toutes les entités utilisant le même chemin de modèle.",
+        ["Invalid model path."] = "Chemin de modèle invalide.",
+        ["Saved repairs for model path: %s"] = "Réparations enregistrées pour le chemin de modèle : %s",
+        ["Spawn model without jigglebone"] = "Créer le modèle sans jigglebone",
+        ["When enabled, spawned/imported NPCs, ragdolls, and matching PMs will save and use all jigglebones disabled."] = "Si activé, les PNJ, ragdolls et modèles joueur correspondants créés/importés enregistrent et utilisent tous les jigglebones désactivés.",
     },
     ["es-ES"] = {
         ["Model Importer"] = "Importador de modelos",
@@ -103,6 +213,60 @@ DynamicModelImporter.Translations = {
         ["Spawned ragdoll: %s"] = "Ragdoll generado: %s",
         ["Could not load model manifest."] = "No se pudo cargar el manifiesto del modelo.",
         ["Invalid model id."] = "ID de modelo no válido.",
+        ["Dynamic Model Repair"] = "Reparación de modelos dinámicos",
+        ["Repair imported model materials and jiggle bones."] = "Repara materiales y huesos jiggle de modelos importados.",
+        ["Select a model in the menu. Save repairs, then spawned NPCs, ragdolls, and matching player models use them automatically."] = "Selecciona un modelo en el menú. Guarda las reparaciones y los NPC, ragdolls y modelos de jugador coincidentes las usarán automáticamente.",
+        ["Hide bad materials and disable jiggle bones for Dynamic Model Importer models. Settings are saved server-wide."] = "Oculta materiales problemáticos y desactiva huesos jiggle en modelos de Dynamic Model Importer. Los ajustes se guardan en el servidor.",
+        ["Materials"] = "Materiales",
+        ["Index"] = "Índice",
+        ["Material"] = "Material",
+        ["Hidden"] = "Oculto",
+        ["Hide selected material"] = "Ocultar material seleccionado",
+        ["Restore selected material"] = "Restaurar material seleccionado",
+        ["Restore all materials"] = "Restaurar todos los materiales",
+        ["Bones"] = "Huesos",
+        ["Bone"] = "Hueso",
+        ["No jiggle"] = "Sin jiggle",
+        ["Disable selected bone jiggle"] = "Desactivar jiggle del hueso seleccionado",
+        ["Restore selected bone jiggle"] = "Restaurar jiggle del hueso seleccionado",
+        ["Disable all jiggle"] = "Desactivar todo el jiggle",
+        ["Restore all jiggle"] = "Restaurar todo el jiggle",
+        ["Saved repair settings apply to NPCs, ragdolls, and matching player models."] = "Los ajustes de reparación guardados se aplican a NPCs, ragdolls y modelos de jugador coincidentes.",
+        ["Select a model first."] = "Primero selecciona un modelo.",
+        ["Selected model has no inspectable model path."] = "El modelo seleccionado no tiene una ruta inspeccionable.",
+        ["Could not inspect model: %s"] = "No se pudo inspeccionar el modelo: %s",
+        ["Loaded repair settings."] = "Ajustes de reparación cargados.",
+        ["No material selected."] = "No hay material seleccionado.",
+        ["No bone selected."] = "No hay hueso seleccionado.",
+        ["Target does not match the selected imported model."] = "El objetivo no coincide con el modelo importado seleccionado.",
+        ["Applied saved repairs to target."] = "Reparaciones guardadas aplicadas al objetivo.",
+        ["Only admins can save Dynamic Model Importer repairs on this server."] = "Solo los administradores pueden guardar reparaciones de Dynamic Model Importer en este servidor.",
+        ["Saved repairs for: %s"] = "Reparaciones guardadas para: %s",
+        ["Hide Material Tool for Imported model"] = "Herramienta para ocultar material en modelo importado",
+        ["Hide materials for any model path using the Dynamic Model Importer invisible material."] = "Oculta materiales de cualquier ruta de modelo usando el material invisible de Dynamic Model Importer.",
+        ["Left-click an NPC, ragdoll, or player to select its model."] = "Haz clic izquierdo en un NPC, ragdoll o jugador para seleccionar su modelo.",
+        ["Right-click an NPC, ragdoll, or player to select its model. Left-click toggles the selected material."] = "Haz clic derecho en un NPC, ragdoll o jugador para seleccionar su modelo. El clic izquierdo alterna el material seleccionado.",
+        ["Right-click an NPC, ragdoll, or player to select its model. Left-click toggles all jigglebones."] = "Haz clic derecho en un NPC, ragdoll o jugador para seleccionar su modelo. El clic izquierdo alterna todos los jigglebones.",
+        ["Target has no valid model path."] = "El objetivo no tiene una ruta de modelo válida.",
+        ["Selected model: %s"] = "Modelo seleccionado: %s",
+        ["Selected material index"] = "Índice de material seleccionado",
+        ["Hide current material"] = "Ocultar material actual",
+        ["Restore current material"] = "Restaurar material actual",
+        ["Selected material preview"] = "Vista previa del material seleccionado",
+        ["Tool Material:"] = "Material de la herramienta:",
+        ["Original Material:"] = "Material original:",
+        ["Current Material:"] = "Material actual:",
+        ["Select an NPC, ragdoll, or player. Saved material hides apply to every entity using the same model path."] = "Selecciona un NPC, ragdoll o jugador. Los materiales ocultos guardados se aplican a todas las entidades que usan la misma ruta de modelo.",
+        ["Selected model path"] = "Ruta del modelo seleccionado",
+        ["Select a model by left-clicking an NPC, ragdoll, or player."] = "Selecciona un modelo con clic izquierdo en un NPC, ragdoll o jugador.",
+        ["Select a model by right-clicking an NPC, ragdoll, or player."] = "Selecciona un modelo con clic derecho en un NPC, ragdoll o jugador.",
+        ["Jigglebone tool for Imported model"] = "Herramienta jigglebone para modelo importado",
+        ["Disable jigglebones for any model path."] = "Desactiva jigglebones para cualquier ruta de modelo.",
+        ["Select an NPC, ragdoll, or player. Saved jigglebone settings apply to every entity using the same model path."] = "Selecciona un NPC, ragdoll o jugador. Los ajustes de jigglebone guardados se aplican a todas las entidades que usan la misma ruta de modelo.",
+        ["Invalid model path."] = "Ruta de modelo no válida.",
+        ["Saved repairs for model path: %s"] = "Reparaciones guardadas para la ruta de modelo: %s",
+        ["Spawn model without jigglebone"] = "Generar modelo sin jigglebone",
+        ["When enabled, spawned/imported NPCs, ragdolls, and matching PMs will save and use all jigglebones disabled."] = "Cuando está activado, los NPCs, ragdolls y PMs coincidentes generados/importados guardarán y usarán todos los jigglebones desactivados.",
     },
     ["ko"] = {
         ["Model Importer"] = "모델 가져오기",
@@ -137,6 +301,60 @@ DynamicModelImporter.Translations = {
         ["Spawned ragdoll: %s"] = "래그돌 생성됨: %s",
         ["Could not load model manifest."] = "모델 매니페스트를 불러올 수 없습니다.",
         ["Invalid model id."] = "모델 ID가 올바르지 않습니다.",
+        ["Dynamic Model Repair"] = "동적 모델 복구",
+        ["Repair imported model materials and jiggle bones."] = "가져온 모델의 재질과 지글 본을 복구합니다.",
+        ["Select a model in the menu. Save repairs, then spawned NPCs, ragdolls, and matching player models use them automatically."] = "메뉴에서 모델을 선택하세요. 복구를 저장하면 생성된 NPC, 래그돌, 일치하는 플레이어 모델에 자동 적용됩니다.",
+        ["Hide bad materials and disable jiggle bones for Dynamic Model Importer models. Settings are saved server-wide."] = "문제가 있는 재질을 숨기고 Dynamic Model Importer 모델의 지글 본을 비활성화합니다. 설정은 서버 전체에 저장됩니다.",
+        ["Materials"] = "재질",
+        ["Index"] = "인덱스",
+        ["Material"] = "재질",
+        ["Hidden"] = "숨김",
+        ["Hide selected material"] = "선택한 재질 숨기기",
+        ["Restore selected material"] = "선택한 재질 복원",
+        ["Restore all materials"] = "모든 재질 복원",
+        ["Bones"] = "본",
+        ["Bone"] = "본",
+        ["No jiggle"] = "지글 없음",
+        ["Disable selected bone jiggle"] = "선택한 본 지글 비활성화",
+        ["Restore selected bone jiggle"] = "선택한 본 지글 복원",
+        ["Disable all jiggle"] = "모든 지글 비활성화",
+        ["Restore all jiggle"] = "모든 지글 복원",
+        ["Saved repair settings apply to NPCs, ragdolls, and matching player models."] = "저장된 복구 설정은 NPC, 래그돌 및 일치하는 플레이어 모델에 적용됩니다.",
+        ["Select a model first."] = "먼저 모델을 선택하세요.",
+        ["Selected model has no inspectable model path."] = "선택한 모델에 검사할 수 있는 모델 경로가 없습니다.",
+        ["Could not inspect model: %s"] = "모델을 검사할 수 없습니다: %s",
+        ["Loaded repair settings."] = "복구 설정을 불러왔습니다.",
+        ["No material selected."] = "선택한 재질이 없습니다.",
+        ["No bone selected."] = "선택한 본이 없습니다.",
+        ["Target does not match the selected imported model."] = "대상이 선택한 가져온 모델과 일치하지 않습니다.",
+        ["Applied saved repairs to target."] = "저장된 복구를 대상에 적용했습니다.",
+        ["Only admins can save Dynamic Model Importer repairs on this server."] = "관리자만 이 서버에서 Dynamic Model Importer 복구를 저장할 수 있습니다.",
+        ["Saved repairs for: %s"] = "복구 저장됨: %s",
+        ["Hide Material Tool for Imported model"] = "가져온 모델 재질 숨기기 도구",
+        ["Hide materials for any model path using the Dynamic Model Importer invisible material."] = "Dynamic Model Importer 투명 재질을 사용해 모든 모델 경로의 재질을 숨깁니다.",
+        ["Left-click an NPC, ragdoll, or player to select its model."] = "NPC, 래그돌 또는 플레이어를 왼쪽 클릭해 모델을 선택하세요.",
+        ["Right-click an NPC, ragdoll, or player to select its model. Left-click toggles the selected material."] = "NPC, 래그돌 또는 플레이어를 오른쪽 클릭해 모델을 선택하세요. 왼쪽 클릭은 선택한 재질을 전환합니다.",
+        ["Right-click an NPC, ragdoll, or player to select its model. Left-click toggles all jigglebones."] = "NPC, 래그돌 또는 플레이어를 오른쪽 클릭해 모델을 선택하세요. 왼쪽 클릭은 모든 지글본을 전환합니다.",
+        ["Target has no valid model path."] = "대상에 유효한 모델 경로가 없습니다.",
+        ["Selected model: %s"] = "선택한 모델: %s",
+        ["Selected material index"] = "선택한 재질 인덱스",
+        ["Hide current material"] = "현재 재질 숨기기",
+        ["Restore current material"] = "현재 재질 복원",
+        ["Selected material preview"] = "선택한 재질 미리보기",
+        ["Tool Material:"] = "도구 재질:",
+        ["Original Material:"] = "원본 재질:",
+        ["Current Material:"] = "현재 재질:",
+        ["Select an NPC, ragdoll, or player. Saved material hides apply to every entity using the same model path."] = "NPC, 래그돌 또는 플레이어를 선택하세요. 저장된 재질 숨김은 같은 모델 경로를 사용하는 모든 엔티티에 적용됩니다.",
+        ["Selected model path"] = "선택한 모델 경로",
+        ["Select a model by left-clicking an NPC, ragdoll, or player."] = "NPC, 래그돌 또는 플레이어를 왼쪽 클릭해 모델을 선택하세요.",
+        ["Select a model by right-clicking an NPC, ragdoll, or player."] = "NPC, 래그돌 또는 플레이어를 오른쪽 클릭해 모델을 선택하세요.",
+        ["Jigglebone tool for Imported model"] = "가져온 모델 지글본 도구",
+        ["Disable jigglebones for any model path."] = "모든 모델 경로의 지글본을 비활성화합니다.",
+        ["Select an NPC, ragdoll, or player. Saved jigglebone settings apply to every entity using the same model path."] = "NPC, 래그돌 또는 플레이어를 선택하세요. 저장된 지글본 설정은 같은 모델 경로를 사용하는 모든 엔티티에 적용됩니다.",
+        ["Invalid model path."] = "모델 경로가 올바르지 않습니다.",
+        ["Saved repairs for model path: %s"] = "모델 경로 복구 저장됨: %s",
+        ["Spawn model without jigglebone"] = "지글본 없이 모델 생성",
+        ["When enabled, spawned/imported NPCs, ragdolls, and matching PMs will save and use all jigglebones disabled."] = "활성화하면 생성/가져온 NPC, 래그돌 및 일치하는 플레이어 모델이 모든 지글본 비활성화 설정을 저장하고 사용합니다.",
     },
     ["ru"] = {
         ["Model Importer"] = "Импорт моделей",
@@ -171,6 +389,60 @@ DynamicModelImporter.Translations = {
         ["Spawned ragdoll: %s"] = "Рэгдолл создан: %s",
         ["Could not load model manifest."] = "Не удалось загрузить манифест модели.",
         ["Invalid model id."] = "Недопустимый ID модели.",
+        ["Dynamic Model Repair"] = "Ремонт динамических моделей",
+        ["Repair imported model materials and jiggle bones."] = "Исправляет материалы и jiggle-кости импортированных моделей.",
+        ["Select a model in the menu. Save repairs, then spawned NPCs, ragdolls, and matching player models use them automatically."] = "Выберите модель в меню. Сохраните исправления; созданные NPC, рэгдоллы и совпадающие модели игрока будут применять их автоматически.",
+        ["Hide bad materials and disable jiggle bones for Dynamic Model Importer models. Settings are saved server-wide."] = "Скрывает проблемные материалы и отключает jiggle-кости у моделей Dynamic Model Importer. Настройки сохраняются на сервере.",
+        ["Materials"] = "Материалы",
+        ["Index"] = "Индекс",
+        ["Material"] = "Материал",
+        ["Hidden"] = "Скрыт",
+        ["Hide selected material"] = "Скрыть выбранный материал",
+        ["Restore selected material"] = "Восстановить выбранный материал",
+        ["Restore all materials"] = "Восстановить все материалы",
+        ["Bones"] = "Кости",
+        ["Bone"] = "Кость",
+        ["No jiggle"] = "Без jiggle",
+        ["Disable selected bone jiggle"] = "Отключить jiggle выбранной кости",
+        ["Restore selected bone jiggle"] = "Восстановить jiggle выбранной кости",
+        ["Disable all jiggle"] = "Отключить весь jiggle",
+        ["Restore all jiggle"] = "Восстановить весь jiggle",
+        ["Saved repair settings apply to NPCs, ragdolls, and matching player models."] = "Сохраненные настройки исправлений применяются к NPC, рэгдоллам и совпадающим моделям игрока.",
+        ["Select a model first."] = "Сначала выберите модель.",
+        ["Selected model has no inspectable model path."] = "У выбранной модели нет пути для проверки.",
+        ["Could not inspect model: %s"] = "Не удалось проверить модель: %s",
+        ["Loaded repair settings."] = "Настройки исправлений загружены.",
+        ["No material selected."] = "Материал не выбран.",
+        ["No bone selected."] = "Кость не выбрана.",
+        ["Target does not match the selected imported model."] = "Цель не соответствует выбранной импортированной модели.",
+        ["Applied saved repairs to target."] = "Сохраненные исправления применены к цели.",
+        ["Only admins can save Dynamic Model Importer repairs on this server."] = "Только администраторы могут сохранять исправления Dynamic Model Importer на этом сервере.",
+        ["Saved repairs for: %s"] = "Исправления сохранены для: %s",
+        ["Hide Material Tool for Imported model"] = "Инструмент скрытия материалов для импортированной модели",
+        ["Hide materials for any model path using the Dynamic Model Importer invisible material."] = "Скрывает материалы для любого пути модели с помощью невидимого материала Dynamic Model Importer.",
+        ["Left-click an NPC, ragdoll, or player to select its model."] = "Нажмите ЛКМ по NPC, рэгдоллу или игроку, чтобы выбрать его модель.",
+        ["Right-click an NPC, ragdoll, or player to select its model. Left-click toggles the selected material."] = "Нажмите ПКМ по NPC, рэгдоллу или игроку, чтобы выбрать его модель. ЛКМ переключает выбранный материал.",
+        ["Right-click an NPC, ragdoll, or player to select its model. Left-click toggles all jigglebones."] = "Нажмите ПКМ по NPC, рэгдоллу или игроку, чтобы выбрать его модель. ЛКМ переключает все jigglebone.",
+        ["Target has no valid model path."] = "У цели нет допустимого пути модели.",
+        ["Selected model: %s"] = "Выбрана модель: %s",
+        ["Selected material index"] = "Индекс выбранного материала",
+        ["Hide current material"] = "Скрыть текущий материал",
+        ["Restore current material"] = "Восстановить текущий материал",
+        ["Selected material preview"] = "Предпросмотр выбранного материала",
+        ["Tool Material:"] = "Материал инструмента:",
+        ["Original Material:"] = "Исходный материал:",
+        ["Current Material:"] = "Текущий материал:",
+        ["Select an NPC, ragdoll, or player. Saved material hides apply to every entity using the same model path."] = "Выберите NPC, рэгдолл или игрока. Сохраненные скрытия материалов применяются ко всем сущностям с тем же путем модели.",
+        ["Selected model path"] = "Выбранный путь модели",
+        ["Select a model by left-clicking an NPC, ragdoll, or player."] = "Выберите модель, нажав ЛКМ по NPC, рэгдоллу или игроку.",
+        ["Select a model by right-clicking an NPC, ragdoll, or player."] = "Выберите модель, нажав ПКМ по NPC, рэгдоллу или игроку.",
+        ["Jigglebone tool for Imported model"] = "Инструмент jigglebone для импортированной модели",
+        ["Disable jigglebones for any model path."] = "Отключает jigglebone для любого пути модели.",
+        ["Select an NPC, ragdoll, or player. Saved jigglebone settings apply to every entity using the same model path."] = "Выберите NPC, рэгдолл или игрока. Сохраненные настройки jigglebone применяются ко всем сущностям с тем же путем модели.",
+        ["Invalid model path."] = "Недопустимый путь модели.",
+        ["Saved repairs for model path: %s"] = "Исправления сохранены для пути модели: %s",
+        ["Spawn model without jigglebone"] = "Создавать модель без jigglebone",
+        ["When enabled, spawned/imported NPCs, ragdolls, and matching PMs will save and use all jigglebones disabled."] = "Если включено, созданные/импортированные NPC, рэгдоллы и совпадающие модели игрока сохранят и будут использовать отключенные jigglebone.",
     },
 }
 
@@ -409,8 +681,353 @@ local function valid_model_for_spawn(modelPath)
     return file.Exists(modelPath, "GAME")
 end
 
+local function sanitize_submaterial_index(value)
+    local index = tonumber(value)
+    if not index then return nil end
+    index = math.floor(index)
+    if index < 0 or index > 255 then return nil end
+    return index
+end
+
+local function sanitize_bone_name(value)
+    value = trim(value)
+    value = value:gsub("[%c]", "")
+    if value == "" then return nil end
+    return string.sub(value, 1, 128)
+end
+
+function DynamicModelImporter.NormalizeOverrideModelPath(raw)
+    local modelPath = DynamicModelImporter.NormalizeModelPath(raw or "")
+    if not modelPath then return nil end
+    return string.lower(modelPath)
+end
+
+function DynamicModelImporter.EntityModelPath(ent)
+    if not IsValid(ent) or not ent.GetModel then return nil end
+    return DynamicModelImporter.NormalizeOverrideModelPath(ent:GetModel() or "")
+end
+
+function DynamicModelImporter.EmptyModelOverride()
+    return {
+        hidden_submaterials = {},
+        no_jiggle = {
+            all = false,
+            bones = {},
+        },
+    }
+end
+
+function DynamicModelImporter.SanitizeModelOverride(raw)
+    raw = istable(raw) and raw or {}
+    local result = DynamicModelImporter.EmptyModelOverride()
+    local hidden = istable(raw.hidden_submaterials) and raw.hidden_submaterials or {}
+    for key, value in pairs(hidden) do
+        local index = sanitize_submaterial_index(key)
+        if index and value ~= false and value ~= nil and tostring(value) ~= "" then
+            result.hidden_submaterials[tostring(index)] = DynamicModelImporter.InvisibleMaterialPath
+        end
+    end
+
+    local noJiggle = istable(raw.no_jiggle) and raw.no_jiggle or {}
+    result.no_jiggle.all = tobool(noJiggle.all)
+    if not result.no_jiggle.all and istable(noJiggle.bones) then
+        for key, value in pairs(noJiggle.bones) do
+            local boneName
+            if isnumber(key) and isstring(value) then
+                boneName = sanitize_bone_name(value)
+            elseif value ~= false and value ~= nil then
+                boneName = sanitize_bone_name(key)
+            end
+            if boneName then
+                result.no_jiggle.bones[boneName] = true
+            end
+        end
+    end
+    return result
+end
+
+function DynamicModelImporter.ModelOverrideIsEmpty(override)
+    override = DynamicModelImporter.SanitizeModelOverride(override)
+    if next(override.hidden_submaterials) then return false end
+    if override.no_jiggle.all then return false end
+    if next(override.no_jiggle.bones) then return false end
+    return true
+end
+
+function DynamicModelImporter.MergeModelOverrides(base, incoming)
+    base = DynamicModelImporter.SanitizeModelOverride(base)
+    incoming = DynamicModelImporter.SanitizeModelOverride(incoming)
+    for key, value in pairs(incoming.hidden_submaterials) do
+        base.hidden_submaterials[key] = value
+    end
+    if incoming.no_jiggle.all then
+        base.no_jiggle.all = true
+        base.no_jiggle.bones = {}
+    elseif not base.no_jiggle.all then
+        for key, value in pairs(incoming.no_jiggle.bones) do
+            base.no_jiggle.bones[key] = value
+        end
+    end
+    return base
+end
+
+local function normalized_manifest_paths(manifest)
+    if not istable(manifest) then return {} end
+    local paths = {}
+    local modelPath = DynamicModelImporter.NormalizeOverrideModelPath(manifest.model_path or "")
+    local playerPath = DynamicModelImporter.NormalizeOverrideModelPath(manifest.player_model_path or "")
+    if modelPath then paths[modelPath] = true end
+    if playerPath then paths[playerPath] = true end
+    return paths
+end
+
+function DynamicModelImporter.EntityMatchesManifest(ent, manifest)
+    local modelPath = DynamicModelImporter.EntityModelPath(ent)
+    if not modelPath then return false end
+    return normalized_manifest_paths(manifest)[modelPath] == true
+end
+
+function DynamicModelImporter.FindManifestForModelPath(modelPath)
+    modelPath = DynamicModelImporter.NormalizeOverrideModelPath(modelPath or "")
+    if not modelPath then return nil end
+    for _, entry in ipairs(DynamicModelImporter.ListAvailableModels() or {}) do
+        if normalized_manifest_paths(entry)[modelPath] then
+            return entry
+        end
+    end
+    return nil
+end
+
+function DynamicModelImporter.ManifestModelPaths(manifest)
+    local results = {}
+    local seen = {}
+    for path in pairs(normalized_manifest_paths(manifest)) do
+        if not seen[path] then
+            seen[path] = true
+            results[#results + 1] = path
+        end
+    end
+    table.sort(results)
+    return results
+end
+
+local function lookup_bone_case_insensitive(ent, boneName)
+    if not IsValid(ent) or not ent.LookupBone then return nil end
+    local index = ent:LookupBone(boneName)
+    if isnumber(index) and index >= 0 then return index end
+    if not ent.GetBoneCount or not ent.GetBoneName then return nil end
+    local wanted = string.lower(tostring(boneName or ""))
+    for i = 0, math.max((ent:GetBoneCount() or 0) - 1, -1) do
+        if string.lower(tostring(ent:GetBoneName(i) or "")) == wanted then
+            return i
+        end
+    end
+    return nil
+end
+
+function DynamicModelImporter.ApplyOverrideToEntity(ent, override)
+    if not IsValid(ent) then return false end
+    override = DynamicModelImporter.SanitizeModelOverride(override)
+
+    if ent.GetMaterials and ent.SetSubMaterial then
+        local materialCount = #(ent:GetMaterials() or {})
+        local activeHidden = {}
+        local previousHidden = ent.DynamicModelImporterHiddenSubmaterials or {}
+        for key in pairs(previousHidden) do
+            if not override.hidden_submaterials[key] then
+                ent:SetSubMaterial(tonumber(key) or 0, "")
+            end
+        end
+        for key in pairs(override.hidden_submaterials) do
+            local index = sanitize_submaterial_index(key)
+            if index and index < materialCount then
+                ent:SetSubMaterial(index, DynamicModelImporter.InvisibleMaterialPath)
+                activeHidden[tostring(index)] = true
+            end
+        end
+        ent.DynamicModelImporterHiddenSubmaterials = next(activeHidden) and activeHidden or nil
+    end
+
+    if ent.ManipulateBoneJiggle and ent.GetBoneCount then
+        local targetBones = {}
+        local boneCount = ent:GetBoneCount() or 0
+        if override.no_jiggle.all then
+            for i = 0, math.max(boneCount - 1, -1) do
+                targetBones[tostring(i)] = true
+            end
+        else
+            for boneName in pairs(override.no_jiggle.bones) do
+                local index = lookup_bone_case_insensitive(ent, boneName)
+                if index then
+                    targetBones[tostring(index)] = true
+                end
+            end
+        end
+
+        local previousBones = ent.DynamicModelImporterNoJiggleBones or {}
+        for key in pairs(previousBones) do
+            if not targetBones[key] then
+                ent:ManipulateBoneJiggle(tonumber(key) or 0, 0)
+            end
+        end
+        for key in pairs(targetBones) do
+            ent:ManipulateBoneJiggle(tonumber(key) or 0, 2)
+        end
+        ent.DynamicModelImporterNoJiggleBones = next(targetBones) and targetBones or nil
+    end
+
+    return true
+end
+
 if SERVER then
-    local function chat(ply, message, ...)
+    local modelOverrideCache
+
+    function DynamicModelImporter.CanEditOverrides(ply)
+        if not IsValid(ply) then return false end
+        if game.SinglePlayer and game.SinglePlayer() then return true end
+        if ply.IsListenServerHost and ply:IsListenServerHost() then return true end
+        return ply:IsAdmin()
+    end
+
+    function DynamicModelImporter.LoadModelOverrides()
+        if modelOverrideCache then return modelOverrideCache end
+        local parsed
+        local raw = file.Read(DynamicModelImporter.OverrideDataPath, "DATA")
+        if raw then
+            parsed = util.JSONToTable(raw, true, true)
+        end
+        modelOverrideCache = {
+            version = 2,
+            model_paths = {},
+        }
+
+        local function add_path_override(modelPath, override)
+            local safePath = DynamicModelImporter.NormalizeOverrideModelPath(modelPath)
+            if not safePath then return end
+            local sanitized = DynamicModelImporter.SanitizeModelOverride(override)
+            if DynamicModelImporter.ModelOverrideIsEmpty(sanitized) then return end
+            modelOverrideCache.model_paths[safePath] = DynamicModelImporter.MergeModelOverrides(modelOverrideCache.model_paths[safePath], sanitized)
+        end
+
+        if istable(parsed) and istable(parsed.model_paths) then
+            for modelPath, override in pairs(parsed.model_paths) do
+                add_path_override(modelPath, override)
+            end
+        end
+
+        if istable(parsed) and istable(parsed.models) then
+            for modelID, override in pairs(parsed.models) do
+                local directPath = DynamicModelImporter.NormalizeOverrideModelPath(modelID)
+                if directPath then
+                    add_path_override(directPath, override)
+                else
+                    local safeID = DynamicModelImporter.NormalizeID(modelID)
+                    if safeID then
+                        local manifest = DynamicModelImporter.LoadManifest(safeID)
+                        if manifest then
+                            for _, modelPath in ipairs(DynamicModelImporter.ManifestModelPaths(manifest)) do
+                                add_path_override(modelPath, override)
+                            end
+                        end
+                    end
+                end
+            end
+        end
+        return modelOverrideCache
+    end
+
+    function DynamicModelImporter.SaveModelOverrides()
+        local data = DynamicModelImporter.LoadModelOverrides()
+        file.CreateDir("dynamic_model_importer")
+        file.Write(DynamicModelImporter.OverrideDataPath, util.TableToJSON(data, true) or "{}")
+    end
+
+    function DynamicModelImporter.GetModelPathOverride(modelPath)
+        local safePath = DynamicModelImporter.NormalizeOverrideModelPath(modelPath)
+        if not safePath then return DynamicModelImporter.EmptyModelOverride() end
+        local data = DynamicModelImporter.LoadModelOverrides()
+        return DynamicModelImporter.SanitizeModelOverride(data.model_paths[safePath])
+    end
+
+    function DynamicModelImporter.SetModelPathOverride(modelPath, override)
+        local safePath = DynamicModelImporter.NormalizeOverrideModelPath(modelPath)
+        if not safePath then return nil, "Invalid model path." end
+        local data = DynamicModelImporter.LoadModelOverrides()
+        local sanitized = DynamicModelImporter.SanitizeModelOverride(override)
+        if DynamicModelImporter.ModelOverrideIsEmpty(sanitized) then
+            data.model_paths[safePath] = nil
+        else
+            data.model_paths[safePath] = sanitized
+        end
+        DynamicModelImporter.SaveModelOverrides()
+        return DynamicModelImporter.GetModelPathOverride(safePath)
+    end
+
+    function DynamicModelImporter.GetModelOverride(modelID)
+        local manifest = DynamicModelImporter.LoadManifest(modelID)
+        if not manifest then return DynamicModelImporter.EmptyModelOverride() end
+        return DynamicModelImporter.GetModelPathOverride(manifest.model_path)
+    end
+
+    function DynamicModelImporter.SetModelOverride(modelID, override)
+        local manifest = DynamicModelImporter.LoadManifest(modelID)
+        if not manifest then return nil, "Invalid model id." end
+        local saved
+        for _, modelPath in ipairs(DynamicModelImporter.ManifestModelPaths(manifest)) do
+            saved = DynamicModelImporter.SetModelPathOverride(modelPath, override)
+        end
+        return saved or DynamicModelImporter.EmptyModelOverride()
+    end
+
+    function DynamicModelImporter.EnsureNoJiggleForModelPath(modelPath)
+        local current = DynamicModelImporter.GetModelPathOverride(modelPath)
+        current.no_jiggle.all = true
+        current.no_jiggle.bones = {}
+        return DynamicModelImporter.SetModelPathOverride(modelPath, current)
+    end
+
+    function DynamicModelImporter.EnsureNoJiggleForManifest(manifest)
+        if not istable(manifest) then return end
+        for _, modelPath in ipairs(DynamicModelImporter.ManifestModelPaths(manifest)) do
+            DynamicModelImporter.EnsureNoJiggleForModelPath(modelPath)
+        end
+    end
+
+    function DynamicModelImporter.ApplySavedOverrideToEntity(ent, manifest)
+        if not IsValid(ent) then return false end
+        return DynamicModelImporter.ApplyOverrideToEntity(ent, DynamicModelImporter.GetModelPathOverride(DynamicModelImporter.EntityModelPath(ent)))
+    end
+
+    function DynamicModelImporter.ApplySavedOverrideForEntityModel(ent)
+        if not IsValid(ent) then return false end
+        return DynamicModelImporter.ApplySavedOverrideToEntity(ent)
+    end
+
+    function DynamicModelImporter.ApplySavedOverridesForModelPath(modelPath)
+        local safePath = DynamicModelImporter.NormalizeOverrideModelPath(modelPath)
+        if not safePath then return 0 end
+        local applied = 0
+        for _, ent in ipairs(ents.GetAll() or {}) do
+            if DynamicModelImporter.EntityModelPath(ent) == safePath then
+                if DynamicModelImporter.ApplySavedOverrideToEntity(ent) then
+                    applied = applied + 1
+                end
+            end
+        end
+        return applied
+    end
+
+    function DynamicModelImporter.ApplySavedOverridesForModel(modelID)
+        local manifest = DynamicModelImporter.LoadManifest(modelID)
+        if not manifest then return 0 end
+        local applied = 0
+        for _, modelPath in ipairs(DynamicModelImporter.ManifestModelPaths(manifest)) do
+            applied = applied + DynamicModelImporter.ApplySavedOverridesForModelPath(modelPath)
+        end
+        return applied
+    end
+
+    function DynamicModelImporter.Chat(ply, message, ...)
         if IsValid(ply) then
             local args = {...}
             if net then
@@ -425,6 +1042,10 @@ if SERVER then
                 ply:ChatPrint("[Dynamic Model Importer] " .. DynamicModelImporter.LF(message, unpack(args)))
             end
         end
+    end
+
+    local function chat(ply, message, ...)
+        DynamicModelImporter.Chat(ply, message, ...)
     end
 
     local function apply_npc_relationship(npc, ply, relation)
@@ -484,6 +1105,7 @@ if SERVER then
         ent:Activate()
         ent:SetHealth(health)
         if ent.SetMaxHealth then ent:SetMaxHealth(health) end
+        DynamicModelImporter.ApplySavedOverrideToEntity(ent, manifest)
         if weapon ~= "" and ent.Give then
             pcall(function() ent:Give(weapon) end)
         end
@@ -515,6 +1137,7 @@ if SERVER then
         ent:SetModel(modelPath)
         ent:Spawn()
         ent:Activate()
+        DynamicModelImporter.ApplySavedOverrideToEntity(ent, manifest)
         local phys = ent:GetPhysicsObject()
         if IsValid(phys) then phys:Wake() end
         undo.Create("Dynamic Model Importer Ragdoll")
@@ -526,11 +1149,14 @@ if SERVER then
         return true
     end
 
-    function DynamicModelImporter.SpawnFromRequest(ply, modelID, action, relation, health, weapon, trace)
+    function DynamicModelImporter.SpawnFromRequest(ply, modelID, action, relation, health, weapon, trace, spawnNoJiggle)
         local manifest, err = DynamicModelImporter.LoadManifest(modelID)
         if not manifest then
             chat(ply, err or "Could not load model manifest.")
             return false
+        end
+        if tobool(spawnNoJiggle) then
+            DynamicModelImporter.EnsureNoJiggleForManifest(manifest)
         end
         action = string.lower(tostring(action or "npc"))
         relation = sanitize_relation(relation)
@@ -546,4 +1172,27 @@ if SERVER then
         end
         return spawn_npc(ply, manifest, relation, health, weapon, trace)
     end
+
+    local function apply_player_model_overrides(ply)
+        if not IsValid(ply) then return end
+        if tobool(ply:GetInfo("dynamic_model_importer_spawn_no_jiggle")) then
+            local manifest = DynamicModelImporter.FindManifestForModelPath(ply:GetModel() or "")
+            if manifest then
+                DynamicModelImporter.EnsureNoJiggleForManifest(manifest)
+            end
+        end
+        DynamicModelImporter.ApplySavedOverrideForEntityModel(ply)
+    end
+
+    hook.Add("PlayerSpawn", "DynamicModelImporterApplyPlayerOverrides", function(ply)
+        timer.Simple(0, function()
+            apply_player_model_overrides(ply)
+        end)
+    end)
+
+    hook.Add("PlayerSetModel", "DynamicModelImporterApplyPlayerSetModelOverrides", function(ply)
+        timer.Simple(0, function()
+            apply_player_model_overrides(ply)
+        end)
+    end)
 end

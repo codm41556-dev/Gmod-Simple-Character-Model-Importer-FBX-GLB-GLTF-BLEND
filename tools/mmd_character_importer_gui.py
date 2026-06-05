@@ -109,7 +109,8 @@ UPDATE_LATEST_RELEASE_API_URL = (
 )
 CONTACT_AUTHOR_URL = "https://steamcommunity.com/profiles/76561198282841113"
 YOUTUBE_TUTORIAL_URL = "https://www.youtube.com/watch?v=QlEMr2EG-gM"
-BILIBILI_TUTORIAL_URL = "https://space.bilibili.com/34378776"
+BILIBILI_TUTORIAL_URL = "https://www.bilibili.com/video/BV1gb7r6jErr"
+STEAM_WORKSHOP_ADDON_URL = "https://steamcommunity.com/sharedfiles/filedetails/?id=3738916298"
 REPORT_ISSUE_URL = "https://github.com/SheepyLord/Gmod-Simple-Character-Model-Importer/issues"
 UPDATE_CHECK_TIMEOUT_SECONDS = 8
 UPDATE_OUTDATED_GRACE = timedelta(hours=1)
@@ -3216,6 +3217,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
             "main_contact_author_button": self._t("main.contact_author", "Contact author"),
             "main_youtube_tutorial_button": self._t("main.watch_tutorial_youtube", "Watch Tutorial on Youtube"),
             "main_bilibili_tutorial_button": self._t("main.watch_tutorial_bilibili", "Watch Tutorial on Bilibili"),
+            "main_steam_workshop_button": self._t("main.subscribe_steam_workshop", "Subscribe to Steam Workshop Addon"),
             "main_report_issue_button": self._t("main.report_issue", "Report Issue"),
         }
         for attr, text in button_texts.items():
@@ -4059,12 +4061,15 @@ class ImporterWindow(QtWidgets.QMainWindow):
         self.main_youtube_tutorial_button.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_MediaPlay))
         self.main_bilibili_tutorial_button = QtWidgets.QPushButton("Watch Tutorial on Bilibili")
         self.main_bilibili_tutorial_button.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_MediaPlay))
+        self.main_steam_workshop_button = QtWidgets.QPushButton("Subscribe to Steam Workshop Addon")
+        self.main_steam_workshop_button.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_DialogApplyButton))
         self.main_report_issue_button = QtWidgets.QPushButton("Report Issue")
         self.main_report_issue_button.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_MessageBoxWarning))
         external_buttons = [
             self.main_contact_author_button,
             self.main_youtube_tutorial_button,
             self.main_bilibili_tutorial_button,
+            self.main_steam_workshop_button,
             self.main_report_issue_button,
         ]
         for button in external_buttons:
@@ -4073,6 +4078,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
         external_links_layout.addWidget(self.main_youtube_tutorial_button, 0, 1)
         external_links_layout.addWidget(self.main_bilibili_tutorial_button, 1, 0)
         external_links_layout.addWidget(self.main_report_issue_button, 1, 1)
+        external_links_layout.addWidget(self.main_steam_workshop_button, 2, 0, 1, 2)
         external_links_layout.setColumnStretch(0, 1)
         external_links_layout.setColumnStretch(1, 1)
         layout.addLayout(external_links_layout)
@@ -4332,6 +4338,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
         self.main_contact_author_button.clicked.connect(lambda: self.open_external_url(CONTACT_AUTHOR_URL))
         self.main_youtube_tutorial_button.clicked.connect(lambda: self.open_external_url(YOUTUBE_TUTORIAL_URL))
         self.main_bilibili_tutorial_button.clicked.connect(lambda: self.open_external_url(BILIBILI_TUTORIAL_URL))
+        self.main_steam_workshop_button.clicked.connect(lambda: self.open_external_url(STEAM_WORKSHOP_ADDON_URL))
         self.main_report_issue_button.clicked.connect(lambda: self.open_external_url(REPORT_ISSUE_URL))
         self.main_category_edit.editingFinished.connect(self.save_settings)
         self.main_category_display_edit.editingFinished.connect(self.save_settings)

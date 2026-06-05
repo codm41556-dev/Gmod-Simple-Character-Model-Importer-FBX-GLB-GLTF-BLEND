@@ -15,6 +15,7 @@ TOOL.ClientConVar = {
     relation = "friendly",
     health = "100",
     weapon = "weapon_smg1",
+    spawn_no_jiggle = "0",
 }
 
 local function L(raw)
@@ -43,7 +44,8 @@ function TOOL:LeftClick(trace)
         self:GetClientInfo("relation"),
         tonumber(self:GetClientInfo("health")) or 100,
         self:GetClientInfo("weapon"),
-        trace
+        trace,
+        self:GetClientNumber("spawn_no_jiggle", 0) ~= 0
     )
 end
 
@@ -58,7 +60,8 @@ function TOOL:RightClick(trace)
         self:GetClientInfo("relation"),
         tonumber(self:GetClientInfo("health")) or 100,
         self:GetClientInfo("weapon"),
-        trace
+        trace,
+        self:GetClientNumber("spawn_no_jiggle", 0) ~= 0
     )
 end
 
@@ -123,6 +126,21 @@ function TOOL.BuildCPanel(panel)
     panel:AddItem(relation)
 
     panel:NumSlider(L("NPC health"), "dynamic_model_importer_health", 1, 9999, 0)
+
+    local noJiggleColor = Color(255, 150, 0)
+    local noJiggle = vgui.Create("DCheckBoxLabel")
+    noJiggle:SetText(L("Spawn model without jigglebone"))
+    if noJiggle.SetTextColor then
+        noJiggle:SetTextColor(noJiggleColor)
+    end
+    if IsValid(noJiggle.Label) then
+        noJiggle.Label:SetTextColor(noJiggleColor)
+    end
+    noJiggle:SetConVar("dynamic_model_importer_spawn_no_jiggle")
+    noJiggle:SetValue(convar_string("dynamic_model_importer_spawn_no_jiggle", "0") == "1" and 1 or 0)
+    noJiggle:SizeToContents()
+    noJiggle:SetTooltip(L("When enabled, spawned/imported NPCs, ragdolls, and matching PMs will save and use all jigglebones disabled."))
+    panel:AddItem(noJiggle)
 
     local weapon = vgui.Create("DComboBox")
     weapon:SetTall(22)

@@ -1,0 +1,8 @@
+UnlitGeneric
+{
+    "$no_draw" "1"
+    "$translucent" "1"
+    "$alpha" "0"
+    "$basetexture" "dynamic_model_importer/invisible"
+    "%keywords" "Dynamic Model Importer Invisible"
+}
