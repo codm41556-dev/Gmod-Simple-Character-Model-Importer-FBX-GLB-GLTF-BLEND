@@ -1038,6 +1038,7 @@ def run_process_streamed(
             env=env,
         )
         assert process.stdout is not None
+        cancelled = False
         while True:
             if cancel_check and cancel_check():
                 process.terminate()
@@ -1045,7 +1046,8 @@ def run_process_streamed(
                     process.wait(timeout=10)
                 except subprocess.TimeoutExpired:
                     process.kill()
-                raise RuntimeError("operation was cancelled")
+                cancelled = True
+                break
 
             line = process.stdout.readline()
             if line:
@@ -1064,6 +1066,8 @@ def run_process_streamed(
 
         return_code = process.wait()
     output = "\n".join(output_lines)
+    if cancelled:
+        raise RuntimeError("operation was cancelled")
     if return_code != 0:
         raise RuntimeError(f"process failed with exit code {return_code}\n{' '.join(command)}\n{output}")
     return output
@@ -1126,6 +1130,89 @@ def log_tail(path: Path, max_lines: int = 80) -> str:
     return "\n".join(lines[-max_lines:])
 
 
+def _find_steam_dir() -> Path | None:
+    """Detect the Steam installation directory on Windows."""
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, r"Software\\Valve\\Steam") as key:
+            steam_path, _ = winreg.QueryValueEx(key, "SteamPath")
+            if steam_path and Path(steam_path).exists():
+                return Path(steam_path)
+    except Exception:
+        pass
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, r"Software\\Valve\\Steam") as key:
+            steam_path, _ = winreg.QueryValueEx(key, "InstallPath")
+            if steam_path and Path(steam_path).exists():
+                return Path(steam_path)
+    except Exception:
+        pass
+    for candidate in (
+        Path("C:/Program Files (x86)/Steam"),
+        Path("C:/Program Files/Steam"),
+    ):
+        if candidate.exists():
+            return candidate
+    return None
+
+
+def _find_steam_library_folders(steam_dir: Path) -> list[Path]:
+    """Return all Steam library folders from libraryfolders.vdf."""
+    libraries: list[Path] = [steam_dir]
+    vdf = steam_dir / "steamapps" / "libraryfolders.vdf"
+    if not vdf.exists():
+        return libraries
+    try:
+        text = vdf.read_text(encoding="utf-8", errors="ignore")
+        for match in re.finditer(r'"path"\\s+"([^"]+)"', text):
+            lib = Path(match.group(1).replace("\\\\", "\\"))
+            if lib.exists():
+                libraries.append(lib)
+    except Exception:
+        pass
+    return libraries
+
+
+def _find_system_blender() -> Path | None:
+    """Search for an existing Blender 4.5.x installation on the system."""
+    # Check PATH
+    for exe_name in ("blender.exe", "blender"):
+        path_exe = shutil.which(exe_name)
+        if path_exe:
+            candidate = Path(path_exe)
+            try:
+                ver = blender_version(candidate)
+                if parse_version_tuple(ver)[:2] == (4, 5):
+                    return candidate
+            except Exception:
+                pass
+    # Common Windows install locations
+    program_files = os.environ.get("ProgramFiles", "C:\\Program Files")
+    program_files_x86 = os.environ.get("ProgramFiles(x86)", "C:\\Program Files (x86)")
+    local_appdata = os.environ.get("LOCALAPPDATA", "")
+    search_roots: list[Path] = []
+    for base in (program_files, program_files_x86, local_appdata):
+        if base:
+            search_roots.append(Path(base) / "Blender Foundation")
+    # Steam Blender
+    steam_path = _find_steam_dir()
+    if steam_path:
+        for lib in _find_steam_library_folders(steam_path):
+            search_roots.append(lib / "steamapps" / "common")
+    for root in search_roots:
+        if not root.exists():
+            continue
+        for candidate in root.rglob("blender.exe"):
+            try:
+                ver = blender_version(candidate)
+                if parse_version_tuple(ver)[:2] == (4, 5):
+                    return candidate
+            except Exception:
+                pass
+    return None
+
+
 def ensure_portable_blender(progress: ProgressCallback | None = None) -> SetupResult:
     state = read_setup_state()
     state_blender = setup_state_is_current(state)
@@ -1149,6 +1236,11 @@ def ensure_portable_blender(progress: ProgressCallback | None = None) -> SetupRe
                     emit(progress, f"Reusing existing Blender for setup repair: {candidate}")
             except Exception:
                 reusable_blender = None
+    if reusable_blender is None:
+        system_blender = _find_system_blender()
+        if system_blender:
+            reusable_blender = system_blender
+            emit(progress, f"Using system Blender: {system_blender}")
     if reusable_blender is None:
         zip_path = blender_zip_path(progress)
         blender = extract_blender(zip_path, progress)
@@ -1501,7 +1593,7 @@ def analyze_pmx(pmx_path: Path, source_dir: Path | None = None) -> PmxAnalysis:
     return analysis
 
 
-def build_workspace(pmx_path: Path, source_dir: Path, analysis: PmxAnalysis | None = None) -> Workspace:
+def build_workspace(pmx_path: Path, source_dir: Path, analysis: PmxAnalysis | None = None, workspace_root: Path | None = None) -> Workspace:
     source_dir = source_dir.resolve()
     pmx_path = pmx_path.resolve()
     if analysis is None:
@@ -1509,7 +1601,7 @@ def build_workspace(pmx_path: Path, source_dir: Path, analysis: PmxAnalysis | No
     model_label = analysis.model_name_english or analysis.model_name or pmx_path.stem
     slug = slugify(model_label)
     digest = file_sha1(pmx_path)[:10]
-    root = workspaces_root() / f"{slug}_{digest}"
+    root = (workspace_root or workspaces_root()) / f"{slug}_{digest}"
     source_assets_dir = root / "0_source_mmd_assets"
     import_dir = root / "1_import_mmd_model"
     fix_dir = root / "2_fix_model_source_skeleton"
@@ -1903,9 +1995,10 @@ def import_pmx_to_blender(
     source_dir: Path,
     progress: ProgressCallback | None = None,
     cancel_check: CancelCheck | None = None,
+    workspace_root: Path | None = None,
 ) -> ImportResult:
     analysis = analyze_pmx(pmx_path, source_dir)
-    workspace = build_workspace(pmx_path, source_dir, analysis)
+    workspace = build_workspace(pmx_path, source_dir, analysis, workspace_root=workspace_root)
     workspace.import_dir.mkdir(parents=True, exist_ok=True)
     workspace.preflight_report_path.write_text(analysis.to_json(), encoding="utf-8")
 

@@ -100,7 +100,7 @@ DISPLAY_NAME_ALLOWED_RE = re.compile(r"^[A-Za-z_ ]*$")
 DISPLAY_NAME_UNSAFE_RE = re.compile(r"[^A-Za-z_ ]+")
 CATEGORY_DISPLAY_ALLOWED_RE = re.compile(r"^[\x20-\x7E]*$")
 CATEGORY_DISPLAY_UNSAFE_RE = re.compile(r"[^\x20-\x7E]+")
-VRD_INTENSITY_DEFAULTS = {10: 1.0, 20: 0.75, 30: 0.42}
+VRD_INTENSITY_DEFAULTS = {10: 1.0, 20: 0.7, 30: 0.42}
 VRD_WEIGHT_FRAMES = (10, 20, 30)
 VRD_WEIGHT_COLUMNS = {10: 4, 20: 5, 30: 6}
 UPDATE_RELEASES_PAGE_URL = "https://github.com/SheepyLord/Gmod-Simple-Character-Model-Importer/releases"
@@ -492,10 +492,11 @@ class ImportWorker(QtCore.QThread):
     done = QtCore.Signal(dict)
     failed = QtCore.Signal(str)
 
-    def __init__(self, pmx_path: str, source_dir: str) -> None:
+    def __init__(self, pmx_path: str, source_dir: str, workspace_root: str = "") -> None:
         super().__init__()
         self.pmx_path = pmx_path
         self.source_dir = source_dir
+        self.workspace_root = workspace_root
         self.cancel_requested = False
 
     def cancel(self) -> None:
@@ -514,6 +515,7 @@ class ImportWorker(QtCore.QThread):
                 Path(self.source_dir),
                 progress=self._log,
                 cancel_check=self._cancelled,
+                workspace_root=Path(self.workspace_root) if self.workspace_root else None,
             )
             self.done.emit(
                 {
@@ -2026,6 +2028,7 @@ class FullImportWorker(QtCore.QThread):
         distribution_output_dir: str,
         bodygroup_vertex_limit: int = int(getattr(core, "DEFAULT_BODYGROUP_VERTEX_LIMIT", 65535)),
         clear_custom_normals: bool = False,
+        workspace_root: str = "",
     ) -> None:
         super().__init__()
         self.pmx_path = Path(pmx_path)
@@ -2038,6 +2041,7 @@ class FullImportWorker(QtCore.QThread):
         self.distribution_output_dir = distribution_output_dir
         self.bodygroup_vertex_limit = int(bodygroup_vertex_limit or getattr(core, "DEFAULT_BODYGROUP_VERTEX_LIMIT", 65535))
         self.clear_custom_normals = bool(clear_custom_normals)
+        self.workspace_root = workspace_root
         self.cancel_requested = False
         self.step_results: dict[int, dict[str, object]] = {}
         self.optional_warnings: list[str] = []
@@ -2113,6 +2117,7 @@ class FullImportWorker(QtCore.QThread):
                 self.source_dir,
                 progress=self._log,
                 cancel_check=self._cancelled,
+                workspace_root=Path(self.workspace_root) if self.workspace_root else None,
             )
             workspace = import_result.workspace
             self._write_marker(
@@ -2282,8 +2287,8 @@ class FullImportWorker(QtCore.QThread):
                 cancel_check=self._cancelled,
             )
             qc_plan = qc_analysis.plan
-            qc_plan["auto_porting"] = True
             qc_plan["author"] = "sheepylord"
+            qc_plan["auto_porting"] = True
             qc_plan["character_category"] = self.character_category
             if self.model_name:
                 qc_plan["model_name"] = self.model_name
@@ -2406,7 +2411,7 @@ class WorkspaceCleanupWorker(QtCore.QThread):
                         failures.append(f"Skipped path outside workspace root: {child}")
                         continue
                     if child.is_dir() and not child.is_symlink():
-                        shutil.rmtree(child)
+                        shutil.rmtree(child, onerror=self._on_rmtree_error)
                     else:
                         child.unlink(missing_ok=True)
                     removed += 1
@@ -2415,6 +2420,14 @@ class WorkspaceCleanupWorker(QtCore.QThread):
             self.done.emit({"removed": removed, "failures": failures})
         except Exception as exc:
             self.failed.emit(str(exc))
+
+    def _on_rmtree_error(self, func, path, exc_info) -> None:
+        import stat
+        try:
+            os.chmod(path, stat.S_IWUSR)
+            func(path)
+        except Exception:
+            pass
 
 
 class ReleaseAnalyzeWorker(QtCore.QThread):
@@ -4206,8 +4219,10 @@ class ImporterWindow(QtWidgets.QMainWindow):
         layout.addLayout(pmx_layout)
 
         self.main_workspace_edit = QtWidgets.QLineEdit()
-        self.main_workspace_edit.setReadOnly(True)
         self.main_workspace_edit.setPlaceholderText(str(core.workspaces_root()))
+        self.main_workspace_browse_button = QtWidgets.QPushButton("Browse")
+        self.main_workspace_browse_button.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_DirOpenIcon))
+        self.main_workspace_browse_button.clicked.connect(self.browse_main_workspace)
         self.main_gmod_row = PathRow(
             "GMod / StudioMDL",
             "file",
@@ -4244,8 +4259,11 @@ class ImporterWindow(QtWidgets.QMainWindow):
             "rtx_vertex_limit": QtWidgets.QLabel("RTX vertex limit"),
             "clear_custom_normals": QtWidgets.QLabel("Custom normals"),
         }
+        main_workspace_row = QtWidgets.QHBoxLayout()
+        main_workspace_row.addWidget(self.main_workspace_edit, 1)
+        main_workspace_row.addWidget(self.main_workspace_browse_button, 0)
         form = QtWidgets.QFormLayout()
-        form.addRow(self.main_form_labels["workspace"], self.main_workspace_edit)
+        form.addRow(self.main_form_labels["workspace"], main_workspace_row)
         form.addRow(self.main_form_labels["category_internal"], self.main_category_edit)
         form.addRow(self.main_form_labels["category_display"], self.main_category_display_edit)
         form.addRow(self.main_form_labels["character_internal"], self.main_model_name_edit)
@@ -4474,10 +4492,15 @@ class ImporterWindow(QtWidgets.QMainWindow):
         layout.addLayout(pmx_layout)
 
         self.workspace_edit = QtWidgets.QLineEdit()
-        self.workspace_edit.setReadOnly(True)
         self.workspace_edit.setPlaceholderText(str(core.workspaces_root()))
+        self.workspace_browse_button = QtWidgets.QPushButton("Browse")
+        self.workspace_browse_button.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_DirOpenIcon))
+        self.workspace_browse_button.clicked.connect(self.browse_workspace)
+        workspace_row = QtWidgets.QHBoxLayout()
+        workspace_row.addWidget(self.workspace_edit, 1)
+        workspace_row.addWidget(self.workspace_browse_button, 0)
         workspace_layout = QtWidgets.QFormLayout()
-        workspace_layout.addRow("Workspace", self.workspace_edit)
+        workspace_layout.addRow("Workspace", workspace_row)
         layout.addLayout(workspace_layout)
 
         self.preflight_group = QtWidgets.QGroupBox("Preflight")
@@ -8310,7 +8333,8 @@ class ImporterWindow(QtWidgets.QMainWindow):
         try:
             source = Path(source_raw)
             analysis = core.analyze_pmx(pmx, source)
-            workspace = core.build_workspace(pmx, source, analysis)
+            custom_root = Path(self.main_workspace_edit.text().strip()) if self.main_workspace_edit.text().strip() else None
+            workspace = core.build_workspace(pmx, source, analysis, workspace_root=custom_root)
             self.current_main_analysis = analysis
             self.current_main_workspace = workspace
             self.main_workspace_edit.setText(str(workspace.root))
@@ -8377,6 +8401,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
 
     def find_gmod_candidate(self) -> str:
         candidates: list[Path] = []
+        # 1. Environment variables (highest priority when explicitly set)
         for key in ("STUDIOMDL", "GMOD_PATH"):
             raw = os.environ.get(key, "")
             if raw:
@@ -8384,21 +8409,19 @@ class ImporterWindow(QtWidgets.QMainWindow):
                 candidates.append(path)
                 if path.is_dir():
                     candidates.append(path / "bin" / "studiomdl.exe")
+        # 2. Detect Steam installation and libraries first
+        steam_dir = core._find_steam_dir()
+        if steam_dir:
+            for lib in core._find_steam_library_folders(steam_dir):
+                for name in ("GarrysMod_RTX_c", "GarrysMod"):
+                    candidates.append(lib / "steamapps" / "common" / name / "bin" / "studiomdl.exe")
+        # 3. Fallback hardcoded paths
         for root in (
             Path("H:/SteamLibrary/steamapps/common/GarrysMod_RTX_c"),
             Path("H:/SteamLibrary/steamapps/common/GarrysMod"),
             Path("C:/Program Files (x86)/Steam/steamapps/common/GarrysMod"),
         ):
             candidates.append(root / "bin" / "studiomdl.exe")
-        vdf = Path("C:/Program Files (x86)/Steam/steamapps/libraryfolders.vdf")
-        if vdf.exists():
-            try:
-                for match in re.finditer(r'"path"\s+"([^"]+)"', vdf.read_text(encoding="utf-8", errors="ignore")):
-                    lib = Path(match.group(1).replace("\\\\", "\\"))
-                    for name in ("GarrysMod_RTX_c", "GarrysMod"):
-                        candidates.append(lib / "steamapps" / "common" / name / "bin" / "studiomdl.exe")
-            except Exception:
-                pass
         seen: set[Path] = set()
         for candidate in candidates:
             candidate = safe_resolve_path(candidate)
@@ -8617,6 +8640,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
         self.main_detect_gmod_button.setEnabled(False)
         self.main_cancel_button.setEnabled(True)
         self.main_open_output_button.setEnabled(False)
+        workspace_text = self.main_workspace_edit.text().strip()
         self.worker = FullImportWorker(
             str(self.current_main_pmx_path()),
             self.main_source_row.value(),
@@ -8628,6 +8652,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
             selected_output,
             self.bodygroup_vertex_limit(),
             self.clear_custom_normals_enabled(),
+            workspace_text,
         )
         self.worker.log.connect(self.append_main_log)
         self.worker.progress.connect(self.set_main_progress)
@@ -9158,7 +9183,8 @@ class ImporterWindow(QtWidgets.QMainWindow):
         try:
             source = Path(source_raw)
             analysis = core.analyze_pmx(pmx, source)
-            workspace = core.build_workspace(pmx, source, analysis)
+            custom_root = Path(self.workspace_edit.text().strip()) if self.workspace_edit.text().strip() else None
+            workspace = core.build_workspace(pmx, source, analysis, workspace_root=custom_root)
             self.current_analysis = analysis
             self.current_workspace = workspace
             self.workspace_edit.setText(str(workspace.root))
@@ -9256,7 +9282,8 @@ class ImporterWindow(QtWidgets.QMainWindow):
         self.output_blend_label.clear()
         self.output_log_label.clear()
         self.output_report_label.clear()
-        self.worker = ImportWorker(str(pmx), source)
+        workspace_text = self.workspace_edit.text().strip()
+        self.worker = ImportWorker(str(pmx), source, workspace_text)
         self.worker.log.connect(self.append_log)
         self.worker.done.connect(self.import_done)
         self.worker.failed.connect(self.import_failed)
@@ -16447,6 +16474,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
             self.save_settings()
             return
         candidates: list[Path] = []
+        # 1. Environment variables (highest priority when explicitly set)
         for key in ("STUDIOMDL", "GMOD_PATH"):
             raw = os.environ.get(key, "")
             if raw:
@@ -16454,21 +16482,19 @@ class ImporterWindow(QtWidgets.QMainWindow):
                 candidates.append(path)
                 if path.is_dir():
                     candidates.append(path / "bin" / "studiomdl.exe")
+        # 2. Detect Steam installation and libraries first
+        steam_dir = core._find_steam_dir()
+        if steam_dir:
+            for lib in core._find_steam_library_folders(steam_dir):
+                for name in ("GarrysMod_RTX_c", "GarrysMod"):
+                    candidates.append(lib / "steamapps" / "common" / name / "bin" / "studiomdl.exe")
+        # 3. Fallback hardcoded paths
         for root in (
             Path("H:/SteamLibrary/steamapps/common/GarrysMod_RTX_c"),
             Path("H:/SteamLibrary/steamapps/common/GarrysMod"),
             Path("C:/Program Files (x86)/Steam/steamapps/common/GarrysMod"),
         ):
             candidates.append(root / "bin" / "studiomdl.exe")
-        vdf = Path("C:/Program Files (x86)/Steam/steamapps/libraryfolders.vdf")
-        if vdf.exists():
-            try:
-                for match in re.finditer(r'"path"\s+"([^"]+)"', vdf.read_text(encoding="utf-8", errors="ignore")):
-                    lib = Path(match.group(1).replace("\\\\", "\\"))
-                    for name in ("GarrysMod_RTX_c", "GarrysMod"):
-                        candidates.append(lib / "steamapps" / "common" / name / "bin" / "studiomdl.exe")
-            except Exception:
-                pass
         seen: set[Path] = set()
         for candidate in candidates:
             candidate = safe_resolve_path(candidate)
@@ -17423,6 +17449,18 @@ class ImporterWindow(QtWidgets.QMainWindow):
     def set_collision_log_visible(self, visible: bool) -> None:
         self.collision_log_group.setVisible(bool(visible))
         self.collision_log_toggle.setText("Hide Log" if visible else "Show Log")
+
+    def browse_workspace(self) -> None:
+        current = self.workspace_edit.text().strip() or str(core.workspaces_root())
+        selected = QtWidgets.QFileDialog.getExistingDirectory(self, "Select Workspace Directory", current)
+        if selected:
+            self.workspace_edit.setText(selected)
+
+    def browse_main_workspace(self) -> None:
+        current = self.main_workspace_edit.text().strip() or str(core.workspaces_root())
+        selected = QtWidgets.QFileDialog.getExistingDirectory(self, "Select Workspace Directory", current)
+        if selected:
+            self.main_workspace_edit.setText(selected)
 
     def open_workspace(self) -> None:
         raw = self.workspace_edit.text().strip()
