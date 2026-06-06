@@ -103,66 +103,21 @@ local function entry_matches_search(entry, search)
 end
 
 function TOOL.BuildCPanel(panel)
+    local UI = DynamicModelImporter.UI
     panel:AddControl("Header", {
         Description = L("Shows models produced by MMD Character Importer. Select a row, then left-click the world to spawn an NPC or right-click the world to spawn a ragdoll.")
     })
 
+    UI.AddSection(panel, "1. Model Library", "Refresh the model list, filter by name or path, then select one model row.", UI.Colors.Blue)
+
     local refreshButton = panel:Button(L("Refresh model list"))
+    UI.StyleButton(refreshButton, UI.Colors.Blue)
     refreshButton.DoClick = request_refresh
 
     local search = vgui.Create("DTextEntry")
     search:SetTall(22)
     search:SetPlaceholderText(L("Search models..."))
     panel:AddItem(search)
-
-    local relation = vgui.Create("DComboBox")
-    relation:SetTall(22)
-    relation:AddChoice(L("Friendly"), "friendly", true)
-    relation:AddChoice(L("Hostile"), "hostile")
-    relation:AddChoice(L("Neutral"), "neutral")
-    relation.OnSelect = function(_, _, _, data)
-        RunConsoleCommand("dynamic_model_importer_relation", tostring(data or "friendly"))
-    end
-    panel:AddItem(relation)
-
-    panel:NumSlider(L("NPC health"), "dynamic_model_importer_health", 1, 9999, 0)
-
-    local noJiggleColor = Color(255, 150, 0)
-    local noJiggle = vgui.Create("DCheckBoxLabel")
-    noJiggle:SetText(L("Spawn model without jigglebone"))
-    if noJiggle.SetTextColor then
-        noJiggle:SetTextColor(noJiggleColor)
-    end
-    if IsValid(noJiggle.Label) then
-        noJiggle.Label:SetTextColor(noJiggleColor)
-    end
-    noJiggle:SetConVar("dynamic_model_importer_spawn_no_jiggle")
-    noJiggle:SetValue(convar_string("dynamic_model_importer_spawn_no_jiggle", "0") == "1" and 1 or 0)
-    noJiggle:SizeToContents()
-    noJiggle:SetTooltip(L("When enabled, spawned/imported NPCs, ragdolls, and matching PMs will save and use all jigglebones disabled."))
-    panel:AddItem(noJiggle)
-
-    local weapon = vgui.Create("DComboBox")
-    weapon:SetTall(22)
-    weapon:SetValue(convar_string("dynamic_model_importer_weapon", "weapon_smg1"))
-    weapon:AddChoice("SMG1", "weapon_smg1", true)
-    weapon:AddChoice("AR2", "weapon_ar2")
-    weapon:AddChoice(L("Shotgun"), "weapon_shotgun")
-    weapon:AddChoice(L("Pistol"), "weapon_pistol")
-    weapon:AddChoice(L("None"), "")
-    weapon.OnSelect = function(_, _, _, data)
-        RunConsoleCommand("dynamic_model_importer_weapon", tostring(data or ""))
-    end
-    panel:AddItem(weapon)
-
-    local customWeapon = vgui.Create("DTextEntry")
-    customWeapon:SetTall(22)
-    customWeapon:SetPlaceholderText(L("Custom weapon class, for example weapon_smg1"))
-    customWeapon.OnEnter = function(self)
-        RunConsoleCommand("dynamic_model_importer_weapon", self:GetText())
-        weapon:SetValue(self:GetText())
-    end
-    panel:AddItem(customWeapon)
 
     local modelLists = {}
     local suppressSelectionCallback = false
@@ -206,7 +161,8 @@ function TOOL.BuildCPanel(panel)
     local function create_model_list(title, legacy)
         local label = vgui.Create("DLabel")
         label:SetText(L(title))
-        label:SetTextColor(color_white)
+        label:SetTextColor(legacy and UI.Colors.Purple or UI.Colors.Green)
+        label:SetFont("DermaDefaultBold")
         label:DockMargin(0, 8, 0, 2)
         panel:AddItem(label)
 
@@ -246,7 +202,7 @@ function TOOL.BuildCPanel(panel)
             end
         end
 
-        panel:AddItem(list)
+        panel:AddItem(UI.StyleList(list))
         table.insert(modelLists, list)
         return list
     end
@@ -254,14 +210,80 @@ function TOOL.BuildCPanel(panel)
     local manifestList = create_model_list("Manifest imported models", false)
     local legacyList = create_model_list("Legacy autorun models", true)
 
+    UI.AddSection(panel, "2. Current Selection", "The selected model id is used by left-click and right-click spawning.", UI.Colors.Green)
     local selected = panel:TextEntry(L("Selected model id"), "dynamic_model_importer_selected")
     selected:SetEditable(false)
 
+    UI.AddSection(panel, "3. Spawn Settings", "NPC settings affect left-click NPC spawning. Ragdoll spawning uses the selected model only.", UI.Colors.Orange)
+
+    local noJiggleColor = UI.Colors.Orange
+    local noJiggle = vgui.Create("DCheckBoxLabel")
+    noJiggle:SetText(L("Spawn model without jigglebone"))
+    if noJiggle.SetTextColor then
+        noJiggle:SetTextColor(noJiggleColor)
+    end
+    if IsValid(noJiggle.Label) then
+        noJiggle.Label:SetTextColor(noJiggleColor)
+        noJiggle.Label:SetFont("DermaDefaultBold")
+    end
+    noJiggle:SetConVar("dynamic_model_importer_spawn_no_jiggle")
+    noJiggle:SetValue(convar_string("dynamic_model_importer_spawn_no_jiggle", "0") == "1" and 1 or 0)
+    noJiggle:SizeToContents()
+    noJiggle:SetTooltip(L("When enabled, spawned/imported NPCs, ragdolls, and matching PMs will save and use all jigglebones disabled."))
+    panel:AddItem(noJiggle)
+
+    local relationLabel = vgui.Create("DLabel")
+    relationLabel:SetText(L("NPC relationship"))
+    relationLabel:SetTextColor(UI.Colors.Muted)
+    relationLabel:SizeToContents()
+    panel:AddItem(relationLabel)
+
+    local relation = vgui.Create("DComboBox")
+    relation:SetTall(22)
+    relation:AddChoice(L("Friendly"), "friendly", true)
+    relation:AddChoice(L("Hostile"), "hostile")
+    relation:AddChoice(L("Neutral"), "neutral")
+    relation.OnSelect = function(_, _, _, data)
+        RunConsoleCommand("dynamic_model_importer_relation", tostring(data or "friendly"))
+    end
+    panel:AddItem(relation)
+
+    panel:NumSlider(L("NPC health"), "dynamic_model_importer_health", 1, 9999, 0)
+
+    local weaponLabel = vgui.Create("DLabel")
+    weaponLabel:SetText(L("NPC weapon"))
+    weaponLabel:SetTextColor(UI.Colors.Muted)
+    weaponLabel:SizeToContents()
+    panel:AddItem(weaponLabel)
+
+    local weapon = vgui.Create("DComboBox")
+    weapon:SetTall(22)
+    weapon:SetValue(convar_string("dynamic_model_importer_weapon", "weapon_smg1"))
+    weapon:AddChoice("SMG1", "weapon_smg1", true)
+    weapon:AddChoice("AR2", "weapon_ar2")
+    weapon:AddChoice(L("Shotgun"), "weapon_shotgun")
+    weapon:AddChoice(L("Pistol"), "weapon_pistol")
+    weapon:AddChoice(L("None"), "")
+    weapon.OnSelect = function(_, _, _, data)
+        RunConsoleCommand("dynamic_model_importer_weapon", tostring(data or ""))
+    end
+    panel:AddItem(weapon)
+
+    local customWeapon = vgui.Create("DTextEntry")
+    customWeapon:SetTall(22)
+    customWeapon:SetPlaceholderText(L("Custom weapon class, for example weapon_smg1"))
+    customWeapon.OnEnter = function(self)
+        RunConsoleCommand("dynamic_model_importer_weapon", self:GetText())
+        weapon:SetValue(self:GetText())
+    end
+    panel:AddItem(customWeapon)
+
+    UI.AddSection(panel, "4. Mouse Actions", "Left-click world: spawn NPC. Right-click world: spawn ragdoll.", UI.Colors.Purple)
     local help = vgui.Create("DLabel")
     help:SetWrap(true)
     help:SetAutoStretchVertical(true)
     help:SetText(L("Spawning only happens from the tool itself: left-click the world for NPC, right-click the world for ragdoll."))
-    help:SetTextColor(color_white)
+    help:SetTextColor(UI.Colors.Text)
     panel:AddItem(help)
 
     search.OnChange = function()

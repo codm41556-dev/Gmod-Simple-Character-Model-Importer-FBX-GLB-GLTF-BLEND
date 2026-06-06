@@ -3292,7 +3292,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
                         "character_internal": self._t("main.character_internal", "Character internal name"),
                         "character_display": self._t("main.character_display", "Character display name"),
                         "rtx_vertex_limit": self._t("main.rtx_vertex_limit_label", "RTX vertex limit"),
-                        "clear_custom_normals": self._t("main.clear_custom_normals_label", "Custom normals"),
+                        "clear_custom_normals": self._t("main.clear_custom_normals_label", "Model custom normals"),
                     }.get(key, widget.text())
                 )
         if hasattr(self, "main_category_edit"):
@@ -3340,15 +3340,23 @@ class ImporterWindow(QtWidgets.QMainWindow):
             "main_preview_bone_names_check": self._t("preview.bone_names", "Bone Names"),
             "main_preview_wireframe_check": self._t("preview.wireframe", "Wireframe"),
             "main_rtx_bodygroup_limit_check": self._t("main.rtx_bodygroup_limit", "Enforce 32,767 vertex bodygroup limit (RTX Remix)"),
-            "main_clear_custom_normals_check": self._t("main.clear_custom_normals", "Clear custom split normals in Step 2"),
+            "main_clear_custom_normals_check": self._t("main.clear_custom_normals", "Clear Model Custom Normals"),
         }.items():
             widget = getattr(self, attr, None)
             if isinstance(widget, QtWidgets.QAbstractButton):
                 widget.setText(text)
         if hasattr(self, "main_clear_custom_normals_check"):
-            self.main_clear_custom_normals_check.setToolTip(
-                self._t("main.clear_custom_normals_tip", "Default off. Enable to clear imported custom split normals during the Step 2 model fix.")
+            clear_normals_tip = self._t(
+                "main.clear_custom_normals_tip",
+                "Some models has their own definition of how the lights are reflected such as the ones with 平面化 tags, "
+                "clearing them could fix the potential shading issue in game.",
             )
+            self.main_clear_custom_normals_check.setToolTip(
+                clear_normals_tip
+            )
+            hint = getattr(self, "main_clear_custom_normals_hint", None)
+            if isinstance(hint, QtWidgets.QLabel):
+                hint.setText(clear_normals_tip)
         if hasattr(self, "main_clear_workspace_cache_button"):
             self.main_clear_workspace_cache_button.setToolTip(
                 self._t(
@@ -4261,9 +4269,18 @@ class ImporterWindow(QtWidgets.QMainWindow):
         self.main_model_display_edit.setToolTip("Character display name shown in Garry's Mod menus. English letters, spaces, and underscores only.")
         self.main_rtx_bodygroup_limit_check = QtWidgets.QCheckBox("Enforce 32,767 vertex bodygroup limit (RTX Remix)")
         self.main_rtx_bodygroup_limit_check.setToolTip("Default GMod builds allow 65,535 vertices per bodygroup. Enable this for RTX Remix builds that require 32,767.")
-        self.main_clear_custom_normals_check = QtWidgets.QCheckBox("Clear custom split normals in Step 2")
-        self.main_clear_custom_normals_check.setChecked(False)
-        self.main_clear_custom_normals_check.setToolTip("Default off. Enable to clear imported custom split normals during the Step 2 model fix.")
+        self.main_clear_custom_normals_check = QtWidgets.QCheckBox("Clear Model Custom Normals")
+        self.main_clear_custom_normals_check.setChecked(True)
+        self.main_clear_custom_normals_check.setToolTip(
+            "Some models has their own definition of how the lights are reflected such as the ones with 平面化 tags, "
+            "clearing them could fix the potential shading issue in game."
+        )
+        self.main_clear_custom_normals_hint = QtWidgets.QLabel(
+            "Some models has their own definition of how the lights are reflected such as the ones with 平面化 tags, "
+            "clearing them could fix the potential shading issue in game."
+        )
+        self.main_clear_custom_normals_hint.setObjectName("fieldHint")
+        self.main_clear_custom_normals_hint.setWordWrap(True)
         self.main_form_labels = {
             "workspace": QtWidgets.QLabel("Workspace"),
             "category_internal": QtWidgets.QLabel("Category internal name"),
@@ -4271,7 +4288,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
             "character_internal": QtWidgets.QLabel("Character internal name"),
             "character_display": QtWidgets.QLabel("Character display name"),
             "rtx_vertex_limit": QtWidgets.QLabel("RTX vertex limit"),
-            "clear_custom_normals": QtWidgets.QLabel("Custom normals"),
+            "clear_custom_normals": QtWidgets.QLabel("Model custom normals"),
         }
         main_workspace_row = QtWidgets.QHBoxLayout()
         main_workspace_row.addWidget(self.main_workspace_edit, 1)
@@ -4283,7 +4300,13 @@ class ImporterWindow(QtWidgets.QMainWindow):
         form.addRow(self.main_form_labels["character_internal"], self.main_model_name_edit)
         form.addRow(self.main_form_labels["character_display"], self.main_model_display_edit)
         form.addRow(self.main_form_labels["rtx_vertex_limit"], self.main_rtx_bodygroup_limit_check)
-        form.addRow(self.main_form_labels["clear_custom_normals"], self.main_clear_custom_normals_check)
+        main_clear_custom_normals_box = QtWidgets.QWidget()
+        main_clear_custom_normals_layout = QtWidgets.QVBoxLayout(main_clear_custom_normals_box)
+        main_clear_custom_normals_layout.setContentsMargins(0, 0, 0, 0)
+        main_clear_custom_normals_layout.setSpacing(2)
+        main_clear_custom_normals_layout.addWidget(self.main_clear_custom_normals_check)
+        main_clear_custom_normals_layout.addWidget(self.main_clear_custom_normals_hint)
+        form.addRow(self.main_form_labels["clear_custom_normals"], main_clear_custom_normals_box)
         layout.addLayout(form)
         layout.addWidget(self.main_gmod_row)
 
@@ -7905,15 +7928,14 @@ class ImporterWindow(QtWidgets.QMainWindow):
         if not bool(self.settings_store.value("fix_clear_custom_normals_default_off_migrated", False, bool)):
             self.settings_store.setValue("fix_clear_custom_normals", False)
             self.settings_store.setValue("fix_clear_custom_normals_default_off_migrated", True)
-        raw_clear_normals = self.settings_store.value("fix_clear_custom_normals", False)
-        if isinstance(raw_clear_normals, str):
-            clear_normals = raw_clear_normals.strip().lower() not in {"0", "false", "no", "off"}
-        else:
-            clear_normals = bool(raw_clear_normals)
-        for attr in ("main_clear_custom_normals_check", "fix_clear_custom_normals_check"):
-            widget = getattr(self, attr, None)
-            if isinstance(widget, QtWidgets.QCheckBox):
-                widget.setChecked(clear_normals)
+        main_clear_normals = self.settings_bool(self.settings_store.value("main_clear_custom_normals", True), True)
+        fix_clear_normals = self.settings_bool(self.settings_store.value("fix_clear_custom_normals", False), False)
+        widget = getattr(self, "main_clear_custom_normals_check", None)
+        if isinstance(widget, QtWidgets.QCheckBox):
+            widget.setChecked(main_clear_normals)
+        widget = getattr(self, "fix_clear_custom_normals_check", None)
+        if isinstance(widget, QtWidgets.QCheckBox):
+            widget.setChecked(fix_clear_normals)
         if hasattr(self, "flex_isolate_bodygroup_check"):
             self.flex_isolate_bodygroup_check.setChecked(bool(self.settings_store.value("flex_isolate_bodygroup", False, bool)))
         if hasattr(self, "carms_weight_spin"):
@@ -7968,8 +7990,10 @@ class ImporterWindow(QtWidgets.QMainWindow):
             self.settings_store.setValue("bodygroup_always_auto_split", self.bodygroup_always_auto_split_check.isChecked())
         if hasattr(self, "bodygroup_rtx_limit_check") or hasattr(self, "main_rtx_bodygroup_limit_check"):
             self.settings_store.setValue("bodygroup_rtx_vertex_limit", self.bodygroup_vertex_limit() == int(getattr(core, "RTX_BODYGROUP_VERTEX_LIMIT", 32767)))
-        if hasattr(self, "fix_clear_custom_normals_check") or hasattr(self, "main_clear_custom_normals_check"):
-            self.settings_store.setValue("fix_clear_custom_normals", self.clear_custom_normals_enabled())
+        if hasattr(self, "main_clear_custom_normals_check"):
+            self.settings_store.setValue("main_clear_custom_normals", self.main_clear_custom_normals_enabled())
+        if hasattr(self, "fix_clear_custom_normals_check"):
+            self.settings_store.setValue("fix_clear_custom_normals", self.fix_clear_custom_normals_enabled())
         if hasattr(self, "flex_input_row"):
             self.settings_store.setValue("flex_input_blend", self.flex_input_row.value())
         if hasattr(self, "flex_isolate_bodygroup_check"):
@@ -8494,24 +8518,33 @@ class ImporterWindow(QtWidgets.QMainWindow):
             enabled = enabled or bool(self.main_rtx_bodygroup_limit_check.isChecked())
         return int(getattr(core, "RTX_BODYGROUP_VERTEX_LIMIT", 32767) if enabled else getattr(core, "DEFAULT_BODYGROUP_VERTEX_LIMIT", 65535))
 
-    def clear_custom_normals_enabled(self) -> bool:
-        widget = getattr(self, "fix_clear_custom_normals_check", None)
+    def settings_bool(self, value: object, default: bool = False) -> bool:
+        if value is None:
+            return bool(default)
+        if isinstance(value, str):
+            text = value.strip().lower()
+            if text in {"0", "false", "no", "off"}:
+                return False
+            if text in {"1", "true", "yes", "on"}:
+                return True
+        return bool(value)
+
+    def main_clear_custom_normals_enabled(self) -> bool:
+        widget = getattr(self, "main_clear_custom_normals_check", None)
         if isinstance(widget, QtWidgets.QCheckBox):
             return bool(widget.isChecked())
-        widget = getattr(self, "main_clear_custom_normals_check", None)
+        return True
+
+    def fix_clear_custom_normals_enabled(self) -> bool:
+        widget = getattr(self, "fix_clear_custom_normals_check", None)
         if isinstance(widget, QtWidgets.QCheckBox):
             return bool(widget.isChecked())
         return False
 
+    def clear_custom_normals_enabled(self) -> bool:
+        return self.fix_clear_custom_normals_enabled()
+
     def on_clear_custom_normals_changed(self, checked: bool) -> None:
-        for attr in ("main_clear_custom_normals_check", "fix_clear_custom_normals_check"):
-            widget = getattr(self, attr, None)
-            if isinstance(widget, QtWidgets.QCheckBox) and widget.isChecked() != bool(checked):
-                blocker = QtCore.QSignalBlocker(widget)
-                try:
-                    widget.setChecked(bool(checked))
-                finally:
-                    del blocker
         self.save_settings()
 
     def set_bodygroup_scale_preset(self, preset: str) -> None:
@@ -8667,7 +8700,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
             self.main_effective_model_display_name(),
             selected_output,
             self.bodygroup_vertex_limit(),
-            self.clear_custom_normals_enabled(),
+            self.main_clear_custom_normals_enabled(),
             workspace_text,
         )
         self.worker.log.connect(self.append_main_log)

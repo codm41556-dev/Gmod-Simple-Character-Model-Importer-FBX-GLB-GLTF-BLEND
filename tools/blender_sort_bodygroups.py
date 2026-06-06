@@ -2505,10 +2505,14 @@ def validate_manual_bodygroups(
     meshes = sorted([obj for obj in mesh_objects() if not is_helper_mesh_object(obj)], key=lambda obj: natural_key(obj.name))
     if not meshes:
         errors.append("No mesh bodygroups.")
-    required = {"Face", "Body"}
+    canonical_names = {"Face", "Body"}
     mesh_names = {obj.name for obj in meshes}
-    for name in sorted(required - mesh_names):
-        errors.append(f"Missing required bodygroup mesh: {name}.")
+    missing_canonical_names = sorted(canonical_names - mesh_names)
+    for name in missing_canonical_names:
+        warnings.append(
+            f"Optional canonical bodygroup mesh is missing: {name}. "
+            "This is allowed; later steps will use the available bodygroup mesh names."
+        )
 
     seen_names: set[str] = set()
     output_groups: list[dict[str, object]] = []
@@ -2586,6 +2590,7 @@ def validate_manual_bodygroups(
         "output_blend": str(output_blend),
         "shapekey_prune": shapekey_report,
         "ignored_helper_meshes": ignored_helper_meshes,
+        "missing_canonical_bodygroups": missing_canonical_names,
         "bodygroups": output_groups,
         "bodygroup_count": len(output_groups),
         "facial_bodygroups": facial_bodygroups,

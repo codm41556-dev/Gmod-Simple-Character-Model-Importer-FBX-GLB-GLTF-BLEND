@@ -333,9 +333,12 @@ if CLIENT then
     end
 
     function TOOL.BuildCPanel(panel)
+        local UI = DynamicModelImporter.UI
         panel:AddControl("Header", {
             Description = L("Right-click an NPC, ragdoll, or player to select its model. Left-click toggles the selected material.")
         })
+
+        UI.AddSection(panel, "1. Select Target", "Right-click an NPC, ragdoll, or player. Saved material overrides apply to every entity using that model path.", UI.Colors.Green)
 
         local state = {
             model_path = DynamicModelImporter.NormalizeOverrideModelPath(read_convar_string("dynamic_model_importer_hide_material_model_path", "")),
@@ -347,11 +350,13 @@ if CLIENT then
         local status = vgui.Create("DLabel")
         status:SetWrap(true)
         status:SetAutoStretchVertical(true)
-        status:SetTextColor(color_white)
+        status:SetTextColor(UI.Colors.Muted)
         panel:AddItem(status)
 
         local selected = panel:TextEntry(L("Selected model path"), "dynamic_model_importer_hide_material_model_path")
         selected:SetEditable(false)
+
+        UI.AddSection(panel, "2. Choose Material", "Use the table, selected index, or mouse wheel while aiming at a model. Hidden materials are marked in red.", UI.Colors.Blue)
 
         panel:NumSlider(L("Selected material index"), "dynamic_model_importer_hide_material_index", 0, 255, 0)
 
@@ -361,7 +366,7 @@ if CLIENT then
         materialList:AddColumn(L("Index"))
         materialList:AddColumn(L("Material"))
         materialList:AddColumn(L("Hidden"))
-        panel:AddItem(materialList)
+        panel:AddItem(UI.StyleList(materialList))
 
         local previewPanel = vgui.Create("DPanel")
         previewPanel:SetTall(154)
@@ -401,8 +406,16 @@ if CLIENT then
             populatingMaterials = true
             materialList:Clear()
             for _, materialInfo in ipairs(state.materials) do
-                local line = materialList:AddLine(tostring(materialInfo.index), materialInfo.path, material_hidden(materialInfo.index) and L("yes") or L("no"))
+                local hidden = material_hidden(materialInfo.index)
+                local line = materialList:AddLine(tostring(materialInfo.index), materialInfo.path, hidden and L("yes") or L("no"))
                 line.SubMaterialIndex = materialInfo.index
+                if hidden then
+                    for _, column in pairs(line.Columns or {}) do
+                        if IsValid(column) and column.SetTextColor then
+                            column:SetTextColor(UI.Colors.Red)
+                        end
+                    end
+                end
                 if materialInfo.index == selectedIndex then
                     selectedLine = line
                 end
@@ -415,18 +428,20 @@ if CLIENT then
         end
 
         function previewPanel:Paint(width, height)
-            draw.RoundedBox(4, 0, 0, width, height, Color(35, 35, 35, 245))
-            draw.SimpleText(L("Selected material preview"), "DermaDefaultBold", 8, 7, color_white)
+            draw.RoundedBox(5, 0, 0, width, height, UI.Colors.PanelSoft)
+            surface.SetDrawColor(UI.Colors.Border)
+            surface.DrawOutlinedRect(0, 0, width, height)
+            draw.SimpleText(L("Selected material preview"), "DermaDefaultBold", 8, 7, UI.Colors.Blue)
             local index = current_index and current_index() or selected_material_index()
             local materialInfo = state.materials[index + 1]
             if not materialInfo then
-                draw.SimpleText(L("No material selected."), "DermaDefault", 8, 30, Color(220, 220, 220))
+                draw.SimpleText(L("No material selected."), "DermaDefault", 8, 30, UI.Colors.Muted)
                 return
             end
 
             local originalPath = tostring(materialInfo.path or "")
             local currentPath = material_hidden(index) and DynamicModelImporter.InvisibleMaterialPath or originalPath
-            draw_clipped_text(tostring(index) .. ": " .. originalPath, "DermaDefault", 8, 28, Color(220, 220, 220), math.max(width - 16, 60))
+            draw_clipped_text(tostring(index) .. ": " .. originalPath, "DermaDefault", 8, 28, UI.Colors.Muted, math.max(width - 16, 60))
 
             local iconSize = 54
             local firstY = 50
@@ -436,9 +451,14 @@ if CLIENT then
             draw_material_preview_box("Current Material:", currentPath, secondX, firstY, iconSize, math.max(width - secondX - iconSize - 18, 60))
         end
 
+        UI.AddSection(panel, "3. Material Actions", "Hide applies the invisible material. Restore removes the saved override for the selected model path.", UI.Colors.Orange)
+
         local hideButton = panel:Button(L("Hide current material"))
         local restoreButton = panel:Button(L("Restore current material"))
         local restoreAllButton = panel:Button(L("Restore all materials"))
+        UI.StyleButton(hideButton, UI.Colors.Orange)
+        UI.StyleButton(restoreButton, UI.Colors.Green)
+        UI.StyleButton(restoreAllButton, UI.Colors.Blue)
 
         local function inspect_model()
             cleanup_preview()

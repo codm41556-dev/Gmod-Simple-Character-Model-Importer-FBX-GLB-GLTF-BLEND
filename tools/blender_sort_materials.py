@@ -41,6 +41,14 @@ STACKED_FACE_NORMAL_DOT = 0.999
 STACKED_FACE_SCORE_THRESHOLD = 0.85
 STACKED_FACE_SMALL_GROUP_EXACT_THRESHOLD = 8
 MATERIAL_UID_PATTERN = re.compile(r"^mci_mat_\d+_([A-Za-z0-9_]+)$")
+STACKED_LAYER_WORDS = {
+    "inside",
+    "outside",
+    "inner",
+    "outer",
+    "interior",
+    "exterior",
+}
 TEXTURE_ALPHA_ZERO_THRESHOLD = 1.0e-6
 SUBSET_COMBINE_COVERAGE_THRESHOLD = 0.95
 IMAGE_ALPHA_STATS_CACHE: dict[str, dict[str, object]] = {}
@@ -1118,6 +1126,79 @@ def stacked_candidate_groups_by_slug(entries: list[dict[str, object]]) -> dict[s
     }
 
 
+def stacked_layer_key(slug: str) -> tuple[str, str]:
+    """Return (core_slug, layer_word) for inside/outside style material pairs."""
+
+    text = str(slug or "").strip("_").lower()
+    if not text:
+        return "", ""
+
+    tokens = [token for token in text.split("_") if token]
+    if len(tokens) > 1:
+        removed = [token for token in tokens if token in STACKED_LAYER_WORDS]
+        if removed:
+            core_tokens = [token for token in tokens if token not in STACKED_LAYER_WORDS]
+            core = "_".join(core_tokens).strip("_")
+            if len(core) >= 3:
+                return core, removed[0]
+
+    for word in sorted(STACKED_LAYER_WORDS, key=len, reverse=True):
+        if text.startswith(word) and len(text) > len(word) + 2:
+            return text[len(word) :].strip("_"), word
+        if text.endswith(word) and len(text) > len(word) + 2:
+            return text[: -len(word)].strip("_"), word
+    return "", ""
+
+
+def stacked_candidate_buckets(entries: list[dict[str, object]]) -> list[dict[str, object]]:
+    buckets: list[dict[str, object]] = []
+    seen_group_sets: set[tuple[str, ...]] = set()
+
+    for slug, groups in stacked_candidate_groups_by_slug(entries).items():
+        group_key = tuple(groups)
+        seen_group_sets.add(group_key)
+        buckets.append(
+            {
+                "key": slug,
+                "relation": "exact_slug",
+                "groups": groups,
+                "group_count": len(groups),
+            }
+        )
+
+    layered_groups: dict[str, dict[str, set[str]]] = defaultdict(lambda: defaultdict(set))
+    for entry in entries:
+        if not bool(entry.get("keep", True)):
+            continue
+        uid = str(entry.get("uid") or "")
+        slug = material_uid_slug(uid)
+        core, layer = stacked_layer_key(slug)
+        if core and layer:
+            layered_groups[core][layer].add(uid)
+
+    for core, groups_by_layer in sorted(layered_groups.items(), key=lambda item: natural_key(item[0])):
+        if len(groups_by_layer) < 2:
+            continue
+        groups = sorted({uid for layer_groups in groups_by_layer.values() for uid in layer_groups}, key=natural_key)
+        if len(groups) < 2:
+            continue
+        group_key = tuple(groups)
+        if group_key in seen_group_sets:
+            continue
+        seen_group_sets.add(group_key)
+        buckets.append(
+            {
+                "key": core,
+                "relation": "layered_slug",
+                "layers": sorted(groups_by_layer),
+                "groups": groups,
+                "group_count": len(groups),
+            }
+        )
+
+    return buckets
+
+
 def mesh_vertex_material_groups(obj: bpy.types.Object, allowed_groups: set[str] | None = None) -> dict[int, set[str]]:
     material_group_by_index = {
         group.index: group.name
@@ -1324,11 +1405,23 @@ def detect_and_offset_stacked_material_groups(
     entries: list[dict[str, object]],
     offset: float = STACKED_FACE_OFFSET,
 ) -> dict[str, object]:
-    candidate_groups_by_slug = stacked_candidate_groups_by_slug(entries)
-    candidate_groups = {group for groups in candidate_groups_by_slug.values() for group in groups}
+    candidate_buckets = stacked_candidate_buckets(entries)
+    candidate_groups = {str(group) for bucket in candidate_buckets for group in list(bucket.get("groups", []) or [])}
     candidate_slug_report = [
-        {"slug": slug, "groups": groups, "group_count": len(groups)}
-        for slug, groups in sorted(candidate_groups_by_slug.items(), key=lambda item: natural_key(item[0]))
+        {"slug": str(bucket.get("key") or ""), "groups": list(bucket.get("groups", []) or []), "group_count": int(bucket.get("group_count", 0) or 0)}
+        for bucket in candidate_buckets
+        if str(bucket.get("relation") or "") == "exact_slug"
+    ]
+    candidate_layer_report = [
+        {
+            "slug": str(bucket.get("key") or ""),
+            "relation": str(bucket.get("relation") or ""),
+            "layers": list(bucket.get("layers", []) or []),
+            "groups": list(bucket.get("groups", []) or []),
+            "group_count": int(bucket.get("group_count", 0) or 0),
+        }
+        for bucket in candidate_buckets
+        if str(bucket.get("relation") or "") == "layered_slug"
     ]
     pairs: list[dict[str, object]] = []
     object_reports: list[dict[str, object]] = []
@@ -1344,13 +1437,21 @@ def detect_and_offset_stacked_material_groups(
         object_pairs: list[dict[str, object]] = []
         object_checked_pair_count = 0
         object_skipped_pair_count = 0
-        for slug, group_names_for_slug in candidate_groups_by_slug.items():
-            group_names = [name for name in group_names_for_slug if name in signatures_by_group]
+        checked_pairs_for_object: set[tuple[str, str]] = set()
+        for bucket in candidate_buckets:
+            bucket_key = str(bucket.get("key") or "")
+            bucket_relation = str(bucket.get("relation") or "exact_slug")
+            group_names_for_bucket = list(bucket.get("groups", []) or [])
+            group_names = [str(name) for name in group_names_for_bucket if str(name) in signatures_by_group]
             for left_index, left_name in enumerate(group_names):
                 left_signatures = signatures_by_group[left_name]
                 if len(left_signatures) < 3:
                     continue
                 for right_name in group_names[left_index + 1 :]:
+                    pair_key = tuple(sorted((left_name, right_name)))
+                    if pair_key in checked_pairs_for_object:
+                        continue
+                    checked_pairs_for_object.add(pair_key)
                     object_checked_pair_count += 1
                     checked_pair_count += 1
                     right_signatures = signatures_by_group[right_name]
@@ -1370,7 +1471,8 @@ def detect_and_offset_stacked_material_groups(
                         "object": obj.name,
                         "group_a": left_name,
                         "group_b": right_name,
-                        "slug": slug,
+                        "slug": bucket_key,
+                        "candidate_relation": bucket_relation,
                         "overlap_score": round(float(score), 6),
                         "matched_faces": int(matched),
                         "group_a_faces": len(left_signatures),
@@ -1407,6 +1509,9 @@ def detect_and_offset_stacked_material_groups(
         "offset": float(offset),
         "candidate_slug_count": len(candidate_slug_report),
         "candidate_slugs": candidate_slug_report,
+        "candidate_layer_slug_count": len(candidate_layer_report),
+        "candidate_layer_slugs": candidate_layer_report,
+        "candidate_bucket_count": len(candidate_buckets),
         "checked_pair_count": checked_pair_count,
         "skipped_pair_count": skipped_pair_count,
         "pair_count": len(pairs),

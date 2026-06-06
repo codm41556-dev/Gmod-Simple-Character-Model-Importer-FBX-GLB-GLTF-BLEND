@@ -495,6 +495,96 @@ function DynamicModelImporter.LF(raw, ...)
     return DynamicModelImporter.L(raw)
 end
 
+if CLIENT then
+    DynamicModelImporter.UI = DynamicModelImporter.UI or {}
+    DynamicModelImporter.UI.Colors = {
+        Panel = Color(24, 28, 34, 236),
+        PanelSoft = Color(31, 36, 44, 224),
+        Border = Color(71, 83, 99, 180),
+        Text = Color(236, 241, 248),
+        Muted = Color(164, 176, 190),
+        Blue = Color(76, 162, 255),
+        Green = Color(77, 200, 136),
+        Orange = Color(255, 170, 70),
+        Red = Color(255, 104, 104),
+        Purple = Color(174, 132, 255),
+    }
+
+    function DynamicModelImporter.UI.AddSection(panel, title, description, accent)
+        accent = accent or DynamicModelImporter.UI.Colors.Blue
+        local box = vgui.Create("DPanel")
+        box:SetTall(description and 68 or 38)
+        box:DockPadding(12, 8, 10, 8)
+        box.Paint = function(_, width, height)
+            draw.RoundedBox(6, 0, 0, width, height, DynamicModelImporter.UI.Colors.Panel)
+            draw.RoundedBoxEx(6, 0, 0, 5, height, accent, true, false, true, false)
+            surface.SetDrawColor(DynamicModelImporter.UI.Colors.Border)
+            surface.DrawOutlinedRect(0, 0, width, height)
+        end
+
+        local titleLabel = vgui.Create("DLabel", box)
+        titleLabel:Dock(TOP)
+        titleLabel:SetText(DynamicModelImporter.L(title))
+        titleLabel:SetFont("DermaDefaultBold")
+        titleLabel:SetTextColor(accent)
+        titleLabel:SizeToContents()
+
+        if description and description ~= "" then
+            local descLabel = vgui.Create("DLabel", box)
+            descLabel:Dock(FILL)
+            descLabel:DockMargin(0, 4, 0, 0)
+            descLabel:SetWrap(true)
+            descLabel:SetText(DynamicModelImporter.L(description))
+            descLabel:SetTextColor(DynamicModelImporter.UI.Colors.Muted)
+        end
+
+        panel:AddItem(box)
+        return box
+    end
+
+    function DynamicModelImporter.UI.AddStatus(panel, text, accent)
+        local label = vgui.Create("DLabel")
+        label:SetWrap(true)
+        label:SetAutoStretchVertical(true)
+        label:SetText(DynamicModelImporter.L(text or ""))
+        label:SetTextColor(accent or DynamicModelImporter.UI.Colors.Text)
+        panel:AddItem(label)
+        return label
+    end
+
+    function DynamicModelImporter.UI.StyleButton(button, accent, textColor)
+        if not IsValid(button) then return button end
+        accent = accent or DynamicModelImporter.UI.Colors.Blue
+        textColor = textColor or color_white
+        button:SetTall(math.max(button:GetTall(), 26))
+        button:SetTextColor(textColor)
+        button.Paint = function(self, width, height)
+            local bg = accent
+            if not self:IsEnabled() then
+                bg = Color(80, 80, 80)
+            elseif self.Depressed then
+                bg = Color(math.max(accent.r - 38, 0), math.max(accent.g - 38, 0), math.max(accent.b - 38, 0), accent.a)
+            elseif self:IsHovered() then
+                bg = Color(math.min(accent.r + 22, 255), math.min(accent.g + 22, 255), math.min(accent.b + 22, 255), accent.a)
+            end
+            draw.RoundedBox(5, 0, 0, width, height, bg)
+            draw.SimpleText(self:GetText(), "DermaDefaultBold", width / 2, height / 2, textColor, TEXT_ALIGN_CENTER, TEXT_ALIGN_CENTER)
+            return true
+        end
+        return button
+    end
+
+    function DynamicModelImporter.UI.StyleList(list)
+        if not IsValid(list) then return list end
+        list.Paint = function(_, width, height)
+            draw.RoundedBox(4, 0, 0, width, height, Color(18, 21, 26, 220))
+            surface.SetDrawColor(DynamicModelImporter.UI.Colors.Border)
+            surface.DrawOutlinedRect(0, 0, width, height)
+        end
+        return list
+    end
+end
+
 local function starts_with(value, prefix)
     return string.sub(value, 1, #prefix) == prefix
 end
