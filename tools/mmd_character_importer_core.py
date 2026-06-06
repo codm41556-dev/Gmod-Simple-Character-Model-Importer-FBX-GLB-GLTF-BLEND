@@ -866,6 +866,20 @@ def plugin_fingerprints() -> dict[str, str]:
     return out
 
 
+def hidden_subprocess_kwargs() -> dict[str, object]:
+    """Hide console windows for background helper processes on Windows."""
+
+    if os.name != "nt":
+        return {}
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= getattr(subprocess, "STARTF_USESHOWWINDOW", 0)
+    startupinfo.wShowWindow = getattr(subprocess, "SW_HIDE", 0)
+    return {
+        "startupinfo": startupinfo,
+        "creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    }
+
+
 def blender_version(blender_exe: Path) -> str:
     completed = subprocess.run(
         [str(blender_exe), "--version"],
@@ -875,6 +889,7 @@ def blender_version(blender_exe: Path) -> str:
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
         timeout=30,
+        **hidden_subprocess_kwargs(),
     )
     match = re.search(r"Blender\s+(\d+\.\d+(?:\.\d+)?)", completed.stdout or "")
     if not match:
@@ -1074,6 +1089,7 @@ def run_process_streamed(
             stderr=subprocess.STDOUT,
             bufsize=1,
             env=env,
+            **hidden_subprocess_kwargs(),
         )
         assert process.stdout is not None
         cancelled = False
