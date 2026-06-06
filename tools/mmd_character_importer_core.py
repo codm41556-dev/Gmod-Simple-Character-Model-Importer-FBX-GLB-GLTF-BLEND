@@ -1195,7 +1195,6 @@ def _find_system_blender() -> Path | None:
     for base in (program_files, program_files_x86, local_appdata):
         if base:
             search_roots.append(Path(base) / "Blender Foundation")
-            search_roots.append(Path(base))
     # Steam Blender
     steam_path = _find_steam_dir()
     if steam_path:
