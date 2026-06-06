@@ -2215,6 +2215,7 @@ class FullImportWorker(QtCore.QThread):
             )
             qc_plan = qc_analysis.plan
             qc_plan["author"] = "sheepylord"
+            qc_plan["auto_porting"] = True
             qc_plan["character_category"] = self.character_category
             if self.model_name:
                 qc_plan["model_name"] = self.model_name
