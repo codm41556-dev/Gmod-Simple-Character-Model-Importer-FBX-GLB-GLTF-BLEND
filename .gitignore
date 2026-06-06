@@ -14,3 +14,9 @@ __pycache__/
 .cache/
 blender-4.5.10-windows-x64.zip
 MMDCharacterImporter.spec
+/9_arts
+/Github Upload
+/reference/\!enhanced_animation_importer_arc
+/reference/\!runtime_any_model_importer
+/reference
+/smoke_tests
