@@ -4249,7 +4249,7 @@
     "warning_no_native_textures": "В выбранной папке модели не найдены исходные файлы текстур.",
     "warning_unresolved_texture_refs": "Не удалось разрешить {count} ссылку(и) на текстуры PMX: {refs}",
     "warning_unresolved_texture_refs_more": "Не удалось разрешить {count} ссылку(и) на текстуры PMX: {refs}, и ещё {more_count}",
-    "warning_high_vertex_count": "Большое число вершин: {count}; работа Source/GMod может быть медленной.",
+    "warning_high_vertex_count": "Большое число вершин: {count}; импорт может занять много времени и дать неожиданные результаты.",
     "warning_high_morph_count": "Большое число morph/shapekey: {count}; дальнейшая работа Flex может быть медленной.",
     "warning_nsfw_summary": "Обнаружены потенциально NSFW-имена shapekey: {match_count} совпадение(й) ключевых слов в {morph_count} morph. Автоматический перенос не оптимизирован для таких моделей.",
     "warning_high_texture_count": "Большое число исходных текстур PMX: {count}; работа с материалами может быть медленной."

@@ -220,6 +220,20 @@ def mesh_objects() -> list[bpy.types.Object]:
     return [obj for obj in bpy.data.objects if obj.type == "MESH"]
 
 
+def object_average_world_z(obj: bpy.types.Object) -> float:
+    if not obj.data.vertices:
+        return float("-inf")
+    total = 0.0
+    matrix = obj.matrix_world
+    for vertex in obj.data.vertices:
+        total += float((matrix @ vertex.co).z)
+    return total / float(len(obj.data.vertices))
+
+
+def bodygroup_processing_key(obj: bpy.types.Object) -> tuple[float, list[object]]:
+    return (-object_average_world_z(obj), natural_key(obj.name))
+
+
 def fallback_prune_shapekeys(obj: bpy.types.Object, epsilon: float = EPSILON) -> dict[str, object]:
     keys = obj.data.shape_keys
     if keys is None or len(keys.key_blocks) <= 1:
@@ -366,6 +380,7 @@ def preview_color(uid: str, index: int) -> list[float]:
 def object_report(obj: bpy.types.Object) -> dict[str, object]:
     keys = obj.data.shape_keys
     shapekeys = [] if keys is None else [key.name for key in keys.key_blocks[1:]]
+    average_height = object_average_world_z(obj)
     warnings: list[str] = []
     if not shapekeys:
         warnings.append("Bodygroup has no shapekeys.")
@@ -375,6 +390,7 @@ def object_report(obj: bpy.types.Object) -> dict[str, object]:
         "name": obj.name,
         "vertex_count": len(obj.data.vertices),
         "face_count": len(obj.data.polygons),
+        "average_height": round(average_height, 6) if math.isfinite(average_height) else None,
         "material_count": len([mat for mat in obj.data.materials if mat is not None]),
         "vertex_group_count": len(obj.vertex_groups),
         "armature_modifiers": [modifier.name for modifier in obj.modifiers if isinstance(modifier, bpy.types.ArmatureModifier)],
@@ -390,10 +406,11 @@ def collect_flexes() -> list[dict[str, object]]:
     used_names: set[str] = set()
     flexes: list[dict[str, object]] = []
     index = 1
-    for obj in sorted(mesh_objects(), key=lambda item: natural_key(item.name)):
+    for obj in sorted(mesh_objects(), key=bodygroup_processing_key):
         keys = obj.data.shape_keys
         if keys is None or len(keys.key_blocks) <= 1:
             continue
+        average_height = object_average_world_z(obj)
         for key in keys.key_blocks[1:]:
             if shape_key_max_delta(obj, key.name) <= EPSILON:
                 continue
@@ -412,6 +429,7 @@ def collect_flexes() -> list[dict[str, object]]:
                     "final_name": final_name,
                     "original_name": key.name,
                     "bodygroup": obj.name,
+                    "bodygroup_average_height": round(average_height, 6) if math.isfinite(average_height) else None,
                     "category": category,
                     "confidence": round(confidence, 3),
                     "rest_value": round(float(key.value), 4),
@@ -492,7 +510,7 @@ def collect_flex_preview(flexes: list[dict[str, object]], max_triangles: int = 5
     materials_by_uid: dict[str, dict[str, object]] = {}
     points: list[list[float]] = []
     triangle_index = 0
-    for object_index, obj in enumerate(sorted(mesh_objects(), key=lambda item: natural_key(item.name)), start=1):
+    for object_index, obj in enumerate(sorted(mesh_objects(), key=bodygroup_processing_key), start=1):
         bodygroup_uid = f"bodygroup_{object_index:03d}_{stripped_safe_name(obj.name).lower()[:32]}"
         uv_layer = obj.data.uv_layers.active
         keys = obj.data.shape_keys
@@ -581,7 +599,7 @@ def collect_flex_preview(flexes: list[dict[str, object]], max_triangles: int = 5
 
 def analyze_scene(input_blend: Path) -> tuple[dict[str, object], dict[str, object]]:
     prune_report = prune_shapekeys()
-    bodygroups = [object_report(obj) for obj in sorted(mesh_objects(), key=lambda item: natural_key(item.name))]
+    bodygroups = [object_report(obj) for obj in sorted(mesh_objects(), key=bodygroup_processing_key)]
     flexes = collect_flexes()
     preview = collect_flex_preview(flexes)
     auto_removed = auto_mark_excess_flexes_for_removal(flexes)

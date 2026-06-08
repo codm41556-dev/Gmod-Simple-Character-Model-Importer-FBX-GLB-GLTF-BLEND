@@ -4249,7 +4249,7 @@
     "warning_no_native_textures": "選択したモデルフォルダーに元のテクスチャファイルが見つかりません。",
     "warning_unresolved_texture_refs": "{count} 個の PMX テクスチャ参照を解決できませんでした: {refs}",
     "warning_unresolved_texture_refs_more": "{count} 個の PMX テクスチャ参照を解決できませんでした: {refs}、ほか {more_count} 件",
-    "warning_high_vertex_count": "頂点数が多いです: {count} 頂点。Source/GMod の処理が遅くなる可能性があります。",
+    "warning_high_vertex_count": "頂点数が多いです: {count} 頂点。インポートに長時間かかり、予期しない結果になる可能性があります。",
     "warning_high_morph_count": "モーフ/シェイプキー数が多いです: {count}。後続の Flex 処理が遅くなる可能性があります。",
     "warning_nsfw_summary": "NSFW の可能性があるシェイプキー名を検出しました: {morph_count} 個のモーフで {match_count} 件のキーワード一致。自動移植はこの種類のモデルに最適化されていません。",
     "warning_high_texture_count": "PMX の元テクスチャ数が多いです: {count}。材質処理が遅くなる可能性があります。"

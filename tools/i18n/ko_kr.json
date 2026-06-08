@@ -4249,7 +4249,7 @@
     "warning_no_native_textures": "선택한 모델 폴더에서 원본 텍스처 파일을 찾을 수 없습니다.",
     "warning_unresolved_texture_refs": "{count}개의 PMX 텍스처 참조를 확인할 수 없습니다: {refs}",
     "warning_unresolved_texture_refs_more": "{count}개의 PMX 텍스처 참조를 확인할 수 없습니다: {refs}, 그 외 {more_count}개",
-    "warning_high_vertex_count": "정점 수가 많습니다: {count}개 정점; Source/GMod 작업이 느려질 수 있습니다.",
+    "warning_high_vertex_count": "정점 수가 많습니다: {count}개 정점; 가져오기에 시간이 오래 걸리고 예상치 못한 결과가 발생할 수 있습니다.",
     "warning_high_morph_count": "모프/쉐이프키 수가 많습니다: {count}; 이후 Flex 작업이 느려질 수 있습니다.",
     "warning_nsfw_summary": "NSFW 가능성이 있는 쉐이프키 이름 감지: {morph_count}개 모프에서 {match_count}개 키워드 일치. 자동 포팅은 이러한 모델에 최적화되어 있지 않습니다.",
     "warning_high_texture_count": "원본 PMX 텍스처 수가 많습니다: {count}; 재질 작업이 느려질 수 있습니다."

@@ -4249,7 +4249,7 @@
     "warning_no_native_textures": "Aucun fichier de texture natif n’a été trouvé dans le dossier du modèle sélectionné.",
     "warning_unresolved_texture_refs": "{count} référence(s) de texture PMX n’ont pas pu être résolues : {refs}",
     "warning_unresolved_texture_refs_more": "{count} référence(s) de texture PMX n’ont pas pu être résolues : {refs}, et {more_count} de plus",
-    "warning_high_vertex_count": "Nombre de sommets élevé : {count} sommets ; le travail Source/GMod peut être lent.",
+    "warning_high_vertex_count": "Nombre de sommets élevé : {count} sommets ; l'importation peut prendre longtemps et produire des résultats inattendus.",
     "warning_high_morph_count": "Nombre de morphs/shapekeys élevé : {count} ; le travail Flex ultérieur peut être lent.",
     "warning_nsfw_summary": "Noms de shapekeys potentiellement NSFW détectés : {match_count} correspondance(s) de mots-clés dans {morph_count} morph(s). L’import automatique n’est pas optimisé pour ce type de modèle.",
     "warning_high_texture_count": "Nombre de textures PMX natives élevé : {count} ; le travail des matériaux peut être lent."

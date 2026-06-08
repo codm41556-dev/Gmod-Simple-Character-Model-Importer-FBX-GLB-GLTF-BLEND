@@ -4249,7 +4249,7 @@
     "warning_no_native_textures": "在所选模型文件夹中未找到原始贴图文件。",
     "warning_unresolved_texture_refs": "{count} 个 PMX 贴图引用无法解析：{refs}",
     "warning_unresolved_texture_refs_more": "{count} 个 PMX 贴图引用无法解析：{refs}，以及另外 {more_count} 个",
-    "warning_high_vertex_count": "顶点数较高：{count} 个顶点；Source/GMod 处理可能会变慢。",
+    "warning_high_vertex_count": "顶点数较高：{count} 个顶点；导入可能需要很长时间，并可能产生意外结果。",
     "warning_high_morph_count": "形态键/表情数量较高：{count}；后续 Flex 处理可能会变慢。",
     "warning_nsfw_summary": "检测到可能的 NSFW 形态键名称：{match_count} 个关键词匹配，涉及 {morph_count} 个形态键。自动移植流程未针对这种模型优化。",
     "warning_high_texture_count": "PMX 原始贴图数量较高：{count}；材质处理可能会变慢。"

@@ -69,7 +69,8 @@ CancelCheck = Callable[[], bool]
 DEFAULT_BODYGROUP_SCALE_FACTOR = 40.457
 DEFAULT_BODYGROUP_VERTEX_LIMIT = 65535
 RTX_BODYGROUP_VERTEX_LIMIT = 32767
-MAX_SUPPORTED_PMX_VERTEX_COUNT = 240_000
+MAX_SUPPORTED_PMX_VERTEX_COUNT = 300_000
+HIGH_PMX_VERTEX_WARNING_THRESHOLD = 100_000
 CONTENT_WARNING_KEYWORD_THRESHOLD = 5
 BODYGROUP_SCALE_PRESETS: dict[str, Path] = {
     "tall": Path("E:/G/Upload/acheron/5_propo/Face.smd"),
@@ -1844,8 +1845,11 @@ def analyze_pmx(pmx_path: Path, source_dir: Path | None = None) -> PmxAnalysis:
         preview = ", ".join(missing_refs[:8])
         suffix = "" if len(missing_refs) <= 8 else f" and {len(missing_refs) - 8} more"
         warnings.append(f"{len(missing_refs)} PMX texture references could not be resolved: {preview}{suffix}")
-    if analysis.vertex_count > 128_000:
-        warnings.append(f"High vertex count: {analysis.vertex_count:,} vertices; Source/GMod work may be slow.")
+    if analysis.vertex_count > HIGH_PMX_VERTEX_WARNING_THRESHOLD:
+        warnings.append(
+            f"High vertex count: {analysis.vertex_count:,} vertices; "
+            "importing may take a long time and produce unexpected results."
+        )
     if analysis.morph_count > 96:
         warnings.append(f"High morph/shapekey count: {analysis.morph_count:,}; later flex work may be slow.")
     analysis.content_warning_scan = scan_morph_content_warning(analysis.morph_names)

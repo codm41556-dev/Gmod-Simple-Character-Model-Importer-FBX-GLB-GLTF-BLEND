@@ -264,6 +264,7 @@ def load_static_preview_model(model_path: Path) -> StaticPreviewModel:
                 f"PMX vertex count {vertex_count:,} exceeds the supported limit of "
                 f"{core.MAX_SUPPORTED_PMX_VERTEX_COUNT:,}. This model is too large for the importer."
             )
+        positions = np.zeros((vertex_count, 3), dtype=np.float32)
         normals = np.zeros((vertex_count, 3), dtype=np.float32)
         uvs = np.zeros((vertex_count, 2), dtype=np.float32)
         for index in range(vertex_count):

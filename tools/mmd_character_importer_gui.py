@@ -5252,7 +5252,8 @@ class ImporterWindow(QtWidgets.QMainWindow):
             self.spine_reset_preview_button = QtWidgets.QPushButton("Reset View")
             self.spine_reset_preview_button.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_ArrowBack))
             self.spine_model_check = QtWidgets.QCheckBox("Model")
-            self.spine_model_check.setChecked(True)
+            self.spine_model_check.setChecked(False)
+            self.spine_preview.set_model_visible(False)
             self.spine_bone_names_check = QtWidgets.QCheckBox("Bone Names")
             preview_controls.addWidget(self.spine_reset_preview_button)
             preview_controls.addWidget(self.spine_model_check)
@@ -5438,7 +5439,8 @@ class ImporterWindow(QtWidgets.QMainWindow):
             self.sort_reset_preview_button = QtWidgets.QPushButton("Reset View")
             self.sort_reset_preview_button.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_ArrowBack))
             self.sort_model_check = QtWidgets.QCheckBox("Model")
-            self.sort_model_check.setChecked(True)
+            self.sort_model_check.setChecked(False)
+            self.sort_preview.set_model_visible(False)
             self.sort_bone_names_check = QtWidgets.QCheckBox("Bone Names")
             sort_preview_controls.addWidget(self.sort_reset_preview_button)
             sort_preview_controls.addWidget(self.sort_model_check)
@@ -8863,10 +8865,15 @@ class ImporterWindow(QtWidgets.QMainWindow):
                 except ValueError:
                     label = path.name
                 self.main_pmx_combo.addItem(label, str(path))
+            selected_index = -1
             if previous:
                 index = self.main_pmx_combo.findData(previous)
                 if index >= 0:
-                    self.main_pmx_combo.setCurrentIndex(index)
+                    selected_index = index
+            if selected_index < 0 and self.main_pmx_combo.count() > 0:
+                selected_index = 0
+            if selected_index >= 0:
+                self.main_pmx_combo.setCurrentIndex(selected_index)
         self.main_pmx_combo.blockSignals(False)
         if self.main_pmx_paths:
             self.analyze_main_pmx(silent=True)
@@ -9612,9 +9619,23 @@ class ImporterWindow(QtWidgets.QMainWindow):
                 count=match.group(1),
                 refs=match.group(2),
             )
+        match = re.fullmatch(
+            r"High vertex count: ([\d,]+) vertices; importing may take a long time and produce unexpected results\.",
+            text,
+        )
+        if match:
+            return self._t(
+                "preflight.warning_high_vertex_count",
+                "High vertex count: {count} vertices; importing may take a long time and produce unexpected results.",
+                count=match.group(1),
+            )
         match = re.fullmatch(r"High vertex count: ([\d,]+) vertices; Source/GMod work may be slow\.", text)
         if match:
-            return self._t("preflight.warning_high_vertex_count", "High vertex count: {count} vertices; Source/GMod work may be slow.", count=match.group(1))
+            return self._t(
+                "preflight.warning_high_vertex_count",
+                "High vertex count: {count} vertices; importing may take a long time and produce unexpected results.",
+                count=match.group(1),
+            )
         match = re.fullmatch(r"High morph/shapekey count: ([\d,]+); later flex work may be slow\.", text)
         if match:
             return self._t("preflight.warning_high_morph_count", "High morph/shapekey count: {count}; later flex work may be slow.", count=match.group(1))
@@ -10054,10 +10075,15 @@ class ImporterWindow(QtWidgets.QMainWindow):
                 except ValueError:
                     label = path.name
                 self.pmx_combo.addItem(label, str(path))
+            selected_index = -1
             if previous:
                 index = self.pmx_combo.findData(previous)
                 if index >= 0:
-                    self.pmx_combo.setCurrentIndex(index)
+                    selected_index = index
+            if selected_index < 0 and self.pmx_combo.count() > 0:
+                selected_index = 0
+            if selected_index >= 0:
+                self.pmx_combo.setCurrentIndex(selected_index)
         self.pmx_combo.blockSignals(False)
         if self.pmx_paths:
             self.analyze_current_pmx(silent=True)

@@ -4249,7 +4249,7 @@
     "warning_no_native_textures": "在所選模型資料夾中未找到原始貼圖檔案。",
     "warning_unresolved_texture_refs": "{count} 個 PMX 貼圖引用無法解析：{refs}",
     "warning_unresolved_texture_refs_more": "{count} 個 PMX 貼圖引用無法解析：{refs}，以及另外 {more_count} 個",
-    "warning_high_vertex_count": "頂點數較高：{count} 個頂點；Source/GMod 處理可能會變慢。",
+    "warning_high_vertex_count": "頂點數較高：{count} 個頂點；匯入可能需要很長時間，並可能產生非預期結果。",
     "warning_high_morph_count": "形態鍵/表情數量較高：{count}；後續 Flex 處理可能會變慢。",
     "warning_nsfw_summary": "偵測到可能的 NSFW 形態鍵名稱：{match_count} 個關鍵字匹配，涉及 {morph_count} 個形態鍵。自動移植流程未針對這種模型最佳化。",
     "warning_high_texture_count": "PMX 原始貼圖數量較高：{count}；材質處理可能會變慢。"

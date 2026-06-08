@@ -4249,7 +4249,7 @@
     "warning_no_native_textures": "No native texture files were found in the selected model folder.",
     "warning_unresolved_texture_refs": "{count} PMX texture references could not be resolved: {refs}",
     "warning_unresolved_texture_refs_more": "{count} PMX texture references could not be resolved: {refs} and {more_count} more",
-    "warning_high_vertex_count": "High vertex count: {count} vertices; Source/GMod work may be slow.",
+    "warning_high_vertex_count": "High vertex count: {count} vertices; importing may take a long time and produce unexpected results.",
     "warning_high_morph_count": "High morph/shapekey count: {count}; later flex work may be slow.",
     "warning_nsfw_summary": "Potential NSFW shapekey names detected: {match_count} keyword matches across {morph_count} morphs. Auto porting is not optimized for this kind of model.",
     "warning_high_texture_count": "High native PMX texture count: {count}; material work may be slow."
