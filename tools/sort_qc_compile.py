@@ -2439,6 +2439,7 @@ def convert_one_vtf(vtfcmd: Path, image_path: Path, output_dir: Path) -> Path:
 def write_vmt(path: Path, author: str, model_name: str, material_name: str, has_normal: bool) -> None:
     bump = f"models/{author}/{model_name}/{material_name}_n" if has_normal else f"models/{author}/shared/normal"
     phong = f"models/{author}/shared/phong_exp"
+    phong_fresnel = "[0.0 1.5 2]" if has_normal else "[0.0 0.5 1]"
     path.write_text(
         "VertexLitGeneric\n"
         "{\n"
@@ -2453,7 +2454,7 @@ def write_vmt(path: Path, author: str, model_name: str, material_name: str, has_
         '\t$phongboost "1"\n'
         '\t$phongalbedotint "1"\n'
         f'\t$phongexponenttexture "{phong}"\n'
-        '\t$phongfresnelranges "[0.0 1.5 2]"\n'
+        f'\t$phongfresnelranges "{phong_fresnel}"\n'
         '\t$rimlight "1"\n'
         '\t$rimlightexponent "2"\n'
         '\t$rimlightboost "2"\n'
