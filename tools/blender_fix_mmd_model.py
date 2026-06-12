@@ -46,6 +46,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--report-json", type=Path, required=True)
     parser.add_argument("--clear-custom-normals", dest="clear_custom_normals", action="store_true", default=False)
     parser.add_argument("--keep-custom-normals", dest="clear_custom_normals", action="store_false")
+    parser.add_argument("--vrm-spine-merge", dest="vrm_spine_merge", action="store_true", default=False)
     return parser.parse_args(argv)
 
 
@@ -263,14 +264,87 @@ def convert_to_valve() -> None:
     print("ValveBiped bone conversion completed.")
 
 
-def valve_bone_status() -> dict[str, object]:
+SPINE1_BONE = "ValveBiped.Bip01_Spine1"
+SPINE2_BONE = "ValveBiped.Bip01_Spine2"
+
+
+def merge_vertex_group(obj: bpy.types.Object, source: str, target: str) -> bool:
+    if source not in obj.vertex_groups:
+        return False
+    source_group = obj.vertex_groups[source]
+    if target not in obj.vertex_groups:
+        source_group.name = target
+        return True
+    target_group = obj.vertex_groups[target]
+    for vertex in obj.data.vertices:
+        for group in vertex.groups:
+            if group.group == source_group.index and group.weight > 0.0:
+                target_group.add([vertex.index], group.weight, "ADD")
+                break
+    obj.vertex_groups.remove(source_group)
+    return True
+
+
+def merge_vrm_spine2_into_spine1() -> dict[str, object]:
+    """Collapse the VRM upper chest into the chest after ValveBiped conversion.
+
+    VRM humanoid skeletons map chest -> Spine1 and upperChest -> Spine2, which
+    leaves the torso split differently from MMD models and breaks downstream
+    spine repair. Merging Spine2 into Spine1 (weights + children) gives step 3
+    the collapsed Pelvis/Spine/Spine1 chain it already knows how to rebuild.
+    """
+    result: dict[str, object] = {"merged": False, "source": SPINE2_BONE, "target": SPINE1_BONE}
+    armature = next((obj for obj in armatures() if SPINE2_BONE in obj.data.bones), None)
+    if armature is None:
+        result["reason"] = f"{SPINE2_BONE} not found"
+        print(f"VRM spine merge skipped: {SPINE2_BONE} does not exist after conversion.")
+        return result
+    if SPINE1_BONE not in armature.data.bones:
+        result["reason"] = f"{SPINE1_BONE} not found"
+        print(f"Warning: VRM spine merge skipped: {SPINE1_BONE} is missing, cannot merge {SPINE2_BONE} into it.")
+        return result
+    print(f"Merging VRM bone {SPINE2_BONE} into {SPINE1_BONE}.")
+    weight_merged_objects = [obj.name for obj in mesh_objects() if merge_vertex_group(obj, SPINE2_BONE, SPINE1_BONE)]
+    set_active_object(armature)
+    reparented: list[str] = []
+    bpy.ops.object.mode_set(mode="EDIT")
+    try:
+        edit_bones = armature.data.edit_bones
+        source_bone = edit_bones[SPINE2_BONE]
+        target_bone = edit_bones[SPINE1_BONE]
+        original_parent = source_bone.parent.name if source_bone.parent else None
+        for child in list(source_bone.children):
+            if child == target_bone:
+                continue
+            child.parent = target_bone
+            child.use_connect = False
+            reparented.append(child.name)
+        if target_bone.parent == source_bone:
+            target_bone.parent = edit_bones[original_parent] if original_parent and original_parent in edit_bones else None
+            target_bone.use_connect = False
+        edit_bones.remove(source_bone)
+    finally:
+        ensure_object_mode()
+    result.update(
+        {
+            "merged": True,
+            "reparented_children": reparented,
+            "weight_merged_objects": weight_merged_objects,
+        }
+    )
+    print(f"Merged {SPINE2_BONE} into {SPINE1_BONE}; reparented {len(reparented)} child bone(s): {', '.join(reparented) or 'none'}.")
+    return result
+
+
+def valve_bone_status(excluded: set[str] | None = None) -> dict[str, object]:
+    required = VALVE_REQUIRED_BONES - (excluded or set())
     names: set[str] = set()
     for armature in armatures():
         names.update(bone.name for bone in armature.data.bones)
-    missing = sorted(VALVE_REQUIRED_BONES - names)
+    missing = sorted(required - names)
     return {
-        "required_count": len(VALVE_REQUIRED_BONES),
-        "present_count": len(VALVE_REQUIRED_BONES) - len(missing),
+        "required_count": len(required),
+        "present_count": len(required) - len(missing),
         "missing": missing,
     }
 
@@ -282,8 +356,10 @@ def build_report(
     clear_custom_normals_enabled: bool,
     initial_cleared_custom_normals: int,
     final_cleared_custom_normals: int,
+    vrm_spine_merge: dict[str, object] | None = None,
 ) -> dict[str, object]:
-    status = valve_bone_status()
+    merged_away = {SPINE2_BONE} if vrm_spine_merge and vrm_spine_merge.get("merged") else set()
+    status = valve_bone_status(excluded=merged_away)
     shapekey_count = 0
     for mesh in bpy.data.meshes:
         if mesh.shape_keys:
@@ -305,6 +381,7 @@ def build_report(
         "custom_normal_meshes_cleared": initial_cleared_custom_normals + final_cleared_custom_normals,
         "custom_normal_meshes_cleared_initial": initial_cleared_custom_normals,
         "custom_normal_meshes_cleared_final": final_cleared_custom_normals,
+        "vrm_spine_merge": vrm_spine_merge,
         "valve_bones": status,
         "objects": [
             {
@@ -339,6 +416,7 @@ def main() -> int:
     fix_armature_twice()
     translate_with_cats()
     convert_to_valve()
+    vrm_spine_merge = merge_vrm_spine2_into_spine1() if args.vrm_spine_merge else None
     if args.clear_custom_normals:
         final_cleared_custom_normals = clear_custom_normals("after model fix")
     else:
@@ -353,6 +431,7 @@ def main() -> int:
         args.clear_custom_normals,
         initial_cleared_custom_normals,
         final_cleared_custom_normals,
+        vrm_spine_merge,
     )
     missing_valve_bones = report["valve_bones"]["missing"]
     if missing_valve_bones:

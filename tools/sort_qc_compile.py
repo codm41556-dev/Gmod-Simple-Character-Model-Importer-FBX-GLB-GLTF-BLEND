@@ -913,6 +913,10 @@ def classify_jigglebones(nodes: dict[int, SmdNode], stats: dict[str, dict[str, A
     spring_hints = ("breast", "chest", "butt", "胸", "乳")
     rows: list[dict[str, Any]] = []
     pelvis_x = float(landmarks.get("ValveBiped.Bip01_Pelvis", (0.0, 0.0, 0.0))[0])
+    direct_child_counts: dict[int, int] = {}
+    for node in nodes.values():
+        if node.parent in nodes and node.parent != node.index:
+            direct_child_counts[node.parent] = direct_child_counts.get(node.parent, 0) + 1
     for node in sorted(nodes.values(), key=lambda item: item.index):
         name = node.name
         stat = stats.get(name, {})
@@ -966,6 +970,11 @@ def classify_jigglebones(nodes: dict[int, SmdNode], stats: dict[str, dict[str, A
                 warnings.append("Low-confidence jiggle classification; verify manually.")
             else:
                 confidence = 0.7
+        direct_children = direct_child_counts.get(node.index, 0)
+        if jiggle_type != "Not Jiggle" and direct_children > 4:
+            jiggle_type = "Not Jiggle"
+            reason = f"hub bone with {direct_children} direct children (more than 4); defaulted to no jiggle"
+            confidence = 0.9
         region = classify_region(ref_pos, landmarks)
         pitch_min, pitch_max, yaw_min, yaw_max = orientation_code(ref_pos, landmarks)
         rows.append(
@@ -974,6 +983,7 @@ def classify_jigglebones(nodes: dict[int, SmdNode], stats: dict[str, dict[str, A
                 "bone": name,
                 "parent": parent_name,
                 "essential": is_essential_bone(name),
+                "direct_children": direct_children,
                 "jiggle_type": jiggle_type,
                 "region": region,
                 "confidence": round(confidence, 3),

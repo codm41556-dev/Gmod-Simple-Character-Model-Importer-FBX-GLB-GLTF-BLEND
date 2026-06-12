@@ -129,6 +129,52 @@ def set_active(obj: bpy.types.Object) -> None:
     bpy.context.view_layer.objects.active = obj
 
 
+def read_glb_json(path: Path) -> dict:
+    data = path.read_bytes()
+    if len(data) < 12 or data[:4] != b"glTF":
+        return {}
+    offset = 12
+    while offset + 8 <= len(data):
+        chunk_len, chunk_type = struct.unpack_from("<I4s", data, offset)
+        offset += 8
+        if chunk_type == b"JSON":
+            return json.loads(data[offset : offset + chunk_len])
+        offset += chunk_len
+    return {}
+
+
+def import_vrm_model(vrm_path: Path) -> bpy.types.Object:
+    """Import a VRM via the bundled glTF importer for icon rendering."""
+    print(f"[Step13 Render] Importing VRM with the glTF importer: {vrm_path}", flush=True)
+    is_vrm0 = False
+    try:
+        doc = read_glb_json(vrm_path)
+        is_vrm0 = isinstance(doc.get("extensions"), dict) and "VRM" in doc["extensions"]
+    except Exception:
+        pass
+    before = set(bpy.data.objects)
+    call_operator(bpy.ops.import_scene.gltf, filepath=str(vrm_path))
+    imported = [obj for obj in bpy.data.objects if obj not in before]
+    armatures = [obj for obj in imported if obj.type == "ARMATURE"] or [
+        obj for obj in bpy.data.objects if obj.type == "ARMATURE"
+    ]
+    if not armatures:
+        raise RuntimeError("VRM import produced no armature.")
+    if is_vrm0:
+        # VRM 0.x models face +Y after glTF import; rotate the scene roots 180
+        # degrees so the character faces -Y like MMD imports (camera framing
+        # and the F/E icon angles assume that convention).
+        from mathutils import Matrix
+
+        rotation = Matrix.Rotation(math.pi, 4, "Z")
+        for obj in imported:
+            if obj.parent is None:
+                obj.matrix_world = rotation @ obj.matrix_world
+        bpy.context.view_layer.update()
+        print("[Step13 Render] Rotated VRM 0.x scene 180 degrees to face the camera.", flush=True)
+    return armatures[0]
+
+
 def import_model(pmx_path: Path) -> bpy.types.Object:
     ops = get_mmd_tool_ops()
     if ops is None:
@@ -894,19 +940,28 @@ def main() -> int:
     args = parse_args()
     if not args.pmx.exists():
         raise FileNotFoundError(args.pmx)
-    if not args.body_vmd.exists():
+    is_vrm = args.pmx.suffix.lower() == ".vrm"
+    if not is_vrm and not args.body_vmd.exists():
         raise FileNotFoundError(args.body_vmd)
 
     started = time.monotonic()
     print("[Step13 Render] Starting Step 13 icon render.", flush=True)
-    enable_mmd_tools()
+    if not is_vrm:
+        enable_mmd_tools()
     clear_scene()
     setup_world_and_lighting()
-    armature = import_model(args.pmx)
-    missing_face_vmds = [path for path in args.face_vmd if not path.exists()]
-    if missing_face_vmds:
-        raise FileNotFoundError(missing_face_vmds[0])
-    import_motions(armature, args.body_vmd, args.face_vmd, args.frame)
+    if is_vrm:
+        armature = import_vrm_model(args.pmx)
+        print(
+            "[Step13 Render] VMD posing is not supported for VRM models; rendering the default pose.",
+            flush=True,
+        )
+    else:
+        armature = import_model(args.pmx)
+        missing_face_vmds = [path for path in args.face_vmd if not path.exists()]
+        if missing_face_vmds:
+            raise FileNotFoundError(missing_face_vmds[0])
+        import_motions(armature, args.body_vmd, args.face_vmd, args.frame)
     hidden_materials = remove_hidden_material_faces()
     converted_materials = make_unshaded_materials()
     camera_info = setup_camera("release_abdomen", "MCI_Release_Icon_Camera")
@@ -927,6 +982,7 @@ def main() -> int:
     report = {
         "step": 13,
         "pmx_path": str(args.pmx),
+        "model_format": "vrm" if is_vrm else "pmx",
         "body_vmd_path": str(args.body_vmd),
         "vmd_path": str(args.body_vmd),
         "face_vmd_paths": [str(path) for path in args.face_vmd],

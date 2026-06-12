@@ -107,6 +107,15 @@ DISPLAY_NAME_ALLOWED_RE = re.compile(r"^[A-Za-z0-9_ ]*$")
 DISPLAY_NAME_UNSAFE_RE = re.compile(r"[^A-Za-z0-9_ ]+")
 CATEGORY_DISPLAY_ALLOWED_RE = re.compile(r"^[\x20-\x7E]*$")
 CATEGORY_DISPLAY_UNSAFE_RE = re.compile(r"[^\x20-\x7E]+")
+# Main-interface model scale: a multiplier on the Step 6 base scale
+# (core.DEFAULT_BODYGROUP_SCALE_FACTOR = 40.457). VRM avatars import smaller
+# than mmd_tools-scaled PMX models, so they default to 1.33 (= 53.808).
+MODEL_SCALE_DEFAULTS = {"pmx": 1.0, "vrm": 1.33}
+
+
+def model_scale_default_for_path(path: Path | None) -> float:
+    suffix = path.suffix.lower().lstrip(".") if path is not None else "pmx"
+    return float(MODEL_SCALE_DEFAULTS.get(suffix, 1.0))
 # Distinct colors for the up-to-14 additional CoACD collision groups (preview
 # bone tint + table row tint).
 COLLISION_GROUP_COLORS: list[tuple[float, float, float]] = [
@@ -2512,6 +2521,7 @@ class FullImportWorker(QtCore.QThread):
         workspace_root: str = "",
         collision_quality: str = "balanced",
         gender: str = "female",
+        bodygroup_scale_factor: float = float(getattr(core, "DEFAULT_BODYGROUP_SCALE_FACTOR", 40.457)),
     ) -> None:
         super().__init__()
         self.pmx_path = Path(pmx_path)
@@ -2527,6 +2537,7 @@ class FullImportWorker(QtCore.QThread):
         self.workspace_root = workspace_root
         self.collision_quality = str(collision_quality or "balanced")
         self.gender = "male" if str(gender or "").strip().lower() == "male" else "female"
+        self.bodygroup_scale_factor = float(bodygroup_scale_factor or getattr(core, "DEFAULT_BODYGROUP_SCALE_FACTOR", 40.457))
         self.cancel_requested = False
         self.step_results: dict[int, dict[str, object]] = {}
         self.optional_warnings: list[str] = []
@@ -2707,6 +2718,8 @@ class FullImportWorker(QtCore.QThread):
             self._stage(6, "Sort Bodygroups", str(material_blend))
             body_analysis = core.analyze_bodygroups_blend(
                 material_blend,
+                scale_factor=self.bodygroup_scale_factor,
+                scale_preset="factor",
                 progress=self._log,
                 cancel_check=self._cancelled,
                 vertex_limit=self.bodygroup_vertex_limit,
@@ -2714,6 +2727,8 @@ class FullImportWorker(QtCore.QThread):
             body_result = core.sort_bodygroups_blend(
                 material_blend,
                 body_analysis.plan,
+                scale_factor=self.bodygroup_scale_factor,
+                scale_preset="factor",
                 progress=self._log,
                 cancel_check=self._cancelled,
                 vertex_limit=self.bodygroup_vertex_limit,
@@ -3543,6 +3558,25 @@ class ImporterWindow(QtWidgets.QMainWindow):
     def on_gender_combo_changed(self, source: QtWidgets.QComboBox) -> None:
         self.set_character_gender(str(source.currentData() or "female"))
         self.save_settings()
+
+    def apply_main_scale_default_for_selected(self) -> None:
+        """Track the selected model's format and reset the scale to its default on change."""
+        if not hasattr(self, "main_scale_spin"):
+            return
+        pmx = self.current_main_pmx_path()
+        fmt = pmx.suffix.lower().lstrip(".") if pmx is not None else "pmx"
+        if fmt not in MODEL_SCALE_DEFAULTS:
+            fmt = "pmx"
+        if fmt == self._main_scale_format:
+            return
+        self._main_scale_format = fmt
+        self.main_scale_spin.setValue(model_scale_default_for_path(pmx))
+
+    def main_effective_bodygroup_scale(self) -> float:
+        multiplier = float(self.main_scale_spin.value()) if hasattr(self, "main_scale_spin") else 1.0
+        if multiplier <= 0:
+            multiplier = 1.0
+        return round(multiplier * float(getattr(core, "DEFAULT_BODYGROUP_SCALE_FACTOR", 40.457)), 3)
 
     def configured_category_pairs(self) -> list[dict[str, object]]:
         """Fast, config-only category pairs so completers exist at startup; the disk scan runs async."""
@@ -5100,6 +5134,18 @@ class ImporterWindow(QtWidgets.QMainWindow):
         self.main_clear_custom_normals_hint.setObjectName("fieldHint")
         self.main_clear_custom_normals_hint.setWordWrap(True)
         self.main_gender_combo = self._make_gender_combo()
+        self.main_scale_spin = QtWidgets.QDoubleSpinBox()
+        self.main_scale_spin.setRange(0.01, 10.0)
+        self.main_scale_spin.setDecimals(3)
+        self.main_scale_spin.setSingleStep(0.01)
+        self.main_scale_spin.setValue(MODEL_SCALE_DEFAULTS["pmx"])
+        self.main_scale_spin.setToolTip(
+            "Multiplier on the Step 6 base scale of "
+            f"{float(getattr(core, 'DEFAULT_BODYGROUP_SCALE_FACTOR', 40.457))}. "
+            "1.0 keeps the standard PMX character height; VRM models default to 1.33 "
+            "(40.457 x 1.33 = 53.808). The default follows the selected model's format."
+        )
+        self._main_scale_format = "pmx"
         self.main_form_labels = {
             "workspace": QtWidgets.QLabel("Workspace"),
             "category_internal": QtWidgets.QLabel("Category internal name"),
@@ -5107,6 +5153,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
             "character_internal": QtWidgets.QLabel("Character internal name"),
             "character_display": QtWidgets.QLabel("Character display name"),
             "gender": QtWidgets.QLabel("Animation gender"),
+            "model_scale": QtWidgets.QLabel("Model scale factor"),
             "rtx_vertex_limit": QtWidgets.QLabel("RTX vertex limit"),
             "clear_custom_normals": QtWidgets.QLabel("Model custom normals"),
         }
@@ -5120,6 +5167,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
         form.addRow(self.main_form_labels["character_internal"], self.main_model_name_edit)
         form.addRow(self.main_form_labels["character_display"], self.main_model_display_edit)
         form.addRow(self.main_form_labels["gender"], self.main_gender_combo)
+        form.addRow(self.main_form_labels["model_scale"], self.main_scale_spin)
         form.addRow(self.main_form_labels["rtx_vertex_limit"], self.main_rtx_bodygroup_limit_check)
         main_clear_custom_normals_box = QtWidgets.QWidget()
         main_clear_custom_normals_layout = QtWidgets.QVBoxLayout(main_clear_custom_normals_box)
@@ -9505,6 +9553,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
                 self.main_pmx_combo.setCurrentIndex(selected_index)
         self.main_pmx_combo.blockSignals(False)
         if self.main_pmx_paths:
+            self.apply_main_scale_default_for_selected()
             if reset_model_name:
                 self.set_main_model_name_from_candidate(self.main_model_name_candidate(self.current_main_pmx_path()), force=True)
             self.analyze_main_pmx(silent=True, reset_model_name=reset_model_name)
@@ -9517,6 +9566,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
         self.current_main_workspace = None
         self.main_workspace_edit.clear()
         self.main_warning_label.clear()
+        self.apply_main_scale_default_for_selected()
         if self.main_model_preview is not None:
             self.main_model_preview.clear_model()
         if self.current_main_pmx_path():
@@ -10206,6 +10256,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
                 else "balanced"
             ),
             gender=self.current_character_gender(),
+            bodygroup_scale_factor=self.main_effective_bodygroup_scale(),
         )
         self.worker.log.connect(self.append_main_log)
         self.worker.progress.connect(self.set_main_progress)
@@ -13351,6 +13402,37 @@ class ImporterWindow(QtWidgets.QMainWindow):
                 return
         self.show_error("Detect Step 5 Output", "No Step 5 .blend output was found. Run Step 5 or browse to the material-sorted blend.")
 
+    def workspace_model_format_for_path(self, path: Path) -> str:
+        """Read the step-1 import report's format ("pmx"/"vrm") for the workspace containing ``path``."""
+        try:
+            for ancestor in [path] + list(path.parents):
+                report_path = ancestor / "1_import_mmd_model" / "blender_import_report.json"
+                if report_path.exists():
+                    report = json.loads(report_path.read_text(encoding="utf-8"))
+                    fmt = str(report.get("format") or "pmx").lower()
+                    return fmt if fmt in MODEL_SCALE_DEFAULTS else "pmx"
+        except Exception:
+            pass
+        return "pmx"
+
+    def update_bodygroup_scale_default_for_input(self, input_blend: Path) -> None:
+        """Default Step 6's scale factor by the workspace's model format.
+
+        PMX: 40.457; VRM: 40.457 x 1.33 = 53.808. Only auto-switches when the
+        spin still holds one of the format defaults, so a user-entered value
+        is never overwritten.
+        """
+        if not hasattr(self, "bodygroup_scale_spin"):
+            return
+        base = float(getattr(core, "DEFAULT_BODYGROUP_SCALE_FACTOR", 40.457))
+        defaults = {fmt: round(base * multiplier, 3) for fmt, multiplier in MODEL_SCALE_DEFAULTS.items()}
+        target = defaults[self.workspace_model_format_for_path(input_blend)]
+        current = float(self.bodygroup_scale_spin.value())
+        if abs(current - target) < 0.0005:
+            return
+        if any(abs(current - value) < 0.0005 for value in defaults.values()):
+            self.bodygroup_scale_spin.setValue(target)
+
     def on_bodygroup_input_changed(self, value: str) -> None:
         self.current_bodygroup_analysis = None
         self.current_bodygroup_plan = None
@@ -13364,6 +13446,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
             self.bodygroup_preview.clear()
         if value.strip():
             self.update_bodygroup_output_preview(Path(value.strip()))
+            self.update_bodygroup_scale_default_for_input(Path(clean_path_text(value)))
         else:
             self.bodygroup_output_edit.clear()
             self.bodygroup_blend_label.clear()

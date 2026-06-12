@@ -120,10 +120,13 @@ def find_workspace_root(input_path: Path) -> Path:
     return path
 
 
+MODEL_SUFFIXES = (".pmx", ".vrm")
+
+
 def pmx_candidates(input_path: Path, workspace_root: Path) -> list[Path]:
     path = input_path.resolve()
     candidates: list[Path] = []
-    if path.is_file() and path.suffix.lower() == ".pmx":
+    if path.is_file() and path.suffix.lower() in MODEL_SUFFIXES:
         candidates.append(path)
     source_assets = workspace_root / "0_source_mmd_assets"
     search_dirs = []
@@ -134,10 +137,11 @@ def pmx_candidates(input_path: Path, workspace_root: Path) -> list[Path]:
     if path.is_file() and path.suffix.lower() == ".blend":
         search_dirs.append(path.parent)
     for folder in search_dirs:
-        try:
-            candidates.extend(folder.rglob("*.pmx"))
-        except Exception:
-            pass
+        for pattern in ("*.pmx", "*.vrm"):
+            try:
+                candidates.extend(folder.rglob(pattern))
+            except Exception:
+                pass
     out: list[Path] = []
     seen: set[Path] = set()
     for candidate in candidates:
@@ -151,14 +155,42 @@ def pmx_candidates(input_path: Path, workspace_root: Path) -> list[Path]:
     return sorted(out, key=lambda item: (-item.stat().st_size, str(item).lower()))
 
 
+def step1_imported_model_path(workspace_root: Path) -> Path | None:
+    """The model Step 1 actually imported, from its report (authoritative).
+
+    A source folder can contain several PMX/VRM files; scanning alone can pick
+    a sibling model that was never imported.
+    """
+    report_path = workspace_root / "1_import_mmd_model" / "blender_import_report.json"
+    if not report_path.exists():
+        return None
+    try:
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+    except Exception:
+        return None
+    raw = str(report.get("pmx_path") or report.get("vrm_path") or "")
+    if not raw:
+        return None
+    candidate = Path(raw)
+    if candidate.exists() and candidate.suffix.lower() in MODEL_SUFFIXES:
+        return candidate
+    return None
+
+
 def resolve_input(input_path: Path) -> tuple[Path, Path, Path]:
     workspace_root = find_workspace_root(input_path)
-    candidates = pmx_candidates(input_path, workspace_root)
-    if not candidates:
-        raise FileNotFoundError(f"No PMX found from Step 1 input: {input_path}")
-    pmx_path = candidates[0]
+    path = input_path.resolve()
+    if path.is_file() and path.suffix.lower() in MODEL_SUFFIXES:
+        model_path = path
+    else:
+        model_path = step1_imported_model_path(workspace_root)
+    if model_path is None:
+        candidates = pmx_candidates(input_path, workspace_root)
+        if not candidates:
+            raise FileNotFoundError(f"No PMX or VRM model found from Step 1 input: {input_path}")
+        model_path = candidates[0]
     output_dir = workspace_root / ICON_DIR_NAME
-    return workspace_root, pmx_path, output_dir
+    return workspace_root, model_path, output_dir
 
 
 def write_json(path: Path, data: dict[str, object]) -> None:

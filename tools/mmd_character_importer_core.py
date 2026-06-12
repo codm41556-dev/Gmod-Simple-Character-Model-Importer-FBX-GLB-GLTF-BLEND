@@ -2857,6 +2857,20 @@ def workspace_root_for_step1_input(input_path: Path) -> Path:
     return input_path.parent if input_path.is_file() else input_path
 
 
+def workspace_model_format(path: Path) -> str:
+    """Read the step-1 import report's "format" ("pmx"/"vrm") for the workspace containing ``path``."""
+    try:
+        path = path.resolve()
+        for ancestor in [path] + list(path.parents):
+            report_path = ancestor / "1_import_mmd_model" / "blender_import_report.json"
+            if report_path.exists():
+                report = json.loads(report_path.read_text(encoding="utf-8"))
+                return str(report.get("format") or "pmx").strip().lower() or "pmx"
+    except Exception:
+        pass
+    return "pmx"
+
+
 def icon_paths_for_step1_input(input_path: Path) -> tuple[Path, Path, Path, Path, Path, Path, Path]:
     workspace_root = workspace_root_for_step1_input(input_path)
     icon_dir = workspace_root / "13_sort_icons_and_arts"
@@ -3064,6 +3078,9 @@ def fix_imported_blend(
         str(fix_report_path),
     ]
     command.append("--clear-custom-normals" if clear_custom_normals else "--keep-custom-normals")
+    if workspace_model_format(input_blend) == "vrm":
+        command.append("--vrm-spine-merge")
+        emit(progress, "VRM model detected: Spine2 will be merged into Spine1 after the ValveBiped conversion.")
     emit(progress, f"Starting Blender fix step: {input_blend}")
     started = time.monotonic()
     run_process_streamed(
