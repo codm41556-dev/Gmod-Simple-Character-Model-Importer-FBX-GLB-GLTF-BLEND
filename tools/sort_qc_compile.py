@@ -287,6 +287,13 @@ def safe_internal_identifier(value: str, fallback: str = "model") -> str:
     return text[:80] or fallback
 
 
+def strip_model_hash_suffix(value: str) -> str:
+    """Drop the trailing short-hash suffix that auto-derived internal names carry."""
+    raw = str(value or "")
+    cleaned = re.sub(r"_[0-9a-f]{6,12}$", "", raw, flags=re.IGNORECASE)
+    return cleaned if cleaned.strip("_ ") else raw
+
+
 def safe_display_identifier(value: str, fallback: str = "Model") -> str:
     text = re.sub(r"[^A-Za-z0-9_ ]+", "", str(value or "").strip())
     text = re.sub(r"\s+", " ", text).strip()
@@ -1289,6 +1296,12 @@ def analyze(input_path: Path, author: str = "", category: str = "", model_name: 
     workspace_name = Path(discovered["workspace_root"]).name
     workspace_stem = re.sub(r"_[0-9a-f]{8,}$", "", workspace_name, flags=re.IGNORECASE)
     default_model = safe_internal_identifier(model_name or workspace_stem, "mmd_model")
+    if not model_name:
+        # Auto-derived defaults collide between models ("mmd_model" is common);
+        # reuse the workspace's PMX-hash suffix to keep them unique.
+        hash_match = re.search(r"_([0-9a-f]{8,})$", workspace_name, flags=re.IGNORECASE)
+        if hash_match and not re.search(r"_[0-9a-f]{6,12}$", default_model, flags=re.IGNORECASE):
+            default_model = safe_internal_identifier(f"{default_model}_{hash_match.group(1)[:6].lower()}", default_model)
     # The author namespace is fixed; validate_plan() requires exactly "sheepylord".
     safe_author = "sheepylord"
     if author and safe_internal_identifier(author, safe_author).lower() != safe_author:
@@ -1311,7 +1324,7 @@ def analyze(input_path: Path, author: str = "", category: str = "", model_name: 
         "character_category": safe_category,
         "model_name": default_model,
         "gender": normalize_gender(gender),
-        "display_name": display_from_identifier(default_model, "Mmd Model"),
+        "display_name": display_from_identifier(strip_model_hash_suffix(default_model), "Mmd Model"),
         "category_readable": category_display_from_identifier(safe_category, "Sheepy Lord"),
         "gmod": gmod,
         "inputs": discovered,

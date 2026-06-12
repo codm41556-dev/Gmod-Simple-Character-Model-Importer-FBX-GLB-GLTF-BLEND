@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import faulthandler
+import hashlib
 import html
 import json
 import os
@@ -402,8 +403,44 @@ def sanitize_category_display_name_text(value: object) -> str:
     return CATEGORY_DISPLAY_UNSAFE_RE.sub("", str(value or ""))
 
 
+_MODEL_HASH_CACHE: dict[tuple[str, int, int], str] = {}
+
+
+def short_model_hash(path: Path | None, length: int = 6) -> str:
+    """Deterministic short fingerprint of a model file.
+
+    Appended to auto-derived internal names so two different models that both
+    sanitize to the same identifier (commonly "mmd_model") no longer collide
+    in model paths, Lua filenames, and addon folders.
+    """
+
+    if path is None:
+        return ""
+    try:
+        stat = path.stat()
+    except Exception:
+        return ""
+    key = (str(path).casefold(), int(stat.st_size), int(stat.st_mtime_ns))
+    cached = _MODEL_HASH_CACHE.get(key)
+    if cached is None:
+        try:
+            digest = hashlib.sha1(str(stat.st_size).encode("ascii"))
+            with path.open("rb") as handle:
+                digest.update(handle.read(1 << 20))
+            cached = digest.hexdigest()
+        except Exception:
+            return ""
+        _MODEL_HASH_CACHE[key] = cached
+    return cached[:length]
+
+
 def display_from_internal_text(text: str, fallback: str = "") -> str:
-    words = [part for part in str(text or "").replace("_", " ").split() if part]
+    # Auto-derived internal names carry a trailing short-hash suffix; keep it
+    # out of the human-facing display name.
+    raw = str(text or "")
+    cleaned = re.sub(r"_[0-9a-f]{6,12}$", "", raw, flags=re.IGNORECASE)
+    source = cleaned if cleaned.strip("_ ") else raw
+    words = [part for part in source.replace("_", " ").split() if part]
     display = " ".join(part[:1].upper() + part[1:] for part in words)
     return sanitize_display_name_text(display or fallback)
 
@@ -9496,12 +9533,22 @@ class ImporterWindow(QtWidgets.QMainWindow):
             raw_candidates.append(str(analysis.model_name))
         if pmx:
             raw_candidates.append(pmx.stem)
+        if pmx is None and analysis is not None:
+            pmx = Path(str(analysis.pmx_path)) if getattr(analysis, "pmx_path", None) else None
+        # Suffix auto-derived names with the model's short hash: many PMX names
+        # sanitize to the same identifier (often "mmd_model"), and identical
+        # internal names collide in models/, lua/, and addon folders.
+        suffix = short_model_hash(pmx)
         for raw in raw_candidates:
             candidate = re.sub(r"[^A-Za-z0-9_]+", "_", core.slugify(raw)).strip("_")
             candidate = sanitize_internal_identifier_text(candidate)
             if candidate:
+                if suffix and not candidate.lower().endswith(f"_{suffix}"):
+                    candidate = f"{candidate}_{suffix}"
                 return candidate
-        return "mmd_model" if pmx or analysis else ""
+        if pmx or analysis:
+            return f"mmd_model_{suffix}" if suffix else "mmd_model"
+        return ""
 
     def set_main_model_name_from_candidate(self, candidate: str, force: bool = False) -> None:
         if not hasattr(self, "main_model_name_edit"):
@@ -10085,11 +10132,8 @@ class ImporterWindow(QtWidgets.QMainWindow):
         explicit = self.main_model_name_edit.text().strip()
         if explicit:
             return explicit
-        analysis = self.current_main_analysis
-        pmx = self.current_main_pmx_path()
-        raw = analysis.model_name if analysis and analysis.model_name else (pmx.stem if pmx else "mmd_model")
-        safe = re.sub(r"[^A-Za-z_]+", "_", core.slugify(raw)).strip("_")
-        return safe or "mmd_model"
+        candidate = self.main_model_name_candidate(self.current_main_pmx_path(), self.current_main_analysis)
+        return candidate or "mmd_model"
 
     def main_effective_category_display_name(self) -> str:
         explicit = self.main_category_display_edit.text().strip() if hasattr(self, "main_category_display_edit") else ""
