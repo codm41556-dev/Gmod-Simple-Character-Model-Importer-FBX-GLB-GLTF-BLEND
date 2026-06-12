@@ -8,7 +8,9 @@ import bmesh
 import json
 import math
 import os
+import struct
 import sys
+import tempfile
 import time
 from pathlib import Path
 
@@ -158,27 +160,135 @@ def find_mmd_root_or_armature(armature: bpy.types.Object) -> bpy.types.Object:
     return root
 
 
+def _trim_fixed_vmd_section(data: bytes, offset: int, record_size: int, frame: int, named: bool) -> tuple[bytes, int]:
+    """Trim one fixed-record VMD section to the keyframes that determine the pose at ``frame``.
+
+    For named sections (bones, morphs) the pose at F depends only on the last
+    keyframe <= F and the first keyframe > F per channel (the segment's
+    interpolation bytes live in the *later* keyframe, so both survive intact).
+    Returns (section bytes including the count header, new offset).
+    """
+
+    (count,) = struct.unpack_from("<I", data, offset)
+    offset += 4
+    frame_offset = 15 if named else 0
+    last_le: dict[bytes, tuple[int, bytes]] = {}
+    first_gt: dict[bytes, tuple[int, bytes]] = {}
+    for _ in range(count):
+        record = data[offset : offset + record_size]
+        offset += record_size
+        name = bytes(record[:15]) if named else b""
+        (record_frame,) = struct.unpack_from("<I", record, frame_offset)
+        if record_frame <= frame:
+            current = last_le.get(name)
+            if current is None or record_frame >= current[0]:
+                last_le[name] = (record_frame, record)
+        else:
+            current = first_gt.get(name)
+            if current is None or record_frame < current[0]:
+                first_gt[name] = (record_frame, record)
+    kept = [entry for entry in last_le.values()]
+    for name, entry in first_gt.items():
+        # The next keyframe carries the interpolation curve into frame F; it is
+        # also the pose source for channels whose keys all lie beyond F.
+        kept.append(entry)
+    kept.sort(key=lambda item: item[0])
+    section = struct.pack("<I", len(kept)) + b"".join(record for _, record in kept)
+    return section, offset
+
+
+def trim_vmd_to_frame(vmd_path: Path, frame: int) -> Path | None:
+    """Write a temp VMD containing only the keyframes needed to pose ``frame``.
+
+    The reference dance VMD is ~50 MB / hundreds of thousands of keyframes;
+    importing it just to read one frame dominates Step 13. Returns None when
+    the file cannot be parsed (caller falls back to the original).
+    """
+
+    try:
+        data = vmd_path.read_bytes()
+        magic = data[:30]
+        if not magic.startswith(b"Vocaloid Motion Data"):
+            return None
+        header_len = 30 + (20 if b"0002" in magic else 10)
+        out = bytearray(data[:header_len])
+        offset = header_len
+        original_size = len(data)
+        # Bone (111 bytes) and morph (23 bytes) sections are the huge ones.
+        section, offset = _trim_fixed_vmd_section(data, offset, 111, frame, named=True)
+        out += section
+        section, offset = _trim_fixed_vmd_section(data, offset, 23, frame, named=True)
+        out += section
+        # Camera (61), light (28), shadow (9): small but trim the same way.
+        for record_size in (61, 28, 9):
+            if offset >= len(data):
+                break
+            section, offset = _trim_fixed_vmd_section(data, offset, record_size, frame, named=False)
+            out += section
+        # IK/show section is variable-length: keep bracketing records.
+        if offset + 4 <= len(data):
+            (ik_count,) = struct.unpack_from("<I", data, offset)
+            offset += 4
+            ik_last_le: tuple[int, bytes] | None = None
+            ik_first_gt: tuple[int, bytes] | None = None
+            for _ in range(ik_count):
+                start = offset
+                (ik_frame,) = struct.unpack_from("<I", data, offset)
+                (entry_count,) = struct.unpack_from("<I", data, offset + 5)
+                offset = offset + 9 + entry_count * 21
+                record = data[start:offset]
+                if ik_frame <= frame:
+                    if ik_last_le is None or ik_frame >= ik_last_le[0]:
+                        ik_last_le = (ik_frame, record)
+                elif ik_first_gt is None or ik_frame < ik_first_gt[0]:
+                    ik_first_gt = (ik_frame, record)
+            ik_kept = [entry for entry in (ik_last_le, ik_first_gt) if entry is not None]
+            ik_kept.sort(key=lambda item: item[0])
+            out += struct.pack("<I", len(ik_kept)) + b"".join(record for _, record in ik_kept)
+        handle = tempfile.NamedTemporaryFile(prefix=f"{vmd_path.stem}_frame{frame}_", suffix=".vmd", delete=False)
+        with handle:
+            handle.write(bytes(out))
+        print(
+            f"[Step13 Render] Trimmed VMD for frame {frame}: {original_size:,} -> {len(out):,} bytes.",
+            flush=True,
+        )
+        return Path(handle.name)
+    except Exception as exc:
+        print(f"[Step13 Render] VMD trim skipped ({exc}); importing the full motion.", flush=True)
+        return None
+
+
 def import_motion(armature: bpy.types.Object, vmd_path: Path, frame: int, label: str = "VMD motion") -> None:
     ops = get_mmd_tool_ops()
     if ops is None:
         raise RuntimeError("MMD Tools PMX/VMD operators are not available.")
+    trimmed_path = trim_vmd_to_frame(vmd_path, frame)
+    if trimmed_path is not None:
+        vmd_path = trimmed_path
     print(f"[Step13 Render] Importing {label}: {vmd_path}", flush=True)
     # MMD Tools imports both bone and morph animation only when the model root is
     # selected. It also processes its ImportHelper `files` collection rather
     # than `filepath` alone, so pass both forms explicitly for background runs.
     root = find_mmd_root_or_armature(armature)
     set_active(root)
-    call_operator(
-        ops.import_vmd,
-        filepath=str(vmd_path),
-        directory=str(vmd_path.parent) + os.sep,
-        files=[{"name": vmd_path.name}],
-        bone_mapper="PMX",
-        margin=0,
-        update_scene_settings=True,
-        create_new_action=False,
-        use_nla=False,
-    )
+    try:
+        call_operator(
+            ops.import_vmd,
+            filepath=str(vmd_path),
+            directory=str(vmd_path.parent) + os.sep,
+            files=[{"name": vmd_path.name}],
+            bone_mapper="PMX",
+            margin=0,
+            update_scene_settings=True,
+            create_new_action=False,
+            use_nla=False,
+        )
+    finally:
+        if trimmed_path is not None:
+            try:
+                trimmed_path.unlink(missing_ok=True)
+            except Exception:
+                pass
     bpy.context.scene.frame_set(frame)
     bpy.context.view_layer.update()
     print(f"[Step13 Render] Scene set to frame {frame}.", flush=True)
@@ -485,21 +595,45 @@ def make_unshaded_materials() -> int:
         emission = nodes.new("ShaderNodeEmission")
         emission.location = (120, 0)
         emission.inputs["Strength"].default_value = 1.0
+        surface_node = emission
+        surface_socket = "Emission"
         if source_image is not None:
             tex = nodes.new("ShaderNodeTexImage")
             tex.location = (-160, 0)
             tex.image = source_image
             links.new(tex.outputs["Color"], emission.inputs["Color"])
-            if "Alpha" in tex.outputs and "Alpha" in output.inputs:
+            if "Alpha" in tex.outputs:
+                # Route texture alpha through a Transparent BSDF mix so
+                # alpha-mapped MMD textures (hair fringes, accessory planes)
+                # do not render as opaque rectangles in the icon.
                 try:
-                    links.new(tex.outputs["Alpha"], output.inputs["Alpha"])
-                    material.blend_method = "BLEND"
-                    material.use_screen_refraction = False
+                    transparent = nodes.new("ShaderNodeBsdfTransparent")
+                    transparent.location = (120, -160)
+                    mix = nodes.new("ShaderNodeMixShader")
+                    mix.location = (240, 0)
+                    links.new(tex.outputs["Alpha"], mix.inputs["Fac"])
+                    links.new(transparent.outputs["BSDF"], mix.inputs[1])
+                    links.new(emission.outputs["Emission"], mix.inputs[2])
+                    surface_node = mix
+                    surface_socket = "Shader"
+                    try:
+                        material.blend_method = "HASHED"  # EEVEE legacy (<= 4.1)
+                    except Exception:
+                        pass
+                    try:
+                        material.surface_render_method = "DITHERED"  # EEVEE Next (4.2+)
+                    except Exception:
+                        pass
+                    try:
+                        material.use_screen_refraction = False
+                    except Exception:
+                        pass
                 except Exception:
-                    pass
+                    surface_node = emission
+                    surface_socket = "Emission"
         else:
             emission.inputs["Color"].default_value = source_color
-        links.new(emission.outputs["Emission"], output.inputs["Surface"])
+        links.new(surface_node.outputs[surface_socket], output.inputs["Surface"])
         converted += 1
     print(f"[Step13 Render] Converted {converted} materials to unshaded emission.", flush=True)
     return converted
@@ -704,23 +838,36 @@ def setup_render(output_path: Path) -> None:
 def render_icon(output_path: Path) -> tuple[str, list[str]]:
     warnings: list[str] = []
     output_path.parent.mkdir(parents=True, exist_ok=True)
+    # Delete any stale output from a previous run so a failed render can never
+    # be reported as success through an old file passing the exists() checks.
+    try:
+        output_path.unlink(missing_ok=True)
+    except Exception as exc:
+        warnings.append(f"Could not remove stale output {output_path.name}: {exc}")
     setup_render(output_path)
     for engine in ("BLENDER_EEVEE_NEXT", "BLENDER_EEVEE"):
         try:
             bpy.context.scene.render.engine = engine
             print(f"[Step13 Render] Rendering unshaded still with {engine}.", flush=True)
-            bpy.ops.render.render(write_still=True)
+            result = bpy.ops.render.render(write_still=True)
+            if "FINISHED" not in result:
+                warnings.append(f"{engine} render returned {sorted(result)}")
+                print(f"[Step13 Render] {engine} render returned {sorted(result)}.", flush=True)
+                continue
             if output_path.exists():
                 return f"{engine.lower()}_unshaded", warnings
+            warnings.append(f"{engine} render finished but wrote no output file")
         except Exception as exc:
             warnings.append(f"{engine} render failed: {exc}")
             print(f"[Step13 Render] {engine} render failed: {exc}", flush=True)
     try:
         bpy.context.scene.render.engine = "BLENDER_WORKBENCH"
         print("[Step13 Render] Trying OpenGL still render with flat texture shading.", flush=True)
-        bpy.ops.render.opengl(write_still=True, view_context=False)
-        if output_path.exists():
+        result = bpy.ops.render.opengl(write_still=True, view_context=False)
+        if "FINISHED" in result and output_path.exists():
             return "opengl_flat_texture", warnings
+        if "FINISHED" not in result:
+            warnings.append(f"OpenGL render returned {sorted(result)}")
     except Exception as exc:
         warnings.append(f"OpenGL render failed: {exc}")
         print(f"[Step13 Render] OpenGL render failed: {exc}", flush=True)
@@ -728,9 +875,11 @@ def render_icon(output_path: Path) -> tuple[str, list[str]]:
         try:
             bpy.context.scene.render.engine = engine
             print(f"[Step13 Render] Rendering with {engine}.", flush=True)
-            bpy.ops.render.render(write_still=True)
-            if output_path.exists():
+            result = bpy.ops.render.render(write_still=True)
+            if "FINISHED" in result and output_path.exists():
                 return engine.lower(), warnings
+            if "FINISHED" not in result:
+                warnings.append(f"{engine} render returned {sorted(result)}")
         except Exception as exc:
             warnings.append(f"{engine} render failed: {exc}")
     raise RuntimeError("All Blender render methods failed.")

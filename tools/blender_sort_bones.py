@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Iterable
 
 import bpy
+import numpy as np
 
 
 DEFAULT_LIMIT = 254
@@ -210,10 +211,12 @@ def is_safe_bone_name(name: str) -> bool:
     return bool(SAFE_BONE_NAME_PATTERN.fullmatch(name) or SOURCE_BONE_NAME_PATTERN.fullmatch(name))
 
 
-def vertex_group_weight_totals_by_mesh() -> tuple[dict[str, float], dict[str, dict[str, float]]]:
+def vertex_group_weight_totals_by_mesh(
+    meshes: list[bpy.types.Object] | None = None,
+) -> tuple[dict[str, float], dict[str, dict[str, float]]]:
     totals: dict[str, float] = defaultdict(float)
     by_mesh: dict[str, dict[str, float]] = {}
-    for obj in mesh_objects():
+    for obj in (meshes if meshes is not None else mesh_objects()):
         mesh_totals: dict[str, float] = defaultdict(float)
         index_to_name = {group.index: group.name for group in obj.vertex_groups}
         for vertex in obj.data.vertices:
@@ -228,8 +231,8 @@ def vertex_group_weight_totals_by_mesh() -> tuple[dict[str, float], dict[str, di
     return dict(totals), by_mesh
 
 
-def vertex_group_weight_totals() -> dict[str, float]:
-    totals, _by_mesh = vertex_group_weight_totals_by_mesh()
+def vertex_group_weight_totals(meshes: list[bpy.types.Object] | None = None) -> dict[str, float]:
+    totals, _by_mesh = vertex_group_weight_totals_by_mesh(meshes)
     return totals
 
 
@@ -264,11 +267,20 @@ def collect_model_preview(armature: bpy.types.Object, max_vertices: int = 500000
     for obj in mesh_objects():
         offset = len(vertices)
         transform = to_armature @ obj.matrix_world
-        for vertex in obj.data.vertices:
-            vertices.append(v3(transform @ vertex.co))
-        for edge in obj.data.edges:
-            a, b = edge.vertices[:]
-            edges.append((offset + int(a), offset + int(b)))
+        vertex_count = len(obj.data.vertices)
+        if vertex_count:
+            coords = np.empty(vertex_count * 3, dtype=np.float64)
+            obj.data.vertices.foreach_get("co", coords)
+            coords = coords.reshape(-1, 3)
+            matrix = np.array([[float(transform[row][col]) for col in range(4)] for row in range(4)], dtype=np.float64)
+            transformed = coords @ matrix[:3, :3].T + matrix[:3, 3]
+            vertices.extend(np.round(transformed, 6).tolist())
+        edge_count = len(obj.data.edges)
+        if edge_count:
+            edge_indices = np.empty(edge_count * 2, dtype=np.int64)
+            obj.data.edges.foreach_get("vertices", edge_indices)
+            edge_indices = edge_indices.reshape(-1, 2) + offset
+            edges.extend((int(a), int(b)) for a, b in edge_indices.tolist())
 
     if not vertices:
         return {"vertices": [], "edges": [], "source_vertex_count": 0, "source_edge_count": 0, "sample_stride": 1}
@@ -434,14 +446,15 @@ def simulate_operations(
         children = children_map_from_parents(parents, existing)
 
 
-def automatic_plan(armature: bpy.types.Object, limit: int) -> dict[str, object]:
+def automatic_plan(armature: bpy.types.Object, limit: int, weight_totals: dict[str, float] | None = None) -> dict[str, object]:
     original_parents = parent_map(armature)
     simulated_parents = dict(original_parents)
     existing = set(simulated_parents)
     extra_protected: set[str] = set()
     protected = {name for name in existing if is_protected_bone(name, extra_protected)}
     original_depths = depth_map_from_parents(original_parents, existing)
-    weight_totals = vertex_group_weight_totals()
+    if weight_totals is None:
+        weight_totals = vertex_group_weight_totals(associated_meshes(armature))
     operations: list[dict[str, object]] = []
     rounds: list[dict[str, object]] = []
     warnings: list[str] = []
@@ -458,6 +471,8 @@ def automatic_plan(armature: bpy.types.Object, limit: int) -> dict[str, object]:
         if face_sources:
             depths = depth_map_from_parents(simulated_parents, existing)
             for source in sorted(face_sources, key=lambda name: (-depths.get(name, 0), natural_key(name))):
+                if len(existing) - len(round_ops) <= limit:
+                    break
                 if source in used_sources or source not in existing or HEAD not in existing:
                     continue
                 round_ops.append(operation(round_index, order, source, HEAD, "Head face detail", "merge nonessential face/head detail into Head1", depths.get(source, 0)))
@@ -466,24 +481,32 @@ def automatic_plan(armature: bpy.types.Object, limit: int) -> dict[str, object]:
 
         excluded = set(face_sources)
         chains = collect_linear_chains(simulated_parents, existing, protected, excluded)
+        chain_candidates: list[tuple[float, str, str, str]] = []
         for chain in chains:
-            if len(existing) - len(round_ops) <= limit and operations:
-                break
             branch = chain[0]
             for index in range(1, len(chain), 2):
                 source = chain[index]
                 target = chain[index - 1]
                 if source in used_sources or source not in existing or target not in existing:
                     continue
-                reason = "alternating accessory-chain decimation"
-                if round_index > 1:
-                    reason = f"round {round_index} accessory-chain decimation"
-                round_ops.append(operation(round_index, order, source, target, branch, reason, original_depths.get(source, 0)))
-                used_sources.add(source)
-                order += 1
+                chain_candidates.append((float(weight_totals.get(source, 0.0)), branch, source, target))
+        # Merge zero/low-weight bones first so stopping at the limit costs as
+        # little deformation quality as possible.
+        chain_candidates.sort(key=lambda item: (item[0], natural_key(item[2])))
+        for _source_weight, branch, source, target in chain_candidates:
+            if len(existing) - len(round_ops) <= limit:
+                break
+            if source in used_sources:
+                continue
+            reason = "alternating accessory-chain decimation"
+            if round_index > 1:
+                reason = f"round {round_index} accessory-chain decimation"
+            round_ops.append(operation(round_index, order, source, target, branch, reason, original_depths.get(source, 0)))
+            used_sources.add(source)
+            order += 1
 
         if not round_ops:
-            fallback_ops = fallback_leaf_operations(simulated_parents, existing, protected, round_index, limit, original_depths)
+            fallback_ops = fallback_leaf_operations(simulated_parents, existing, protected, round_index, limit, original_depths, weight_totals)
             round_ops.extend(fallback_ops)
 
         if not round_ops:
@@ -534,7 +557,9 @@ def fallback_leaf_operations(
     round_index: int,
     limit: int,
     depths: dict[str, int],
+    weight_totals: dict[str, float] | None = None,
 ) -> list[dict[str, object]]:
+    weight_totals = weight_totals or {}
     children = children_map_from_parents(parents, existing)
     leaves = [
         name
@@ -544,7 +569,8 @@ def fallback_leaf_operations(
         and name not in children
         and parents.get(name) != name
     ]
-    leaves.sort(key=lambda name: (-depths.get(name, 0), natural_key(name)))
+    # Prefer zero/low-weight leaves first, then deepest leaves.
+    leaves.sort(key=lambda name: (float(weight_totals.get(name, 0.0)), -depths.get(name, 0), natural_key(name)))
     ops: list[dict[str, object]] = []
     order = 0
     for source in leaves:
@@ -607,10 +633,10 @@ def current_validation(armature: bpy.types.Object, limit: int, protected: set[st
     return {"ok": not errors, "errors": errors, "warnings": warnings}
 
 
-def analyze_current_file(input_blend: Path, limit: int) -> tuple[dict[str, object], dict[str, object]]:
+def analyze_current_file(input_blend: Path, limit: int, include_preview: bool = True) -> tuple[dict[str, object], dict[str, object]]:
     armature = active_armature()
-    weights = vertex_group_weight_totals()
-    plan = automatic_plan(armature, limit)
+    weights = vertex_group_weight_totals(associated_meshes(armature))
+    plan = automatic_plan(armature, limit, weights)
     protected = set(str(name) for name in plan.get("protected_bones", []) if name)
     validation = current_validation(armature, limit, protected)
     bones = collect_bones(armature, weights)
@@ -626,7 +652,7 @@ def analyze_current_file(input_blend: Path, limit: int) -> tuple[dict[str, objec
         "weighted_bone_count": sum(1 for value in weights.values() if value > 0.000001),
         "unsafe_bone_names": [bone.name for bone in armature.data.bones if not is_safe_bone_name(bone.name)],
         "bones": bones,
-        "model_preview": collect_model_preview(armature),
+        "model_preview": collect_model_preview(armature) if include_preview else {},
         "current_validation": validation,
         "proposal": plan,
     }
@@ -661,137 +687,6 @@ def protected_from_plan(plan: dict[str, object], armature: bpy.types.Object) -> 
     if isinstance(raw, list):
         protected.update(str(name) for name in raw if name)
     return protected
-
-
-def ensure_target_vertex_groups(armature: bpy.types.Object, target: str) -> None:
-    for obj in associated_meshes(armature):
-        if target not in obj.vertex_groups:
-            obj.vertex_groups.new(name=target)
-
-
-def transfer_vertex_groups(armature: bpy.types.Object, source: str, target: str) -> dict[str, float]:
-    transferred: dict[str, float] = {}
-    ensure_object_mode()
-    for obj in associated_meshes(armature):
-        if source not in obj.vertex_groups:
-            continue
-        if target not in obj.vertex_groups:
-            obj.vertex_groups.new(name=target)
-        source_group = obj.vertex_groups[source]
-        target_group = obj.vertex_groups[target]
-        source_index = source_group.index
-        total = 0.0
-        cached: list[tuple[int, float]] = []
-        for vertex in obj.data.vertices:
-            for group in vertex.groups:
-                if group.group == source_index and group.weight > 0.000001:
-                    cached.append((vertex.index, float(group.weight)))
-                    total += float(group.weight)
-                    break
-        for vertex_index, weight in cached:
-            target_group.add([vertex_index], weight, "ADD")
-        obj.vertex_groups.remove(source_group)
-        transferred[obj.name] = round(total, 6)
-    return transferred
-
-
-def delete_bone_internal(armature: bpy.types.Object, source: str, target: str) -> None:
-    ensure_object_mode()
-    bpy.ops.object.select_all(action="DESELECT")
-    armature.select_set(True)
-    bpy.context.view_layer.objects.active = armature
-    bpy.ops.object.mode_set(mode="EDIT")
-    try:
-        edit_bones = armature.data.edit_bones
-        source_bone = edit_bones.get(source)
-        target_bone = edit_bones.get(target)
-        if source_bone is None or target_bone is None:
-            return
-        for child in list(source_bone.children):
-            child.parent = target_bone
-            child.use_connect = False
-        edit_bones.remove(source_bone)
-    finally:
-        bpy.ops.object.mode_set(mode="OBJECT")
-
-
-def deselect_all_edit_bones(edit_bones) -> None:
-    for bone in edit_bones:
-        bone.select = False
-        bone.select_head = False
-        bone.select_tail = False
-
-
-def addon_merge_bone(armature: bpy.types.Object, source: str, target: str) -> bool:
-    try:
-        bpy.ops.armature.voyage_vrsns_merge_bones.get_rna_type()
-    except Exception:
-        return False
-    ensure_target_vertex_groups(armature, target)
-    ensure_object_mode()
-    bpy.ops.object.select_all(action="DESELECT")
-    armature.select_set(True)
-    bpy.context.view_layer.objects.active = armature
-    old_mirror = bool(getattr(armature.data, "use_mirror_x", False))
-    armature.data.use_mirror_x = False
-    bpy.ops.object.mode_set(mode="EDIT")
-    try:
-        edit_bones = armature.data.edit_bones
-        source_bone = edit_bones.get(source)
-        target_bone = edit_bones.get(target)
-        if source_bone is None or target_bone is None:
-            return False
-        deselect_all_edit_bones(edit_bones)
-        target_bone.select = True
-        target_bone.select_head = True
-        target_bone.select_tail = True
-        source_bone.select = True
-        source_bone.select_head = True
-        source_bone.select_tail = True
-        edit_bones.active = target_bone
-        result = bpy.ops.armature.voyage_vrsns_merge_bones()
-        return "FINISHED" in result and source not in armature.data.edit_bones
-    except Exception as exc:
-        print(f"Blender Bones Merger failed for {source} -> {target}: {exc}")
-        return False
-    finally:
-        bpy.ops.object.mode_set(mode="OBJECT")
-        armature.data.use_mirror_x = old_mirror
-
-
-def merge_bone(armature: bpy.types.Object, source: str, target: str, protected: set[str]) -> dict[str, object]:
-    if source == target:
-        return {"source": source, "target": target, "status": "skipped", "reason": "source equals target"}
-    bones = {bone.name for bone in armature.data.bones}
-    if source not in bones:
-        return {"source": source, "target": target, "status": "skipped", "reason": "source missing"}
-    if target not in bones:
-        return {"source": source, "target": target, "status": "error", "reason": "target missing"}
-    if source in protected:
-        return {"source": source, "target": target, "status": "error", "reason": "source is protected"}
-
-    before_weights = vertex_group_weight_totals()
-    method = "addon"
-    if not addon_merge_bone(armature, source, target):
-        method = "internal"
-        transferred = transfer_vertex_groups(armature, source, target)
-        delete_bone_internal(armature, source, target)
-    else:
-        transferred = {}
-    after_bones = {bone.name for bone in armature.data.bones}
-    if source in after_bones:
-        return {"source": source, "target": target, "status": "error", "reason": "source bone still exists after merge", "method": method}
-    after_weights = vertex_group_weight_totals()
-    return {
-        "source": source,
-        "target": target,
-        "status": "merged",
-        "method": method,
-        "source_weight_before": round(float(before_weights.get(source, 0.0)), 6),
-        "target_weight_before": round(float(before_weights.get(target, 0.0)), 6),
-        "target_weight_after": round(float(after_weights.get(target, 0.0)), 6),
-        "internal_transferred_by_mesh": transferred,
-    }
 
 
 def final_merge_target(name: str, merged_edges: dict[str, str]) -> tuple[str, list[str]]:
@@ -1029,7 +924,10 @@ def validate_after_apply(
     for result in applied:
         if result.get("status") == "error":
             errors.append(f"{result.get('source')} -> {result.get('target')}: {result.get('reason')}")
-    for obj in mesh_objects():
+    # Use the same mesh set as batch_transfer_vertex_groups so meshes not bound
+    # to this armature cannot trigger false hard failures.
+    meshes = associated_meshes(armature)
+    for obj in meshes:
         existing_groups = {group.name for group in obj.vertex_groups}
         for result in applied:
             source = str(result.get("source") or "")
@@ -1067,16 +965,22 @@ def validate_after_apply(
         final_target = final_merge_target(source)
         expected_source_by_final[final_target] += float(before_weights.get(source, 0.0))
 
-    after_weights = vertex_group_weight_totals()
+    after_weights = vertex_group_weight_totals(meshes)
     for target, source_total in expected_source_by_final.items():
         if source_total <= 0.000001:
             warnings.append(f"{target} received only unweighted or zero-weight source bones.")
             continue
         expected_total = expected_total_by_final[target]
+        tolerance = max(0.0001, expected_total * 0.001)
         if target not in after_weights:
             errors.append(f"Target vertex group was not created after weighted merge: {target}")
-        elif after_weights[target] + 0.0001 < expected_total:
-            errors.append(f"Target vertex group did not receive expected merged weights: {target}")
+        elif after_weights[target] + tolerance < expected_total:
+            # Blender clamps per-vertex weights to 1.0 during ADD merges, so the
+            # stored total can be legitimately below the unclamped expectation.
+            warnings.append(
+                f"Target vertex group {target} total weight {after_weights[target]:.3f} is below the unclamped "
+                f"expected total {expected_total:.3f}; per-vertex weights are clamped to 1.0 during merge."
+            )
 
     unsafe = [name for name in names if not is_safe_bone_name(name)]
     if unsafe:
@@ -1094,7 +998,7 @@ def apply_plan(armature: bpy.types.Object, plan: dict[str, object], limit: int) 
     operations = enabled_operations(plan)
     before_count = len(armature.data.bones)
     scan_started = time.monotonic()
-    before_weights, before_weights_by_mesh = vertex_group_weight_totals_by_mesh()
+    before_weights, before_weights_by_mesh = vertex_group_weight_totals_by_mesh(associated_meshes(armature))
     timings["before_weight_scan_seconds"] = round(time.monotonic() - scan_started, 3)
     print(f"Applying {len(operations)} enabled bone merge operation(s).")
 
@@ -1197,7 +1101,7 @@ def main() -> int:
         raise RuntimeError("--report-json is required for apply mode")
     plan = load_plan(args.plan_json)
     before_analysis_started = time.monotonic()
-    before_analysis, _before_plan = analyze_current_file(args.input_blend, limit)
+    before_analysis, _before_plan = analyze_current_file(args.input_blend, limit, include_preview=False)
     before_analysis_seconds = round(time.monotonic() - before_analysis_started, 3)
     armature = active_armature()
     apply_started = time.monotonic()
@@ -1207,6 +1111,26 @@ def main() -> int:
         print("Validation failed after bone sorting.")
         for error in result["validation"]["errors"]:
             print(f"Error: {error}")
+        # Write a structured failure report so the GUI can surface the
+        # validation errors instead of a generic missing-output message.
+        failure_report = {
+            "version": 1,
+            "input_blend": str(args.input_blend),
+            "output_blend": str(args.output_blend),
+            "plan_json": str(args.plan_json),
+            "elapsed_seconds": round(time.monotonic() - started, 3),
+            "timings": {
+                "open_blend_seconds": open_seconds,
+                "before_analysis_seconds": before_analysis_seconds,
+                "apply_seconds": apply_seconds,
+                "apply": result.get("timings", {}),
+            },
+            "before": before_analysis,
+            "applied": result,
+            "validation": result["validation"],
+        }
+        write_json(args.report_json, failure_report)
+        print(f"Wrote bone sorting failure report: {args.report_json}")
         raise RuntimeError("Bone sorting validation failed after apply.")
     args.output_blend.parent.mkdir(parents=True, exist_ok=True)
     print(f"Saving bone-sorted blend file: {args.output_blend}")

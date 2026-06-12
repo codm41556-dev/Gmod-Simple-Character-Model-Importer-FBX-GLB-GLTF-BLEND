@@ -16,8 +16,17 @@ blender-4.5.10-windows-x64.zip
 MMDCharacterImporter.spec
 /9_arts
 /Github Upload
-/reference/\!enhanced_animation_importer_arc
-/reference/\!runtime_any_model_importer
-/reference
+# Ignore everything under /reference except the subsets that
+# tools/build_mmd_character_importer_exe.ps1 and tools/sync_github_upload.ps1
+# hard-require (a blanket /reference ignore silently dropped new files in
+# those required paths from commits while local builds still bundled them).
+/reference/*
+!/reference/ref_motion/
+!/reference/dynamic_model_importer/
+!/reference/proportion_trick_script-main_new/
+!/reference/li_zhiyan_npc/
+!/reference/\!enhanced_animation_importer_arc/
+/reference/\!enhanced_animation_importer_arc/*
+!/reference/\!enhanced_animation_importer_arc/tools/
 /smoke_tests
 GmodSimpleMMDCharacterImporter.spec

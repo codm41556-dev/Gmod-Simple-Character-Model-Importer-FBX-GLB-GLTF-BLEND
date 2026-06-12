@@ -241,6 +241,17 @@ def dedupe(items: list[str]) -> list[str]:
     return out
 
 
+def safe_extract_destination(target: Path, member: str, rel: str) -> Path:
+    """Resolve an archive member's output path, rejecting zip-slip escapes."""
+    rel_path = Path(rel.replace("\\", "/"))
+    if rel_path.is_absolute() or rel_path.drive:
+        raise RuntimeError(f"unsafe absolute archive member path: {member}")
+    destination = (target / rel_path).resolve()
+    if not destination.is_relative_to(target.resolve()):
+        raise RuntimeError(f"archive member escapes the install directory: {member}")
+    return destination
+
+
 def install_cats(zip_path: Path) -> list[str]:
     errors: list[str] = []
     try:
@@ -289,7 +300,7 @@ def install_mmd_tools_from_cats(zip_path: Path) -> list[str]:
                 rel = member[len(prefix) :]
                 if not rel:
                     continue
-                destination = target / rel
+                destination = safe_extract_destination(target, member, rel)
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 with archive.open(member) as source, destination.open("wb") as handle:
                     shutil.copyfileobj(source, handle)
@@ -346,7 +357,7 @@ def install_material_combiner(zip_path: Path) -> list[str]:
                 rel = member[len(root) + 1 :] if root and member.startswith(root + "/") else member
                 if not rel:
                     continue
-                destination = target / rel
+                destination = safe_extract_destination(target, member, rel)
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 with archive.open(member) as source, destination.open("wb") as handle:
                     shutil.copyfileobj(source, handle)
@@ -393,7 +404,7 @@ def install_coacd(zip_path: Path) -> list[str]:
                     rel = rel[len("coacd_blender_addon/") :]
                 if not rel:
                     continue
-                destination = target / rel
+                destination = safe_extract_destination(target, member, rel)
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 with archive.open(member) as source, destination.open("wb") as handle:
                     shutil.copyfileobj(source, handle)
@@ -422,7 +433,7 @@ def install_l4d2_tools(zip_path: Path) -> list[str]:
                 rel = member[len(root) + 1 :] if root and member.startswith(root + "/") else member
                 if not rel:
                     continue
-                destination = target / rel
+                destination = safe_extract_destination(target, member, rel)
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 with archive.open(member) as source, destination.open("wb") as handle:
                     shutil.copyfileobj(source, handle)

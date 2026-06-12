@@ -299,19 +299,33 @@ def call_openai_description(plan: dict[str, Any]) -> str:
         "Do not quote copyrighted game dialogue or song lyrics. "
         f"Character: {character}. Source work: {work}."
     )
+    model = str(plan.get("openai_model") or os.environ.get("OPENAI_MODEL") or DEFAULT_OPENAI_MODEL)
     payload = {
-        "model": str(plan.get("openai_model") or os.environ.get("OPENAI_MODEL") or DEFAULT_OPENAI_MODEL),
+        "model": model,
         "input": prompt,
-        "max_output_tokens": 650,
+        # Reasoning models spend reasoning tokens from this budget, so keep
+        # headroom above the expected visible output length.
+        "max_output_tokens": 2000,
     }
+    if re.match(r"^(gpt-5|o\d)", model):
+        payload["reasoning"] = {"effort": "low"}
     request = urllib.request.Request(
         "https://api.openai.com/v1/responses",
         data=json.dumps(payload).encode("utf-8"),
         headers={"Authorization": f"Bearer {key}", "Content-Type": "application/json"},
         method="POST",
     )
-    with urllib.request.urlopen(request, timeout=90) as response:
-        data = json.loads(response.read().decode("utf-8"))
+    try:
+        with urllib.request.urlopen(request, timeout=90) as response:
+            data = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        body = compact_error_body(exc.read())
+        detail = f"OpenAI request failed: HTTP {exc.code} {exc.reason}; model={model}"
+        if body:
+            detail += f"; response={body}"
+        raise RuntimeError(detail) from exc
+    except urllib.error.URLError as exc:
+        raise RuntimeError(f"OpenAI request failed: network error: {exc.reason}; model={model}") from exc
     text = str(data.get("output_text") or "").strip()
     if text:
         parsed = extract_json_object(text)
@@ -367,13 +381,17 @@ def extract_json_object(text: str) -> dict[str, Any]:
 def cleanup_ai_text(text: str) -> str:
     text = text.strip().strip("\"'")
     text = re.sub(r"\s+", " ", text)
-    return text.split("[")[0].strip()
+    # Strip only trailing bracketed annotations (e.g. "[citation]"); the prompt
+    # pattern legitimately contains '[' mid-text, so never cut at the first one.
+    text = re.sub(r"\s*\[[^\]]*\]\s*$", "", text)
+    return text.strip()
 
 
 def deepl_endpoint(key: str) -> str:
     override = os.environ.get("DEEPL_API_URL", "").strip()
     if override:
-        return override.rstrip("/") + "/v2/translate" if not override.endswith("/v2/translate") else override
+        override = override.rstrip("/")
+        return override if override.endswith("/v2/translate") else override + "/v2/translate"
     host = "api-free.deepl.com" if key.endswith(":fx") else "api.deepl.com"
     return f"https://{host}/v2/translate"
 
@@ -420,11 +438,20 @@ def call_deepl(text: str, target_lang: str, source_lang: str = "EN") -> str:
         headers={"Content-Type": "application/x-www-form-urlencoded", "Authorization": f"DeepL-Auth-Key {key}"},
         method="POST",
     )
-    try:
-        with urllib.request.urlopen(request, timeout=90) as response:
-            data = json.loads(response.read().decode("utf-8"))
-    except Exception as exc:
-        raise RuntimeError(deepl_failure_message(exc, endpoint, target_lang, source_lang, len(text))) from exc
+    attempts = 4
+    for attempt in range(1, attempts + 1):
+        try:
+            with urllib.request.urlopen(request, timeout=90) as response:
+                data = json.loads(response.read().decode("utf-8"))
+            break
+        except Exception as exc:
+            retryable = isinstance(exc, urllib.error.HTTPError) and (exc.code == 429 or exc.code >= 500)
+            if retryable and attempt < attempts:
+                delay = 2 ** attempt
+                emit(f"DeepL HTTP {exc.code}; retrying in {delay}s (attempt {attempt}/{attempts - 1}).")
+                time.sleep(delay)
+                continue
+            raise RuntimeError(deepl_failure_message(exc, endpoint, target_lang, source_lang, len(text))) from exc
     translations = data.get("translations")
     if isinstance(translations, list) and translations and isinstance(translations[0], dict):
         return str(translations[0].get("text") or "").strip()
@@ -457,10 +484,10 @@ def section_for_language(plan: dict[str, Any], lang: dict[str, str]) -> str:
     row = plan.get("translations", {}).get(code) if isinstance(plan.get("translations"), dict) else {}
     row = row if isinstance(row, dict) else {}
     title = title_for_language(plan, code, row)
-    description = str(plan.get("description_en") if code == "en" else row.get("description") or "").strip()
-    quote_text = str(plan.get("quote_text") if code == "en" else row.get("quote_text") or "").strip()
+    description = str((plan.get("description_en") if code == "en" else row.get("description")) or "").strip()
+    quote_text = str((plan.get("quote_text") if code == "en" else row.get("quote_text")) or "").strip()
     quote_original = str(plan.get("quote_original_text") or "").strip()
-    quote_author = str(plan.get("quote_author") if code == "en" else row.get("quote_author") or "").strip()
+    quote_author = str((plan.get("quote_author") if code == "en" else row.get("quote_author")) or "").strip()
     work = str(plan.get("character_work_readable") or "").strip() or "the source work"
     author = str(plan.get("author") or "sheepylord").strip()
     model_creator = str(plan.get("model_creator") or "the original rights holder").strip()
@@ -486,7 +513,19 @@ def section_for_language(plan: dict[str, Any], lang: dict[str, str]) -> str:
             lines.append(f"\nInterested in RTX-Remix? Try the snapshot package on [url={rtx_link}] Github: RTX-remix_GMod_Package [/url]\n")
     lines.append("\n" + LANGUAGE_LIST.get(code, LANGUAGE_LIST["en"]) + "\n")
     lines.append(f"\n[h1] {headings[0]} [/h1]\n")
-    for feature in features:
+    # The FEATURES lists are positionally parallel across languages:
+    # index 2 = Jigglebones, 4 = c_arms, 8 = ragdoll physics for hair/clothes.
+    # Drop lines only when Step 14 metadata positively says the feature is
+    # absent; fail open (keep the line) when metadata is missing.
+    detected = plan.get("detected") if isinstance(plan.get("detected"), dict) else {}
+    skip_indexes: set[int] = set()
+    if "has_carms" in detected and not detected.get("has_carms"):
+        skip_indexes.add(4)
+    if "jiggle_count" in detected and int(detected.get("jiggle_count") or 0) <= 0:
+        skip_indexes.update({2, 8})
+    for index, feature in enumerate(features):
+        if index in skip_indexes:
+            continue
         lines.append(f"- {feature.format(work=work)}\n")
     lines.append(f"\n[u]{headings[1]}[/u]\n")
     lines.append(f"- {plan.get('character_name_readable')} model by: {model_creator}\n")

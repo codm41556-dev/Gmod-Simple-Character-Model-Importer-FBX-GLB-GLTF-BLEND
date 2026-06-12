@@ -12,9 +12,9 @@ import re
 import sys
 import time
 from pathlib import Path
-from typing import Iterable
 
 import bpy
+import numpy as np
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -70,7 +70,7 @@ def parse_args() -> argparse.Namespace:
 
 def write_json(path: Path, data: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    path.write_text(json.dumps(data, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
 
 
 def natural_key(value: object) -> list[object]:
@@ -106,8 +106,9 @@ def unique_name(base: str, used: set[str], fallback: str) -> str:
     return candidate
 
 
-def load_reference_mapping() -> dict[str, str]:
+def load_reference_mapping() -> tuple[dict[str, str], list[str]]:
     mapping = dict(FALLBACK_FLEX_MAPPING)
+    warnings: list[str] = []
     try:
         tree = ast.parse(REFERENCE_FLEX_SCRIPT.read_text(encoding="utf-8"))
         for node in tree.body:
@@ -119,9 +120,11 @@ def load_reference_mapping() -> dict[str, str]:
             if isinstance(value, dict):
                 mapping.update({str(key): str(val) for key, val in value.items()})
             break
-    except Exception:
-        pass
-    return mapping
+    except Exception as exc:
+        message = f"Reference flex mapping unavailable ({REFERENCE_FLEX_SCRIPT}): {exc}; automatic flex names fall back to the built-in {len(FALLBACK_FLEX_MAPPING)}-entry dictionary."
+        print(f"Warning: {message}")
+        warnings.append(message)
+    return mapping, warnings
 
 
 def category_for_flex(name: str, bodygroup: str = "") -> str:
@@ -220,14 +223,32 @@ def mesh_objects() -> list[bpy.types.Object]:
     return [obj for obj in bpy.data.objects if obj.type == "MESH"]
 
 
+AVERAGE_WORLD_Z_CACHE: dict[str, float] = {}
+
+
+def object_world_matrix(obj: bpy.types.Object) -> np.ndarray:
+    return np.array(obj.matrix_world, dtype=np.float64)
+
+
+def object_vertex_coords(obj: bpy.types.Object) -> np.ndarray:
+    count = len(obj.data.vertices)
+    buffer = np.empty(count * 3, dtype=np.float32)
+    obj.data.vertices.foreach_get("co", buffer)
+    return buffer.reshape((count, 3))
+
+
 def object_average_world_z(obj: bpy.types.Object) -> float:
+    cached = AVERAGE_WORLD_Z_CACHE.get(obj.name)
+    if cached is not None:
+        return cached
     if not obj.data.vertices:
+        AVERAGE_WORLD_Z_CACHE[obj.name] = float("-inf")
         return float("-inf")
-    total = 0.0
-    matrix = obj.matrix_world
-    for vertex in obj.data.vertices:
-        total += float((matrix @ vertex.co).z)
-    return total / float(len(obj.data.vertices))
+    coords = object_vertex_coords(obj).astype(np.float64)
+    matrix = object_world_matrix(obj)
+    average = float((coords @ matrix[2, :3]).mean() + matrix[2, 3])
+    AVERAGE_WORLD_Z_CACHE[obj.name] = average
+    return average
 
 
 def bodygroup_processing_key(obj: bpy.types.Object) -> tuple[float, list[object]]:
@@ -248,31 +269,28 @@ def fallback_prune_shapekeys(obj: bpy.types.Object, epsilon: float = EPSILON) ->
                 obj.shape_key_remove(key)
         except Exception as exc:
             warnings.append(f"{obj.name}:{key.name}: {exc}")
-    return {"removed": removed, "method": "fallback", "warnings": warnings}
+    return {"removed": removed, "method": "zero_delta_prune", "warnings": warnings}
 
 
 def prune_shapekeys() -> dict[str, object]:
     report = {"objects": [], "warnings": []}
+    ensure_object_mode()
     for obj in mesh_objects():
         object_report: dict[str, object] = {"object": obj.name, "method": "", "removed": [], "warnings": []}
         if obj.data.shape_keys is None or len(obj.data.shape_keys.key_blocks) <= 1:
             object_report["method"] = "none"
             report["objects"].append(object_report)
             continue
-        try:
-            ensure_object_mode()
-            bpy.ops.object.select_all(action="DESELECT")
-            obj.select_set(True)
-            bpy.context.view_layer.objects.active = obj
-            result = bpy.ops.cats_shapekey.shape_key_prune()
-            object_report["method"] = "cats_shapekey.shape_key_prune"
-            object_report["result"] = list(result)
-        except Exception as exc:
-            fallback = fallback_prune_shapekeys(obj)
-            object_report.update(fallback)
-            object_report["warnings"] = list(object_report.get("warnings", [])) + [f"CATS shapekey prune unavailable: {exc}"]
+        object_report.update(fallback_prune_shapekeys(obj))
         report["objects"].append(object_report)
     return report
+
+
+def shape_key_coords(key: bpy.types.ShapeKey) -> np.ndarray:
+    count = len(key.data)
+    buffer = np.empty(count * 3, dtype=np.float32)
+    key.data.foreach_get("co", buffer)
+    return buffer.reshape((count, 3))
 
 
 def shape_key_max_delta(obj: bpy.types.Object, key_name: str, basis: bpy.types.ShapeKey | None = None) -> float:
@@ -281,12 +299,10 @@ def shape_key_max_delta(obj: bpy.types.Object, key_name: str, basis: bpy.types.S
         return 0.0
     key = keys.key_blocks[key_name]
     basis = basis or keys.key_blocks[0]
-    max_delta = 0.0
-    for index, item in enumerate(key.data):
-        delta = (item.co - basis.data[index].co).length
-        if delta > max_delta:
-            max_delta = float(delta)
-    return max_delta
+    if not key.data:
+        return 0.0
+    deltas = shape_key_coords(key) - shape_key_coords(basis)
+    return float(math.sqrt(float((deltas * deltas).sum(axis=1).max())))
 
 
 def set_shape_key_delta_scale(obj: bpy.types.Object, key_name: str, scale: float) -> None:
@@ -366,11 +382,6 @@ def material_for_polygon(obj: bpy.types.Object, poly: bpy.types.MeshPolygon) -> 
     return None
 
 
-def v3(value: Iterable[float]) -> list[float]:
-    vector = list(value)
-    return [round(float(vector[0]), 6), round(float(vector[1]), 6), round(float(vector[2]), 6)]
-
-
 def preview_color(uid: str, index: int) -> list[float]:
     seed = sum((offset + 1) * ord(char) for offset, char in enumerate(uid)) + index * 29
     red, green, blue = colorsys.hsv_to_rgb((seed % 360) / 360.0, 0.55, 0.86)
@@ -400,8 +411,8 @@ def object_report(obj: bpy.types.Object) -> dict[str, object]:
     }
 
 
-def collect_flexes() -> list[dict[str, object]]:
-    mapping = load_reference_mapping()
+def collect_flexes() -> tuple[list[dict[str, object]], list[str]]:
+    mapping, mapping_warnings = load_reference_mapping()
     normalized_mapping = {normalized_name(key): value for key, value in mapping.items()}
     used_names: set[str] = set()
     flexes: list[dict[str, object]] = []
@@ -412,7 +423,8 @@ def collect_flexes() -> list[dict[str, object]]:
             continue
         average_height = object_average_world_z(obj)
         for key in keys.key_blocks[1:]:
-            if shape_key_max_delta(obj, key.name) <= EPSILON:
+            max_delta = shape_key_max_delta(obj, key.name)
+            if max_delta <= EPSILON:
                 continue
             base_name, category, confidence, warnings = infer_flex_name(key.name, obj.name, mapping, normalized_mapping)
             fallback = "face_flex_%03d" % index if "face" in obj.name.lower() else "body_flex_%03d" % index
@@ -435,12 +447,12 @@ def collect_flexes() -> list[dict[str, object]]:
                     "rest_value": round(float(key.value), 4),
                     "max_amplitude": 1.0,
                     "source_flexes": [],
-                    "max_delta": round(shape_key_max_delta(obj, key.name), 6),
+                    "max_delta": round(max_delta, 6),
                     "warnings": warnings,
                 }
             )
             index += 1
-    return flexes
+    return flexes, mapping_warnings
 
 
 def auto_mark_excess_flexes_for_removal(flexes: list[dict[str, object]]) -> int:
@@ -508,32 +520,56 @@ def collect_flex_preview(flexes: list[dict[str, object]], max_triangles: int = 5
     stride = max(1, math.ceil(total_triangles / max_triangles)) if total_triangles else 1
     triangles: list[dict[str, object]] = []
     materials_by_uid: dict[str, dict[str, object]] = {}
-    points: list[list[float]] = []
+    overall_mins: np.ndarray | None = None
+    overall_maxs: np.ndarray | None = None
     triangle_index = 0
     for object_index, obj in enumerate(sorted(mesh_objects(), key=bodygroup_processing_key), start=1):
         bodygroup_uid = f"bodygroup_{object_index:03d}_{stripped_safe_name(obj.name).lower()[:32]}"
         uv_layer = obj.data.uv_layers.active
         keys = obj.data.shape_keys
         flex_keys = [] if keys is None else [key for key in keys.key_blocks[1:] if (obj.name, key.name) in lookup]
+        matrix = object_world_matrix(obj)
+        world_coords = np.round(object_vertex_coords(obj).astype(np.float64) @ matrix[:3, :3].T + matrix[:3, 3], 6)
+        uv_coords: np.ndarray | None = None
+        if uv_layer is not None and len(uv_layer.data):
+            uv_buffer = np.empty(len(uv_layer.data) * 2, dtype=np.float32)
+            uv_layer.data.foreach_get("uv", uv_buffer)
+            uv_coords = np.round(uv_buffer.astype(np.float64).reshape((-1, 2)), 6)
+        key_world_deltas: dict[str, np.ndarray] = {}
+        if keys is not None and flex_keys:
+            world3 = np.array(obj.matrix_world.to_3x3(), dtype=np.float64)
+            basis_coords = shape_key_coords(keys.key_blocks[0]).astype(np.float64)
+            for key in flex_keys:
+                local_deltas = shape_key_coords(key).astype(np.float64) - basis_coords
+                key_world_deltas[key.name] = np.round(local_deltas @ world3.T, 6)
+        uid_by_material_index: dict[int, str] = {}
+        if len(world_coords) and len(obj.data.polygons):
+            object_mins = world_coords.min(axis=0)
+            object_maxs = world_coords.max(axis=0)
+            overall_mins = object_mins if overall_mins is None else np.minimum(overall_mins, object_mins)
+            overall_maxs = object_maxs if overall_maxs is None else np.maximum(overall_maxs, object_maxs)
         for poly in obj.data.polygons:
             material_index = int(poly.material_index)
-            mat = material_for_polygon(obj, poly)
-            mat_name = mat.name if mat is not None else "No_Material"
-            material_uid = f"{bodygroup_uid}__mat_{material_index:03d}_{stripped_safe_name(mat_name).lower()[:32]}"
-            texture_path = material_texture_path(mat)
-            color = preview_color(material_uid, object_index + material_index + 1)
-            if material_uid not in materials_by_uid:
-                materials_by_uid[material_uid] = {
-                    "uid": material_uid,
-                    "material_name": f"{obj.name} / {mat_name}",
-                    "proposed_name": mat_name,
-                    "bodygroup": obj.name,
-                    "keep": True,
-                    "preview_color": color,
-                    "base_color_path": texture_path if texture_path and not texture_path.startswith("packed:") else "",
-                    "base_color_file": Path(texture_path).name if texture_path and not texture_path.startswith("packed:") else texture_path,
-                    "alpha": 1.0,
-                }
+            material_uid = uid_by_material_index.get(material_index)
+            if material_uid is None:
+                mat = material_for_polygon(obj, poly)
+                mat_name = mat.name if mat is not None else "No_Material"
+                material_uid = f"{bodygroup_uid}__mat_{material_index:03d}_{stripped_safe_name(mat_name).lower()[:32]}"
+                uid_by_material_index[material_index] = material_uid
+                if material_uid not in materials_by_uid:
+                    texture_path = material_texture_path(mat)
+                    color = preview_color(material_uid, object_index + material_index + 1)
+                    materials_by_uid[material_uid] = {
+                        "uid": material_uid,
+                        "material_name": f"{obj.name} / {mat_name}",
+                        "proposed_name": mat_name,
+                        "bodygroup": obj.name,
+                        "keep": True,
+                        "preview_color": color,
+                        "base_color_path": texture_path if texture_path and not texture_path.startswith("packed:") else "",
+                        "base_color_file": Path(texture_path).name if texture_path and not texture_path.startswith("packed:") else texture_path,
+                        "alpha": 1.0,
+                    }
             verts = list(poly.vertices)
             loops = list(poly.loop_indices)
             if len(verts) < 3:
@@ -542,46 +578,30 @@ def collect_flex_preview(flexes: list[dict[str, object]], max_triangles: int = 5
                 if triangle_index % stride == 0:
                     loop_indices = [loops[0], loops[offset], loops[offset + 1]]
                     vertex_indices = [verts[0], verts[offset], verts[offset + 1]]
-                    coords = [v3(obj.matrix_world @ obj.data.vertices[index].co) for index in vertex_indices]
+                    coords = [world_coords[index].tolist() for index in vertex_indices]
                     uvs: list[list[float]] = []
                     for loop_index in loop_indices:
-                        if uv_layer is not None and 0 <= loop_index < len(uv_layer.data):
-                            uv = uv_layer.data[loop_index].uv
-                            uvs.append([round(float(uv.x), 6), round(float(uv.y), 6)])
+                        if uv_coords is not None and 0 <= loop_index < len(uv_coords):
+                            uvs.append(uv_coords[loop_index].tolist())
                         else:
                             uvs.append([0.0, 0.0])
                     flex_deltas: dict[str, list[list[float]]] = {}
-                    if keys is not None and flex_keys:
-                        basis = keys.key_blocks[0]
-                        for key in flex_keys:
-                            deltas = []
-                            has_delta = False
-                            for vertex_index in vertex_indices:
-                                delta = key.data[vertex_index].co - basis.data[vertex_index].co
-                                world_delta = obj.matrix_world.to_3x3() @ delta
-                                item = v3(world_delta)
-                                if abs(item[0]) > EPSILON or abs(item[1]) > EPSILON or abs(item[2]) > EPSILON:
-                                    has_delta = True
-                                deltas.append(item)
-                            if has_delta:
-                                flex_deltas[lookup[(obj.name, key.name)]] = deltas
-                    points.extend(coords)
+                    for key_name, world_deltas in key_world_deltas.items():
+                        tri_deltas = world_deltas[vertex_indices]
+                        if (np.abs(tri_deltas) > EPSILON).any():
+                            flex_deltas[lookup[(obj.name, key_name)]] = tri_deltas.tolist()
                     triangles.append(
                         {
                             "points": coords,
                             "uvs": uvs,
                             "material_uid": material_uid,
-                            "object_name": obj.name,
-                            "bodygroup": obj.name,
                             "polygon_index": int(poly.index),
-                            "color": color,
-                            "texture_path": texture_path if texture_path and not texture_path.startswith("packed:") else "",
                             "flex_deltas": flex_deltas,
                         }
                     )
                 triangle_index += 1
-    mins = [min(point[index] for point in points) for index in range(3)] if points else [0.0, 0.0, 0.0]
-    maxs = [max(point[index] for point in points) for index in range(3)] if points else [1.0, 1.0, 1.0]
+    mins = overall_mins.tolist() if overall_mins is not None else [0.0, 0.0, 0.0]
+    maxs = overall_maxs.tolist() if overall_maxs is not None else [1.0, 1.0, 1.0]
     materials = sorted(materials_by_uid.values(), key=lambda item: natural_key(item.get("uid", "")))
     return {
         "materials": materials,
@@ -600,10 +620,10 @@ def collect_flex_preview(flexes: list[dict[str, object]], max_triangles: int = 5
 def analyze_scene(input_blend: Path) -> tuple[dict[str, object], dict[str, object]]:
     prune_report = prune_shapekeys()
     bodygroups = [object_report(obj) for obj in sorted(mesh_objects(), key=bodygroup_processing_key)]
-    flexes = collect_flexes()
+    flexes, mapping_warnings = collect_flexes()
     preview = collect_flex_preview(flexes)
     auto_removed = auto_mark_excess_flexes_for_removal(flexes)
-    warnings: list[str] = []
+    warnings: list[str] = list(mapping_warnings)
     for group in bodygroups:
         warnings.extend(str(warning) for warning in group.get("warnings", []) if warning)
     for flex in flexes:
@@ -692,19 +712,37 @@ def apply_plan(input_blend: Path, plan: dict[str, object], output_blend: Path, r
     renamed: list[dict[str, object]] = []
     warnings: list[str] = []
 
-    basis_by_object: dict[str, list[object]] = {}
-    raw_by_object_uid: dict[str, dict[str, list[object]]] = {}
-    raw_by_object_name: dict[str, dict[str, list[object]]] = {}
+    needed_names_by_object: dict[str, set[str]] = {}
+    for entry in flexes:
+        if str(entry.get("action") or "keep") == "merge":
+            for source in entry.get("source_flexes", []):
+                if not isinstance(source, dict):
+                    continue
+                source_bodygroup = str(source.get("bodygroup") or "")
+                source_name = str(source.get("original_name") or source.get("source_name") or "")
+                if source_bodygroup and source_name:
+                    needed_names_by_object.setdefault(source_bodygroup, set()).add(source_name)
+            continue
+        bodygroup = str(entry.get("bodygroup") or "")
+        original = str(entry.get("original_name") or "")
+        if bodygroup and original:
+            needed_names_by_object.setdefault(bodygroup, set()).add(original)
+
+    basis_by_object: dict[str, np.ndarray] = {}
+    raw_by_object_uid: dict[str, dict[str, np.ndarray]] = {}
+    raw_by_object_name: dict[str, dict[str, np.ndarray]] = {}
     for obj in mesh_objects():
         keys = obj.data.shape_keys
         if keys is None or not keys.key_blocks:
             continue
         basis = keys.key_blocks[0]
-        basis_coords = [item.co.copy() for item in basis.data]
+        basis_coords = shape_key_coords(basis)
         basis_by_object[obj.name] = basis_coords
-        name_deltas: dict[str, list[object]] = {}
+        wanted_names = needed_names_by_object.get(obj.name, set())
+        name_deltas: dict[str, np.ndarray] = {}
         for key in keys.key_blocks[1:]:
-            name_deltas[key.name] = [key.data[index].co - basis_coords[index] for index in range(len(basis_coords))]
+            if key.name in wanted_names:
+                name_deltas[key.name] = shape_key_coords(key) - basis_coords
         raw_by_object_name[obj.name] = name_deltas
         raw_by_object_uid[obj.name] = {}
 
@@ -718,7 +756,7 @@ def apply_plan(input_blend: Path, plan: dict[str, object], output_blend: Path, r
         if uid and delta is not None:
             raw_by_object_uid.setdefault(bodygroup, {})[uid] = delta
 
-    merge_targets: dict[tuple[str, str], list[object]] = {}
+    merge_targets: dict[tuple[str, str], np.ndarray] = {}
     for entry in flexes:
         if not entry_enabled(entry) or str(entry.get("action") or "keep") != "merge":
             continue
@@ -729,10 +767,10 @@ def apply_plan(input_blend: Path, plan: dict[str, object], output_blend: Path, r
                 grouped.setdefault(str(source.get("bodygroup") or ""), []).append(source)
         for bodygroup, specs in grouped.items():
             basis_coords = basis_by_object.get(bodygroup)
-            if not basis_coords:
+            if basis_coords is None or not len(basis_coords):
                 warnings.append(f"{entry.get('uid')}: missing merge bodygroup {bodygroup}")
                 continue
-            total_delta = [coord * 0.0 for coord in basis_coords]
+            total_delta = np.zeros_like(basis_coords)
             used_sources = 0
             for source in specs:
                 source_uid = str(source.get("uid") or "")
@@ -744,8 +782,7 @@ def apply_plan(input_blend: Path, plan: dict[str, object], output_blend: Path, r
                     warnings.append(f"{entry.get('uid')}: missing merge source {bodygroup}:{source_name or source_uid}")
                     continue
                 weight = source_weight(source)
-                for index, item in enumerate(source_delta):
-                    total_delta[index] += item * weight
+                total_delta += source_delta * float(weight)
                 used_sources += 1
             if used_sources:
                 raw_by_object_uid.setdefault(bodygroup, {})[uid] = total_delta
@@ -768,8 +805,8 @@ def apply_plan(input_blend: Path, plan: dict[str, object], output_blend: Path, r
         obj.data.shape_keys.key_blocks[original].name = temp_name
         temp_key_names[(bodygroup, original)] = temp_name
 
-    rest_offsets: dict[str, list[object]] = {
-        bodygroup: [coord * 0.0 for coord in basis_coords]
+    rest_offsets: dict[str, np.ndarray] = {
+        bodygroup: np.zeros_like(basis_coords)
         for bodygroup, basis_coords in basis_by_object.items()
     }
     for entry in flexes:
@@ -788,19 +825,17 @@ def apply_plan(input_blend: Path, plan: dict[str, object], output_blend: Path, r
             offset = rest_offsets.get(bodygroup)
             if delta is None or offset is None:
                 continue
-            for index, item in enumerate(delta):
-                offset[index] += item * rest_value
+            offset += delta * float(rest_value)
 
-    normalized_basis: dict[str, list[object]] = {}
+    normalized_basis: dict[str, np.ndarray] = {}
     for bodygroup, basis_coords in basis_by_object.items():
         obj = object_by_name(bodygroup)
         if obj is None or obj.data.shape_keys is None:
             continue
-        offset = rest_offsets.get(bodygroup, [coord * 0.0 for coord in basis_coords])
-        new_basis = [coord + offset[index] for index, coord in enumerate(basis_coords)]
+        offset = rest_offsets.get(bodygroup)
+        new_basis = basis_coords + offset if offset is not None else basis_coords.copy()
         basis = obj.data.shape_keys.key_blocks[0]
-        for index, item in enumerate(basis.data):
-            item.co = new_basis[index]
+        basis.data.foreach_set("co", np.ascontiguousarray(new_basis, dtype=np.float32).ravel())
         normalized_basis[bodygroup] = new_basis
 
     for entry in flexes:
@@ -829,8 +864,7 @@ def apply_plan(input_blend: Path, plan: dict[str, object], output_blend: Path, r
         if raw_delta is None or new_basis is None:
             warnings.append(f"{entry.get('uid')}: missing raw flex delta for {bodygroup}:{original}")
             continue
-        for index, item in enumerate(key.data):
-            item.co = new_basis[index] + raw_delta[index] * delta_scale
+        key.data.foreach_set("co", np.ascontiguousarray(new_basis + raw_delta * float(delta_scale), dtype=np.float32).ravel())
         key.name = final_name
         key.value = 0.0
         key.slider_min = 0.0
@@ -871,8 +905,7 @@ def apply_plan(input_blend: Path, plan: dict[str, object], output_blend: Path, r
                 warnings.append(f"{entry.get('uid')}: failed to create shapekeys for {bodygroup}")
                 continue
             key = keys.key_blocks.get(final_name) if final_name in keys.key_blocks else obj.shape_key_add(name=final_name, from_mix=False)
-            for index, item in enumerate(key.data):
-                item.co = new_basis[index] + raw_delta[index] * delta_scale
+            key.data.foreach_set("co", np.ascontiguousarray(new_basis + raw_delta * float(delta_scale), dtype=np.float32).ravel())
             key.value = 0.0
             key.slider_min = 0.0
             key.slider_max = 1.0

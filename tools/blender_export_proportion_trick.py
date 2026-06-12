@@ -9,6 +9,7 @@ import math
 import subprocess
 import shutil
 import sys
+import traceback
 from pathlib import Path
 
 import bpy
@@ -312,13 +313,14 @@ def remove_zero_weight_nonessential_bones(armature: bpy.types.Object, threshold:
     log(f"Checking {len(bone_names)} bone(s) for zero-weight non-essential cleanup across {len(meshes)} exported mesh(es).")
     for obj in meshes:
         mesh = obj.data
-        for vertex_group in obj.vertex_groups:
-            if vertex_group.name in weighted_bones:
-                continue
-            scanned_groups += 1
-            group_index = vertex_group.index
-            if any(vertex_group_weight(vertex, group_index) > threshold for vertex in mesh.vertices):
-                weighted_bones.add(vertex_group.name)
+        names_by_index = {vertex_group.index: vertex_group.name for vertex_group in obj.vertex_groups}
+        scanned_groups += len(names_by_index)
+        for vertex in mesh.vertices:
+            for group in vertex.groups:
+                if group.weight > threshold:
+                    name = names_by_index.get(group.group)
+                    if name is not None:
+                        weighted_bones.add(name)
 
     to_remove = [
         name
@@ -402,11 +404,16 @@ def enforce_single_physics_group(obj: bpy.types.Object, group_name: str, thresho
     for vertex in mesh.vertices:
         if vertex_group_weight(vertex, group.index) <= threshold:
             continue
-        for assignment in list(vertex.groups):
-            if assignment.group in group_by_index and assignment.group != group.index:
-                other_group = group_by_index[assignment.group]
-                other_group.remove([vertex.index])
-                repaired += 1
+        # Collect plain group indices first: removing assignments while iterating
+        # the live VertexGroupElement wrappers reads stale pointers in bpy.
+        other_indices = [
+            assignment.group
+            for assignment in vertex.groups
+            if assignment.group != group.index and assignment.group in group_by_index
+        ]
+        for other_index in other_indices:
+            group_by_index[other_index].remove([vertex.index])
+            repaired += 1
         group.add([vertex.index], 1.0, "REPLACE")
     return repaired
 
@@ -824,27 +831,43 @@ def run_fresh_session_verification(processed_blend: Path, workspace_dir: Path) -
     verify_script = workspace_dir / "fresh_session_verify_processed.py"
     verify_report = workspace_dir / "fresh_session_verify_report.json"
     verify_log = workspace_dir / "fresh_session_verify.log"
+    # Remove stale outputs from a previous run so a failed verification cannot
+    # be masked by an old report or export directory.
+    if verify_report.exists():
+        verify_report.unlink()
+    if verify_dir.exists():
+        shutil.rmtree(verify_dir)
     write_fresh_session_verifier(verify_script, verify_dir, verify_report)
     command = [
         bpy.app.binary_path,
         "--factory-startup",
         "--background",
         str(processed_blend),
+        "--python-exit-code",
+        "1",
         "--python",
         str(verify_script),
     ]
     log("Running fresh-session processed blend verification.")
-    completed = subprocess.run(
-        command,
-        cwd=str(PROPORTION_ROOT),
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        check=False,
-        **hidden_subprocess_kwargs(),
-    )
+    try:
+        completed = subprocess.run(
+            command,
+            cwd=str(PROPORTION_ROOT),
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            check=False,
+            timeout=1800,
+            **hidden_subprocess_kwargs(),
+        )
+    except subprocess.TimeoutExpired as exc:
+        output = exc.stdout if isinstance(exc.stdout, str) else (exc.stdout or b"").decode("utf-8", "replace")
+        verify_log.write_text(output, encoding="utf-8")
+        raise RuntimeError(
+            f"Fresh-session processed blend verification timed out after 1800 seconds; see {verify_log}"
+        ) from exc
     verify_log.write_text(completed.stdout or "", encoding="utf-8")
     if completed.returncode != 0:
         raise RuntimeError(f"Fresh-session processed blend verification failed; see {verify_log}")
@@ -929,6 +952,12 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     workspace_dir.mkdir(parents=True, exist_ok=True)
     raw_dir.mkdir(parents=True, exist_ok=True)
     final_dir.mkdir(parents=True, exist_ok=True)
+
+    # Remove stale outputs from a previous run so a failed re-run cannot be
+    # mistaken for success by the core's output-existence checks.
+    for stale in (report_json, files_json, pre_blend, processed_blend):
+        if stale.exists():
+            stale.unlink()
 
     log(f"Opening collision-sorted blend: {input_blend}")
     bpy.ops.wm.open_mainfile(filepath=str(input_blend))
@@ -1037,7 +1066,26 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
 
 
 def main(argv: list[str] | None = None) -> int:
-    run(parse_args(argv))
+    args = parse_args(argv)
+    try:
+        run(args)
+    except Exception as exc:
+        traceback.print_exc()
+        try:
+            report_json = Path(args.report_json).resolve()
+            report_json.parent.mkdir(parents=True, exist_ok=True)
+            report_json.write_text(
+                json.dumps(
+                    {"validation": {"ok": False, "errors": [str(exc)], "warnings": []}},
+                    ensure_ascii=False,
+                    indent=2,
+                ),
+                encoding="utf-8",
+            )
+            log(f"Wrote failure report: {report_json}")
+        except Exception as report_exc:
+            log(f"Could not write failure report: {report_exc}")
+        return 1
     return 0
 
 

@@ -192,12 +192,15 @@ def custom_split_normals_clear_operator():
     return None, ""
 
 
-def clear_mesh_custom_normals_data(mesh: bpy.types.Mesh) -> None:
+def clear_mesh_custom_normals_data(mesh: bpy.types.Mesh) -> bool:
     try:
-        mesh.normals_split_custom_set(None)
+        attribute = mesh.attributes.get("custom_normal")
+        if attribute is not None:
+            mesh.attributes.remove(attribute)
     except Exception:
         pass
     mesh.update()
+    return not getattr(mesh, "has_custom_normals", False)
 
 
 def clear_custom_normals(stage: str = "") -> int:
@@ -220,6 +223,9 @@ def clear_custom_normals(stage: str = "") -> int:
         except Exception:
             ensure_object_mode()
             clear_mesh_custom_normals_data(mesh)
+        if getattr(mesh, "has_custom_normals", False):
+            print(f"Warning: could not clear custom split normals on {obj.name}{suffix}; the mesh keeps its custom normals.")
+            continue
         cleared += 1
     ensure_object_mode()
     print(f"Cleared custom normals on {cleared} mesh object(s){suffix}.")

@@ -11,7 +11,15 @@ if (-not (Test-Path -LiteralPath $ManifestPath -PathType Leaf)) {
 }
 
 $Manifest = Get-Content -LiteralPath $ManifestPath -Raw | ConvertFrom-Json
-[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+# Allow TLS 1.2 and, when the runtime supports it, TLS 1.3 (older .NET
+# Framework builds do not define the Tls13 enum value).
+$SecurityProtocols = [Net.SecurityProtocolType]::Tls12
+try {
+    $SecurityProtocols = $SecurityProtocols -bor [Net.SecurityProtocolType]::Tls13
+}
+catch {
+}
+[Net.ServicePointManager]::SecurityProtocol = $SecurityProtocols
 
 function Test-AssetHash([string]$Path, [string]$ExpectedHash) {
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
@@ -47,7 +55,17 @@ foreach ($Asset in $Manifest.assets) {
         Remove-Item -LiteralPath $TempTarget -Force
     }
     Write-Host "Downloading $Url"
-    Invoke-WebRequest -Uri $Url -OutFile $TempTarget
+    # Suppress the per-chunk progress bar: under Windows PowerShell 5.1 it
+    # slows large downloads by an order of magnitude. -UseBasicParsing keeps
+    # 5.1 working without the IE engine (it is a harmless no-op on PowerShell 7).
+    $PreviousProgressPreference = $ProgressPreference
+    $ProgressPreference = "SilentlyContinue"
+    try {
+        Invoke-WebRequest -Uri $Url -OutFile $TempTarget -UseBasicParsing
+    }
+    finally {
+        $ProgressPreference = $PreviousProgressPreference
+    }
     $Item = Get-Item -LiteralPath $TempTarget
     if ($Item.Length -ne $ExpectedSize) {
         Remove-Item -LiteralPath $TempTarget -Force

@@ -23,8 +23,8 @@ except Exception as exc:  # pragma: no cover - dependency guard
     raise SystemExit("Pillow is required for Step 12 texture processing. Install with: python -m pip install Pillow") from exc
 
 
-IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".tga", ".bmp", ".tif", ".tiff"}
-IMAGE_EXTENSION_PRIORITY = (".png", ".tga", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff")
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".tga", ".bmp", ".tif", ".tiff", ".dds"}
+IMAGE_EXTENSION_PRIORITY = (".png", ".tga", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff", ".dds")
 NORMAL_HINTS = ("_n", "_hn", "_normal", "_norm", "_nrm", "_bump", "normal", "norm", "bump")
 BASE_SUFFIXES = (
     "_d",
@@ -100,7 +100,7 @@ def safe_basename(name: str, fallback: str, used: set[str]) -> str:
     return cleaned
 
 
-def resolve_material_mapping(input_path: Path) -> tuple[Path, Path | None, Path, Path]:
+def resolve_material_mapping(input_path: Path) -> tuple[Path | None, Path | None, Path, Path]:
     """Return (materials_npy, materials_json, material_dir, workspace_root)."""
     path = input_path.resolve()
     candidates: list[Path] = []
@@ -123,7 +123,27 @@ def resolve_material_mapping(input_path: Path) -> tuple[Path, Path | None, Path,
             found = [item for item in found if item.parent.name == "5_sort_materials"]
             candidates.extend(sorted(found, key=lambda item: item.stat().st_mtime, reverse=True))
     if not candidates:
-        raise FileNotFoundError(f"Could not locate Step 5 materials.npy from {input_path}")
+        # Step 5's .npy write is best-effort, so accept a materials.json found at
+        # the same locations when the sibling .npy is absent.
+        json_candidates: list[Path] = []
+        if path.is_file() and path.name.lower() == "materials.json":
+            json_candidates.append(path)
+        elif path.is_dir():
+            direct_json = path / "materials.json"
+            step_json = path / "5_sort_materials" / "materials.json"
+            if direct_json.exists():
+                json_candidates.append(direct_json)
+            if step_json.exists():
+                json_candidates.append(step_json)
+            if not json_candidates:
+                found_json = [item for item in path.rglob("materials.json") if item.parent.name == "5_sort_materials"]
+                json_candidates.extend(sorted(found_json, key=lambda item: item.stat().st_mtime, reverse=True))
+        if json_candidates:
+            json_path = json_candidates[0].resolve()
+            material_dir = json_path.parent
+            workspace_root = material_dir.parent if material_dir.name == "5_sort_materials" else material_dir
+            return None, json_path, material_dir, workspace_root
+        raise FileNotFoundError(f"Could not locate Step 5 materials.npy or materials.json from {input_path}")
     npy_path = candidates[0].resolve()
     json_path = npy_path.with_name("materials.json")
     material_dir = npy_path.parent
@@ -191,7 +211,7 @@ def load_material_entries(input_path: Path) -> tuple[list[MaterialTexture], Path
     npy_path, json_path, material_dir, workspace_root = resolve_material_mapping(input_path)
     used_names: set[str] = set()
     materials = read_materials_json(json_path, used_names) if json_path else []
-    if not materials:
+    if not materials and npy_path:
         materials = read_materials_npy(npy_path, used_names)
     return materials, workspace_root, material_dir, json_path
 
@@ -275,19 +295,36 @@ def collect_search_dirs(base_path: Path, workspace_root: Path) -> list[Path]:
     return dirs
 
 
+# Per-run caches: the source asset tree can hold thousands of files and the
+# material loops would otherwise re-walk it once per material.
+_IMAGE_FILE_CACHE: dict[tuple[str, bool], list[Path]] = {}
+_TEXTURE_FILE_KEY_CACHE: dict[str, set[str]] = {}
+
+
+def iter_image_files(folder: Path, recursive: bool) -> list[Path]:
+    cache_key = (str(folder.resolve()).lower(), recursive)
+    cached = _IMAGE_FILE_CACHE.get(cache_key)
+    if cached is None:
+        iterator = folder.rglob("*") if recursive else folder.glob("*")
+        cached = [
+            path.resolve()
+            for path in iterator
+            if path.is_file() and path.suffix.lower() in IMAGE_EXTENSIONS
+        ]
+        _IMAGE_FILE_CACHE[cache_key] = cached
+    return cached
+
+
 def collect_image_files(search_dirs: list[Path]) -> list[Path]:
     seen: set[str] = set()
     files: list[Path] = []
     for folder in search_dirs:
-        iterator = folder.rglob("*") if folder.name == "0_source_mmd_assets" else folder.glob("*")
-        for path in iterator:
-            if not path.is_file() or path.suffix.lower() not in IMAGE_EXTENSIONS:
-                continue
-            key = str(path.resolve()).lower()
+        for path in iter_image_files(folder, recursive=folder.name == "0_source_mmd_assets"):
+            key = str(path).lower()
             if key in seen:
                 continue
             seen.add(key)
-            files.append(path.resolve())
+            files.append(path)
     return files
 
 
@@ -308,6 +345,15 @@ def texture_name_keys(path_or_name: str | Path) -> set[str]:
         keys.add(re.sub(r"\.[^.]+$", "", folded))
         keys.add(re.sub(r"[^a-z0-9\u0080-\uffff]+", "", folded))
     return {key for key in keys if key}
+
+
+def texture_keys_for_file(path: Path) -> set[str]:
+    cache_key = str(path)
+    cached = _TEXTURE_FILE_KEY_CACHE.get(cache_key)
+    if cached is None:
+        cached = texture_name_keys(path.name)
+        _TEXTURE_FILE_KEY_CACHE[cache_key] = cached
+    return cached
 
 
 def source_texture_search_dirs(base_path: Path | None, workspace_root: Path) -> list[Path]:
@@ -350,13 +396,10 @@ def resolve_base_texture_path(
 
     candidates: list[Path] = []
     for folder in source_texture_search_dirs(base_path or decoded_path, workspace_root):
-        iterator = folder.rglob("*") if folder.name == "0_source_mmd_assets" else folder.glob("*")
-        for path in iterator:
-            if not path.is_file() or path.suffix.lower() not in IMAGE_EXTENSIONS:
-                continue
-            keys = texture_name_keys(path.name)
+        for path in iter_image_files(folder, recursive=folder.name == "0_source_mmd_assets"):
+            keys = texture_keys_for_file(path)
             if lookup_keys.intersection(keys):
-                candidates.append(path.resolve())
+                candidates.append(path)
     if not candidates:
         return base_path or decoded_path, warnings
 
@@ -365,8 +408,20 @@ def resolve_base_texture_path(
         same_parent = 0 if base_path and candidate.parent == base_path.parent else 1
         return same_parent, suffix_rank, str(candidate).casefold()
 
-    candidates = sorted(set(candidates), key=score)
-    chosen = candidates[0]
+    chosen: Path | None = None
+    for candidate in sorted(set(candidates), key=score):
+        if candidate.suffix.lower() == ".dds":
+            # Pillow handles common DXT1/3/5 DDS but not every exotic sub-format.
+            try:
+                with Image.open(candidate) as probe:
+                    probe.load()
+            except Exception:
+                warnings.append(f"Skipped unreadable DDS candidate {candidate.name}.")
+                continue
+        chosen = candidate
+        break
+    if chosen is None:
+        return base_path or decoded_path, warnings
     missing_name = Path(str(raw_path or "")).name
     warnings.append(f"Texture path {missing_name or raw_path} was missing; resolved to {chosen.name}.")
     return chosen, warnings
@@ -744,16 +799,12 @@ def process_textures(input_path: Path, plan_json: Path, report_json: Path, manif
                 row_report["normal_output_path"] = str(normal_output)
                 row_report["normal_status"] = "generated_override"
             elif normal_source and normal_source.exists() and default_normal_action in {"copy_blue", "ambiguous_copy"}:
-                if not normal_source or not normal_source.exists():
-                    raise FileNotFoundError(f"Normal source missing: {normal_source}")
                 _orig, _final, resized = save_normal_png(normal_source, normal_output)
                 validate_or_regenerate_normal(normal_output, base_source, normal_intensity, row_report, "Copied")
                 row_report["normal_output_path"] = str(normal_output)
                 row_report["normal_resized"] = resized
                 row_report["normal_status"] = "regenerated_for_tone" if row_report.get("normal_regenerated_for_tone") else default_normal_action
             elif normal_source and normal_source.exists() and default_normal_action == "convert_ue_rg":
-                if not normal_source or not normal_source.exists():
-                    raise FileNotFoundError(f"Normal source missing: {normal_source}")
                 normal_output.parent.mkdir(parents=True, exist_ok=True)
                 convert_ue_rg_normal_to_rgb(normal_source, normal_output)
                 validate_or_regenerate_normal(normal_output, base_source, normal_intensity, row_report, "Converted")
@@ -765,6 +816,9 @@ def process_textures(input_path: Path, plan_json: Path, report_json: Path, manif
                 validate_or_regenerate_normal(normal_output, base_source, normal_intensity, row_report, "Generated")
                 row_report["normal_output_path"] = str(normal_output)
                 row_report["normal_status"] = "generated"
+            elif default_normal_action in {"copy_blue", "ambiguous_copy", "convert_ue_rg"}:
+                # Normal use is enabled, but the recorded source no longer exists.
+                raise FileNotFoundError(f"Normal source file is missing: {normal_source or row.get('normal_source_path') or '(unknown)'}")
             else:
                 row_report["normal_status"] = default_normal_action
         except Exception as exc:

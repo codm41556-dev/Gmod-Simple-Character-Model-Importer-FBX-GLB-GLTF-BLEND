@@ -24,7 +24,10 @@ DEFAULT_SCALE_FACTOR = 40.457
 DEFAULT_SOURCE_VERTEX_LIMIT = 65535
 RTX_REMIX_VERTEX_LIMIT = 32767
 SOURCE_VERTEX_LIMIT = DEFAULT_SOURCE_VERTEX_LIMIT
-UNUSED_SHAPEKEY_DELTA_EPSILON = 1e-1
+# Noise-level threshold in post-scale (Source) units. Pruning runs after the
+# ~40x character scale, so this must be tiny enough that subtle real morphs
+# (eyelids, pupils) are never treated as "unused".
+UNUSED_SHAPEKEY_DELTA_EPSILON = 1e-4
 FACE_MERGE_NECK_BONE = "ValveBiped.Bip01_Neck1"
 FACE_MERGE_NECK_Z_TOLERANCE = 1e-4
 SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9_]+$")
@@ -133,11 +136,6 @@ AUTO_SPLIT_HIGH_CONFIDENCE = 0.80
 AUTO_SPLIT_MEDIUM_CONFIDENCE = 0.55
 ADVANCED_AUTO_ENABLE_CONFIDENCE = 0.965
 ADVANCED_DISPLAY_MIN_CONFIDENCE = 0.78
-SCALE_PRESET_FACE_SMDS = {
-    "tall": Path("E:/G/Upload/acheron/5_propo/Face.smd"),
-    "normal": Path("E:/G/Upload/firefly/5_propo/Face.smd"),
-    "short": Path("E:/G/Upload/yaoyao_alt/5_propo/Face.smd"),
-}
 SCALE_PRESET_FACE_TOPS = {
     "tall": 69.611259,
     "normal": 63.07148,
@@ -172,8 +170,10 @@ def parse_args() -> argparse.Namespace:
 
 
 def write_json(path: Path, data: dict[str, object]) -> None:
+    # Compact separators: the analysis JSON can embed hundreds of thousands of
+    # preview triangles, and indent=2 multiplies its size several-fold.
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    path.write_text(json.dumps(data, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
 
 
 def ensure_object_mode() -> None:
@@ -357,11 +357,19 @@ def current_face_top_z(meshes: list[bpy.types.Object]) -> tuple[float, str, int]
 
     top: float | None = None
     vertex_hits = 0
+    hint_cache: dict[str, bool] = {}
     for obj in meshes:
         world = obj.matrix_world
+        # Evaluate the node-tree based face hint once per material slot instead
+        # of once per polygon.
+        slot_hints: list[bool] = []
+        for mat in obj.data.materials:
+            key = mat.name if mat is not None else ""
+            if key not in hint_cache:
+                hint_cache[key] = material_has_face_scale_hint(mat)
+            slot_hints.append(hint_cache[key])
         for poly in obj.data.polygons:
-            mat = obj.data.materials[poly.material_index] if poly.material_index < len(obj.data.materials) else None
-            if not material_has_face_scale_hint(mat):
+            if not (0 <= int(poly.material_index) < len(slot_hints)) or not slot_hints[int(poly.material_index)]:
                 continue
             for vertex_index in poly.vertices:
                 z_value = float((world @ obj.data.vertices[int(vertex_index)].co).z)
@@ -405,9 +413,10 @@ def resolve_scale_reference(scale_preset: str, scale_reference_smd: Path | None)
     preset = str(scale_preset or "factor").lower()
     if scale_reference_smd:
         return preset if preset != "factor" else "custom", scale_reference_smd
-    if preset in SCALE_PRESET_FACE_SMDS:
-        reference_smd = SCALE_PRESET_FACE_SMDS[preset]
-        return preset, reference_smd if reference_smd.exists() else None
+    if preset in SCALE_PRESET_FACE_TOPS:
+        # Presets use the baked face-top constants; an explicit
+        # --scale-reference-smd is the only file-based override.
+        return preset, None
     return "factor", None
 
 
@@ -498,6 +507,12 @@ def maybe_scale_character(
             return report
         actual_scale = float(scale_factor)
         report["actual_scale"] = round(actual_scale, 8)
+        if actual_scale <= 0:
+            report["warnings"].append(f"Requested non-positive scale factor {actual_scale:.6f}; model was not scaled.")
+            return report
+        if abs(actual_scale - 1.0) <= 1e-5:
+            report["warnings"].append("Model was not scaled because the requested factor is approximately 1.0.")
+            return report
     transform_report = apply_uniform_character_scale(actual_scale)
     report["scaled_objects"] = transform_report.get("scaled_objects", [])
     report["physics_scaled"] = bool(transform_report.get("physics_scaled", False))
@@ -619,6 +634,20 @@ def shapekey_max_delta(obj: bpy.types.Object, key: bpy.types.ShapeKey, epsilon: 
     relative = shapekey_relative_key(obj, key)
     if relative is None:
         return 0.0
+    count = min(len(key.data), len(relative.data))
+    if count <= 0:
+        return 0.0
+    try:
+        import numpy as np
+
+        key_co = np.empty(len(key.data) * 3, dtype=np.float64)
+        key.data.foreach_get("co", key_co)
+        relative_co = np.empty(len(relative.data) * 3, dtype=np.float64)
+        relative.data.foreach_get("co", relative_co)
+        deltas = key_co[: count * 3].reshape(-1, 3) - relative_co[: count * 3].reshape(-1, 3)
+        return float(np.sqrt((deltas * deltas).sum(axis=1)).max())
+    except ImportError:
+        pass
     max_delta = 0.0
     for index, item in enumerate(key.data):
         if index >= len(relative.data):
@@ -634,7 +663,7 @@ def shapekey_max_delta(obj: bpy.types.Object, key: bpy.types.ShapeKey, epsilon: 
 def fallback_prune_shapekeys(obj: bpy.types.Object, epsilon: float = UNUSED_SHAPEKEY_DELTA_EPSILON) -> dict[str, object]:
     keys = obj.data.shape_keys
     if keys is None or len(keys.key_blocks) <= 1:
-        return {"removed": [], "method": "fallback", "warnings": [], "epsilon": epsilon, "movement_threshold_meters": epsilon}
+        return {"removed": [], "method": "fallback", "warnings": [], "epsilon": epsilon, "movement_threshold_units": epsilon}
     removed: list[str] = []
     kept: list[dict[str, object]] = []
     warnings: list[str] = []
@@ -654,7 +683,7 @@ def fallback_prune_shapekeys(obj: bpy.types.Object, epsilon: float = UNUSED_SHAP
         "method": "fallback",
         "warnings": warnings,
         "epsilon": epsilon,
-        "movement_threshold_meters": epsilon,
+        "movement_threshold_units": epsilon,
     }
 
 
@@ -663,7 +692,7 @@ def prune_shapekeys(use_cats: bool = False, stage: str = "") -> dict[str, object
         "objects": [],
         "warnings": [],
         "method": "per_bodygroup_unused_delta_prune",
-        "movement_threshold_meters": UNUSED_SHAPEKEY_DELTA_EPSILON,
+        "movement_threshold_units": UNUSED_SHAPEKEY_DELTA_EPSILON,
     }
     if stage:
         report["stage"] = stage
@@ -673,7 +702,7 @@ def prune_shapekeys(use_cats: bool = False, stage: str = "") -> dict[str, object
             "method": "",
             "removed": [],
             "warnings": [],
-            "movement_threshold_meters": UNUSED_SHAPEKEY_DELTA_EPSILON,
+            "movement_threshold_units": UNUSED_SHAPEKEY_DELTA_EPSILON,
         }
         if obj.data.shape_keys is None or len(obj.data.shape_keys.key_blocks) <= 1:
             object_report["method"] = "none"
@@ -703,7 +732,7 @@ def prune_shapekeys(use_cats: bool = False, stage: str = "") -> dict[str, object
         object_report["fallback_kept"] = fallback_kept
         object_report["fallback_method"] = fallback.get("method", "fallback")
         object_report["unused_delta_epsilon"] = fallback.get("epsilon", UNUSED_SHAPEKEY_DELTA_EPSILON)
-        object_report["movement_threshold_meters"] = fallback.get("movement_threshold_meters", UNUSED_SHAPEKEY_DELTA_EPSILON)
+        object_report["movement_threshold_units"] = fallback.get("movement_threshold_units", UNUSED_SHAPEKEY_DELTA_EPSILON)
         if use_cats and object_report.get("method") == "cats_shapekey.shape_key_prune":
             object_report["method"] = "cats_shapekey.shape_key_prune+fallback_unused_delta_prune"
         elif use_cats and object_report.get("method") == "cats_shapekey.shape_key_prune_failed":
@@ -721,7 +750,7 @@ def combined_shapekey_prune_report(pre_report: dict[str, object], post_report: d
             warnings.extend(str(value) for value in values if value)
     return {
         "method": "pre_and_post_material_separation",
-        "movement_threshold_meters": UNUSED_SHAPEKEY_DELTA_EPSILON,
+        "movement_threshold_units": UNUSED_SHAPEKEY_DELTA_EPSILON,
         "pre_separation": pre_report,
         "post_separation": post_report,
         "objects": post_report.get("objects", []) if isinstance(post_report.get("objects"), list) else [],
@@ -874,18 +903,23 @@ def preview_color(uid: str, index: int, obj: bpy.types.Object) -> list[float]:
 
 
 def tracking_vertex_groups(obj: bpy.types.Object) -> list[dict[str, object]]:
-    out: list[dict[str, object]] = []
-    for group in obj.vertex_groups:
-        if not group.name.startswith(TRACKING_PREFIXES):
-            continue
-        count = 0
-        for vertex in obj.data.vertices:
-            for membership in vertex.groups:
-                if membership.group == group.index and membership.weight > 0.0001:
-                    count += 1
-                    break
-        if count:
-            out.append({"name": group.name, "vertex_count": count})
+    tracking_by_index = {
+        group.index: group.name
+        for group in obj.vertex_groups
+        if group.name.startswith(TRACKING_PREFIXES)
+    }
+    if not tracking_by_index:
+        return []
+    counts: dict[int, int] = defaultdict(int)
+    for vertex in obj.data.vertices:
+        for membership in vertex.groups:
+            if int(membership.group) in tracking_by_index and membership.weight > 0.0001:
+                counts[int(membership.group)] += 1
+    out = [
+        {"name": tracking_by_index[group_index], "vertex_count": count}
+        for group_index, count in counts.items()
+        if count
+    ]
     out.sort(key=lambda entry: natural_key(entry["name"]))
     return out
 
@@ -1101,7 +1135,7 @@ def collect_sources(vertex_limit: int = DEFAULT_SOURCE_VERTEX_LIMIT) -> list[dic
         default_enabled = not zero_alpha_materials
         tracking = tracking_vertex_groups(obj)
         shapekey_names = shape_key_names(obj)
-        facial_names = facial_shapekey_names(obj)
+        facial_names = [name for name in shapekey_names if is_facial_shapekey_name(name)]
         facial_text_hint = has_facial_merge_text_hint(obj, materials, tracking)
         facial_merge_candidate = bool(default_enabled and facial_names)
         facial_merge_reasons: list[str] = []
@@ -1212,22 +1246,43 @@ def collect_bodygroup_preview(sources: list[dict[str, object]], max_triangles: i
         uid = uid_by_object.get(obj.name, "")
         entry = entry_by_uid.get(uid, {})
         component_by_vertex: dict[int, int] = {}
-        for component in connected_mesh_components(obj, include_vertices=True):
-            component_id = int(component.get("id", 0) or 0)
-            for vertex_index in component.get("vertex_indices", []):
-                component_by_vertex[int(vertex_index)] = component_id
+        # Reuse the connected components already computed by collect_sources
+        # instead of re-running union-find over every vertex of every object.
+        entry_components = entry.get("components", []) if isinstance(entry.get("components"), list) else []
+        if entry_components:
+            for component in entry_components:
+                if not isinstance(component, dict):
+                    continue
+                component_id = int(component.get("id", 0) or 0)
+                for vertex_index in component.get("vertex_indices", []):
+                    component_by_vertex[int(vertex_index)] = component_id
+        else:
+            for component in connected_mesh_components(obj, include_vertices=True):
+                component_id = int(component.get("id", 0) or 0)
+                for vertex_index in component.get("vertex_indices", []):
+                    component_by_vertex[int(vertex_index)] = component_id
         uv_layer = obj.data.uv_layers.active
         matrix = obj.matrix_world
+        # Material node-tree walks are expensive; resolve texture/color once
+        # per material slot, and only for triangles that pass the stride check.
+        slot_info: dict[int, tuple[str, list[float]]] = {}
         for poly in obj.data.polygons:
-            mat = material_for_polygon(obj, poly)
-            texture_path = material_texture_path(mat)
-            color = material_color(mat, entry.get("preview_color") or [0.8, 0.8, 0.8, 1.0])
             verts = list(poly.vertices)
             loops = list(poly.loop_indices)
             if len(verts) < 3:
                 continue
             for offset in range(1, len(verts) - 1):
                 if triangle_index % stride == 0:
+                    slot_index = int(poly.material_index)
+                    cached = slot_info.get(slot_index)
+                    if cached is None:
+                        mat = material_for_polygon(obj, poly)
+                        cached = (
+                            material_texture_path(mat),
+                            material_color(mat, entry.get("preview_color") or [0.8, 0.8, 0.8, 1.0]),
+                        )
+                        slot_info[slot_index] = cached
+                    texture_path, color = cached
                     loop_indices = [loops[0], loops[offset], loops[offset + 1]]
                     uvs = []
                     for loop_index in loop_indices:
@@ -2174,7 +2229,7 @@ def detect_advanced_split_candidates(
     return candidates
 
 
-def display_split_candidates(candidates: list[dict[str, object]]) -> list[dict[str, object]]:
+def display_split_candidates(candidates: list[dict[str, object]], bodygroups: list[dict[str, object]] | None = None) -> list[dict[str, object]]:
     primary: list[dict[str, object]] = []
     review: list[dict[str, object]] = []
     for candidate in candidates:
@@ -2187,7 +2242,10 @@ def display_split_candidates(candidates: list[dict[str, object]]) -> list[dict[s
         elif confidence >= 0.86:
             review.append(candidate)
     selected = primary[:40] + review[:20]
-    used_names: set[str] = set()
+    # Seed with the existing bodygroup names so the re-run rename pass cannot
+    # undo the earlier de-duplication and collide with an existing bodygroup.
+    used_names: set[str] = {str(group.get("proposed_name") or "") for group in (bodygroups or []) if isinstance(group, dict)}
+    used_names.discard("")
     for index, candidate in enumerate(selected, start=1):
         proposed_name = unique_name(capitalized_bodygroup_name(str(candidate.get("base_name") or candidate.get("proposed_name") or "Accessory")), used_names, f"Accessory_{index:03d}")
         candidate["proposed_name"] = proposed_name
@@ -2204,7 +2262,7 @@ def detect_split_candidates(
     if status.get("available"):
         try:
             advanced = detect_advanced_split_candidates(sources, bodygroups, metrics)
-            displayed = display_split_candidates(advanced)
+            displayed = display_split_candidates(advanced, bodygroups)
             status["raw_candidate_count"] = len(advanced)
             status["candidate_count"] = len(displayed)
             if displayed:
@@ -2301,21 +2359,50 @@ def analyze_scene(
     scale_reference_smd: Path | None = None,
     always_auto_split: bool = False,
     vertex_limit: int = DEFAULT_SOURCE_VERTEX_LIMIT,
+    include_preview: bool = True,
+    detect_splits: bool = True,
 ) -> tuple[dict[str, object], dict[str, object]]:
     vertex_limit = max(1, int(vertex_limit or DEFAULT_SOURCE_VERTEX_LIMIT))
+    print("Scaling character", flush=True)
     scale_report = maybe_scale_character(scale_factor, scale_preset=scale_preset, scale_reference_smd=scale_reference_smd)
+    print("Pruning unused shapekeys (pre-separation)", flush=True)
     pre_separation_shapekey_report = prune_shapekeys(stage="auto_pre_material_separation")
+    print(f"Separating by material ({len(mesh_objects())} meshes)", flush=True)
     separate_report = separate_by_materials()
+    print("Pruning unused shapekeys (post-separation)", flush=True)
     post_separation_shapekey_report = prune_shapekeys(stage="auto_post_material_separation")
     shapekey_report = combined_shapekey_prune_report(pre_separation_shapekey_report, post_separation_shapekey_report)
+    print(f"Collecting bodygroup sources ({len(mesh_objects())} meshes)", flush=True)
     sources = collect_sources(vertex_limit)
     metrics = scene_metrics()
-    preview = collect_bodygroup_preview(sources)
+    if include_preview:
+        print("Sampling preview triangles", flush=True)
+        preview = collect_bodygroup_preview(sources)
+    else:
+        preview = {
+            "triangles": [],
+            "source_triangle_count": 0,
+            "sampled_triangle_count": 0,
+            "sample_stride": 1,
+            "mins": [0.0, 0.0, 0.0],
+            "maxs": [1.0, 1.0, 1.0],
+            "skipped": True,
+        }
     base_bodygroups = build_bodygroups(sources)
     facial_merge = build_facial_merge_report(sources, base_bodygroups, vertex_limit)
     split_policy = auto_split_policy(sources, always_auto_split, vertex_limit)
-    if split_policy.get("required"):
+    if detect_splits and split_policy.get("required"):
+        print("Clustering split candidates", flush=True)
         split_candidates, clustering_status = detect_split_candidates(auto_split_sources(sources, split_policy), base_bodygroups, metrics)
+    elif split_policy.get("required"):
+        split_candidates = []
+        clustering_status = {
+            "available": None,
+            "method": "skipped",
+            "skipped": True,
+            "candidate_count": 0,
+            "reason": "Apply mode reuses the analyze-time plan; split clustering was skipped.",
+        }
     else:
         split_candidates = []
         clustering_status = {
@@ -2853,11 +2940,33 @@ def apply_plan(
     name_repairs = list(plan.get("name_repairs", [])) if isinstance(plan.get("name_repairs"), list) else []
     errors = validate_plan(plan)
     if errors:
+        # Write a minimal failure report before raising so the GUI can surface
+        # the structured validation errors instead of a generic missing-output
+        # message.
+        write_json(
+            report_json,
+            {
+                "version": 3,
+                "kind": "sort_bodygroups_report",
+                "input_blend": str(input_blend),
+                "output_blend": str(output_blend),
+                "name_repairs": name_repairs,
+                "vertex_limit": vertex_limit,
+                "bodygroups": [],
+                "bodygroup_count": 0,
+                "warnings": [],
+                "validation": {"ok": False, "errors": errors, "warnings": []},
+                "elapsed_seconds": round(time.monotonic() - started, 3),
+            },
+        )
         raise RuntimeError("Bodygroup plan validation failed:\n" + "\n".join(errors))
     plan_auto_split = plan.get("auto_split", {}) if isinstance(plan.get("auto_split", {}), dict) else {}
     effective_always_auto_split = bool(always_auto_split or plan_auto_split.get("always"))
     plan_scale_preset = str(plan.get("scale_preset") or scale_preset or "factor")
     plan_reference = Path(str(plan.get("scale_reference_smd"))) if plan.get("scale_reference_smd") else scale_reference_smd
+    # Apply mode only needs the scale/separation/prune side effects and the
+    # source list; the preview sampling and split clustering results would be
+    # discarded, so skip them.
     analysis, _default_plan = analyze_scene(
         input_blend,
         scale_factor,
@@ -2865,9 +2974,12 @@ def apply_plan(
         scale_reference_smd=plan_reference,
         always_auto_split=effective_always_auto_split,
         vertex_limit=vertex_limit,
+        include_preview=False,
+        detect_splits=False,
     )
     sources = [entry for entry in analysis.get("sources", []) if isinstance(entry, dict)]
     source_map = source_objects_by_uid(sources)
+    print("Applying bodygroup splits", flush=True)
     split_report = apply_splits(plan, sources, source_map)
     assign_temporary_mesh_names()
     used_objects: set[bpy.types.Object] = set()
@@ -2878,6 +2990,7 @@ def apply_plan(
     }
     output_names: set[str] = set()
     output_groups: list[dict[str, object]] = []
+    print("Joining bodygroup meshes", flush=True)
     for group in plan.get("bodygroups", []):
         if not isinstance(group, dict) or not group.get("enabled", True):
             continue
@@ -2935,6 +3048,7 @@ def apply_plan(
         removed_names = set(removed_zero_vertex_bodygroups)
         output_groups = [group for group in output_groups if str(group.get("name") or "") not in removed_names]
     output_blend.parent.mkdir(parents=True, exist_ok=True)
+    print(f"Saving bodygroup blend: {output_blend}", flush=True)
     bpy.ops.wm.save_as_mainfile(filepath=str(output_blend))
     validation_errors: list[str] = []
     analysis_warnings = analysis.get("warnings", []) if isinstance(analysis.get("warnings"), list) else []
@@ -3036,7 +3150,7 @@ def validate_manual_bodygroups(
         object_errors: list[str] = []
         object_warnings: list[str] = []
         object_shapekeys = shape_key_names(obj)
-        object_facial_shapekeys = facial_shapekey_names(obj)
+        object_facial_shapekeys = [name for name in object_shapekeys if is_facial_shapekey_name(name)]
         if not SAFE_NAME_RE.fullmatch(name):
             object_errors.append(f"{name}: unsafe bodygroup object name.")
         if name in seen_names:

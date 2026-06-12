@@ -1,3 +1,29 @@
+# =========================================================================
+# WARNING - CONTENT DRIFT RISK
+#
+# This script regenerates several files in the upload folder from here-string
+# copies embedded BELOW, rather than copying the tracked repo files. Those
+# embedded copies are NOT kept in sync automatically and some have already
+# drifted from the live repo:
+#
+#   - .gitignore   : the embedded copy ($GitIgnore below) intentionally
+#                    differs from the live repo .gitignore (it omits /9_arts,
+#                    /Github Upload, the reference/* rules, /smoke_tests and
+#                    the *.spec names), but it is not reviewed against the
+#                    live file when the live file changes.
+#   - README.md    : the embedded upload README ("MMD Character Importer
+#                    Build Repo") is maintained separately from the live repo
+#                    README.md and does not receive its updates.
+#   - requirements-build.txt, build_assets_manifest.json,
+#     scripts/download_build_assets.ps1
+#                  : embedded mirrors of tracked root files. Whenever the
+#                    tracked file changes, the matching here-string below
+#                    MUST be updated by hand, or the upload repo ships a
+#                    stale copy.
+#
+# Treat the tracked root files as the source of truth and re-check every
+# here-string below before running a sync.
+# =========================================================================
 param(
     [string]$OutputDir = ""
 )
@@ -14,17 +40,17 @@ else {
 
 $ProjectRootFull = [System.IO.Path]::GetFullPath($ProjectRoot)
 $UploadRootFull = [System.IO.Path]::GetFullPath($UploadRoot)
-$ExpectedUploadRootFull = [System.IO.Path]::GetFullPath((Join-Path $ProjectRoot "Github Upload"))
 
 function Assert-SafeUploadRoot {
-    if ($UploadRootFull -ne $ExpectedUploadRootFull) {
-        throw "Refusing to sync unexpected output folder. Expected: $ExpectedUploadRootFull; got: $UploadRootFull"
-    }
-    if (-not $UploadRootFull.StartsWith($ProjectRootFull, [System.StringComparison]::OrdinalIgnoreCase)) {
-        throw "Refusing to sync outside the project root: $UploadRootFull"
-    }
-    if ([System.IO.Path]::GetFileName($UploadRootFull) -ne "Github Upload") {
+    $DirSeparators = [char[]]@([System.IO.Path]::DirectorySeparatorChar, [System.IO.Path]::AltDirectorySeparatorChar)
+    $NormalizedUploadRoot = $UploadRootFull.TrimEnd($DirSeparators)
+    $NormalizedProjectRoot = $ProjectRootFull.TrimEnd($DirSeparators)
+    if ([System.IO.Path]::GetFileName($NormalizedUploadRoot) -ne "Github Upload") {
         throw "Refusing to sync folder not named 'Github Upload': $UploadRootFull"
+    }
+    if ($NormalizedProjectRoot.Equals($NormalizedUploadRoot, [System.StringComparison]::OrdinalIgnoreCase) -or
+        $NormalizedProjectRoot.StartsWith($NormalizedUploadRoot + [System.IO.Path]::DirectorySeparatorChar, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Refusing to sync into a folder that contains the project root: $UploadRootFull"
     }
 }
 
@@ -198,8 +224,7 @@ $AssetManifest = [ordered]@{
             url = "https://download.blender.org/release/Blender4.5/blender-4.5.10-windows-x64.zip"
             sha256 = "EF6D846B8015F47ADE6DF3F9322CE17419080A5D922FA562B6C966064FE30DCE"
             size_bytes = 398911842
-            required = $true
-            reason = "Offline fallback portable Blender zip required by tools/build_mmd_character_importer_exe.ps1."
+            reason = "Optional offline-fallback portable Blender zip. When present at the repo root, tools/build_mmd_character_importer_exe.ps1 verifies it against this manifest and bundles it into the exe; when absent, the build still succeeds and the app auto-downloads the official Blender 4.5 zip at first run."
         }
     )
 }
@@ -219,7 +244,15 @@ if (-not (Test-Path -LiteralPath $ManifestPath -PathType Leaf)) {
 }
 
 $Manifest = Get-Content -LiteralPath $ManifestPath -Raw | ConvertFrom-Json
-[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
+# Allow TLS 1.2 and, when the runtime supports it, TLS 1.3 (older .NET
+# Framework builds do not define the Tls13 enum value).
+$SecurityProtocols = [Net.SecurityProtocolType]::Tls12
+try {
+    $SecurityProtocols = $SecurityProtocols -bor [Net.SecurityProtocolType]::Tls13
+}
+catch {
+}
+[Net.ServicePointManager]::SecurityProtocol = $SecurityProtocols
 
 function Test-AssetHash([string]$Path, [string]$ExpectedHash) {
     if (-not (Test-Path -LiteralPath $Path -PathType Leaf)) {
@@ -255,7 +288,17 @@ foreach ($Asset in $Manifest.assets) {
         Remove-Item -LiteralPath $TempTarget -Force
     }
     Write-Host "Downloading $Url"
-    Invoke-WebRequest -Uri $Url -OutFile $TempTarget
+    # Suppress the per-chunk progress bar: under Windows PowerShell 5.1 it
+    # slows large downloads by an order of magnitude. -UseBasicParsing keeps
+    # 5.1 working without the IE engine (it is a harmless no-op on PowerShell 7).
+    $PreviousProgressPreference = $ProgressPreference
+    $ProgressPreference = "SilentlyContinue"
+    try {
+        Invoke-WebRequest -Uri $Url -OutFile $TempTarget -UseBasicParsing
+    }
+    finally {
+        $ProgressPreference = $PreviousProgressPreference
+    }
     $Item = Get-Item -LiteralPath $TempTarget
     if ($Item.Length -ne $ExpectedSize) {
         Remove-Item -LiteralPath $TempTarget -Force

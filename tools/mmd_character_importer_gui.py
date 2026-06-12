@@ -91,16 +91,45 @@ LOCAL_CATEGORY_SUGGESTIONS_FILE = (
 )
 CATEGORY_SUGGESTIONS_ENV = "MCI_CATEGORY_SUGGESTIONS"
 CATEGORY_SCAN_ROOT_ENV = "MCI_CATEGORY_SCAN_ROOT"
-DEFAULT_CATEGORY_SCAN_ROOTS = [Path("E:/G/Upload")]
+# No default scan roots: end users opt in via category_suggestions.json
+# ("scan_roots") or the MCI_CATEGORY_SCAN_ROOT environment variable.
+DEFAULT_CATEGORY_SCAN_ROOTS: list[Path] = []
 DEFAULT_CATEGORY_SUGGESTIONS = {"SheepyLord": "Sheepy Lord"}
 CATEGORY_COMPLETER_SEPARATOR = "    -    "
-INTERNAL_IDENTIFIER_ALLOWED_RE = re.compile(r"^[A-Za-z_]*$")
-INTERNAL_IDENTIFIER_REQUIRED_RE = re.compile(r"^[A-Za-z_]+$")
-INTERNAL_IDENTIFIER_UNSAFE_RE = re.compile(r"[^A-Za-z_]+")
-DISPLAY_NAME_ALLOWED_RE = re.compile(r"^[A-Za-z_ ]*$")
-DISPLAY_NAME_UNSAFE_RE = re.compile(r"[^A-Za-z_ ]+")
+# Digits are legal in Source model/material paths, Lua filenames, and QC
+# identifiers, so names like "miku39" are allowed; a leading digit gets an
+# underscore prefix during sanitization (matching sort_qc_compile.py).
+INTERNAL_IDENTIFIER_ALLOWED_RE = re.compile(r"^[A-Za-z0-9_]*$")
+INTERNAL_IDENTIFIER_REQUIRED_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+INTERNAL_IDENTIFIER_UNSAFE_RE = re.compile(r"[^A-Za-z0-9_]+")
+DISPLAY_NAME_ALLOWED_RE = re.compile(r"^[A-Za-z0-9_ ]*$")
+DISPLAY_NAME_UNSAFE_RE = re.compile(r"[^A-Za-z0-9_ ]+")
 CATEGORY_DISPLAY_ALLOWED_RE = re.compile(r"^[\x20-\x7E]*$")
 CATEGORY_DISPLAY_UNSAFE_RE = re.compile(r"[^\x20-\x7E]+")
+# Distinct colors for the up-to-14 additional CoACD collision groups (preview
+# bone tint + table row tint).
+COLLISION_GROUP_COLORS: list[tuple[float, float, float]] = [
+    (0.95, 0.35, 0.35),
+    (0.35, 0.78, 0.95),
+    (0.45, 0.90, 0.45),
+    (0.95, 0.75, 0.30),
+    (0.80, 0.50, 0.95),
+    (0.95, 0.55, 0.75),
+    (0.40, 0.95, 0.85),
+    (0.75, 0.85, 0.30),
+    (0.95, 0.50, 0.25),
+    (0.45, 0.55, 0.95),
+    (0.60, 0.95, 0.55),
+    (0.95, 0.85, 0.50),
+    (0.70, 0.70, 0.95),
+    (0.95, 0.65, 0.90),
+]
+
+
+def collision_group_color(group_id: int) -> tuple[float, float, float]:
+    return COLLISION_GROUP_COLORS[(int(group_id) - 1) % len(COLLISION_GROUP_COLORS)]
+
+
 VRD_INTENSITY_DEFAULTS = {10: 1.0, 20: 0.7, 30: 0.42}
 VRD_WEIGHT_FRAMES = (10, 20, 30)
 VRD_WEIGHT_COLUMNS = {10: 4, 20: 5, 30: 6}
@@ -148,16 +177,17 @@ def resolve_gmod_path_input(raw: object) -> dict[str, object]:
             }
         return {"ok": False, "input": text, "error": f"studiomdl.exe was not found: {path}"}
     if path.is_dir():
-        install_studiomdl = path / "bin" / "studiomdl.exe"
-        if install_studiomdl.exists():
-            return {
-                "ok": True,
-                "input": text,
-                "display": str(path),
-                "kind": "install_root",
-                "gmod_root": str(path),
-                "studiomdl": "",
-            }
+        for relative in (("bin", "studiomdl.exe"), ("bin", "win64", "studiomdl.exe")):
+            install_studiomdl = path.joinpath(*relative)
+            if install_studiomdl.exists():
+                return {
+                    "ok": True,
+                    "input": text,
+                    "display": str(path),
+                    "kind": "install_root",
+                    "gmod_root": str(path),
+                    "studiomdl": "",
+                }
         local_studiomdl = path / "studiomdl.exe"
         if local_studiomdl.exists():
             return {
@@ -169,16 +199,17 @@ def resolve_gmod_path_input(raw: object) -> dict[str, object]:
                 "studiomdl": str(local_studiomdl),
             }
         if path.name.lower() == "garrysmod":
-            sibling_studiomdl = path.parent / "bin" / "studiomdl.exe"
-            if sibling_studiomdl.exists():
-                return {
-                    "ok": True,
-                    "input": text,
-                    "display": str(path),
-                    "kind": "game_dir",
-                    "gmod_root": str(path),
-                    "studiomdl": "",
-                }
+            for relative in (("bin", "studiomdl.exe"), ("bin", "win64", "studiomdl.exe")):
+                sibling_studiomdl = path.parent.joinpath(*relative)
+                if sibling_studiomdl.exists():
+                    return {
+                        "ok": True,
+                        "input": text,
+                        "display": str(path),
+                        "kind": "game_dir",
+                        "gmod_root": str(path),
+                        "studiomdl": "",
+                    }
         return {"ok": False, "input": text, "error": f"GMod install does not contain studiomdl.exe: {path}"}
     return {"ok": False, "input": text, "error": f"GMod/StudioMDL path was not found: {path}"}
 
@@ -203,7 +234,14 @@ def gmod_game_dir_from_path_input(raw: object) -> tuple[Path | None, str]:
     kind = str(resolved.get("kind") or "")
     if kind == "studiomdl":
         studiomdl = safe_resolve_path(Path(str(resolved.get("studiomdl") or "")))
+        # Walk up from studiomdl.exe until a sibling "garrysmod" game folder is
+        # found; handles both bin\studiomdl.exe and bin\win64\studiomdl.exe.
         game_dir = studiomdl.parent.parent / "garrysmod"
+        for ancestor in studiomdl.parents:
+            candidate = ancestor / "garrysmod"
+            if (candidate / "gameinfo.txt").exists():
+                game_dir = candidate
+                break
     elif kind == "install_root":
         game_dir = safe_resolve_path(Path(str(resolved.get("gmod_root") or ""))) / "garrysmod"
     elif kind == "game_dir":
@@ -350,7 +388,10 @@ def scan_importer_model_addons(gmod_path: object) -> dict[str, object]:
 
 
 def sanitize_internal_identifier_text(value: object) -> str:
-    return INTERNAL_IDENTIFIER_UNSAFE_RE.sub("", str(value or ""))
+    text = INTERNAL_IDENTIFIER_UNSAFE_RE.sub("", str(value or ""))
+    if text and text[0].isdigit():
+        text = "_" + text
+    return text
 
 
 def sanitize_display_name_text(value: object) -> str:
@@ -359,6 +400,83 @@ def sanitize_display_name_text(value: object) -> str:
 
 def sanitize_category_display_name_text(value: object) -> str:
     return CATEGORY_DISPLAY_UNSAFE_RE.sub("", str(value or ""))
+
+
+def display_from_internal_text(text: str, fallback: str = "") -> str:
+    words = [part for part in str(text or "").replace("_", " ").split() if part]
+    display = " ".join(part[:1].upper() + part[1:] for part in words)
+    return sanitize_display_name_text(display or fallback)
+
+
+def scan_known_category_pairs() -> tuple[list[dict[str, object]], list[Path], list[Path]]:
+    """Scan configured roots for lua/autorun category hints. Disk-heavy; run off the GUI thread."""
+
+    configured_categories, scan_roots, loaded_files = load_category_suggestion_config()
+    counts: dict[tuple[str, str], int] = {}
+    model_re = re.compile(r'models[/\\]+sheepylord[/\\]+([^/"\\]+)[/\\]', re.IGNORECASE)
+    category_re = re.compile(r'local\s+Category\s*=\s*"([^"]+)"', re.IGNORECASE)
+
+    def iter_lua_autorun_files(root: Path, max_depth: int = 6, max_seconds: float = 4.0):
+        started = time.monotonic()
+        stack: list[tuple[Path, int]] = [(root, 0)]
+        while stack and time.monotonic() - started <= max_seconds:
+            folder, depth = stack.pop()
+            try:
+                entries = list(os.scandir(folder))
+            except Exception:
+                continue
+            if folder.name.lower() == "autorun" and folder.parent.name.lower() == "lua":
+                for entry in entries:
+                    if entry.is_file() and entry.name.lower().endswith(".lua"):
+                        yield Path(entry.path)
+                continue
+            if depth >= max_depth:
+                continue
+            for entry in reversed(entries):
+                if not entry.is_dir(follow_symlinks=False):
+                    continue
+                name = entry.name.lower()
+                if name in {"materials", "models", "sound", "resource", "particles", "maps", "data", ".git", "__pycache__"}:
+                    continue
+                stack.append((Path(entry.path), depth + 1))
+
+    for root in scan_roots:
+        if root is None or not root.exists() or not root.is_dir():
+            continue
+        for lua_path in iter_lua_autorun_files(root):
+            try:
+                text = lua_path.read_text(encoding="utf-8", errors="ignore")
+            except Exception:
+                continue
+            display_match = category_re.search(text)
+            display = display_match.group(1).strip() if display_match else ""
+            internals = {
+                match.group(1).strip()
+                for match in model_re.finditer(text)
+                if re.fullmatch(r"[A-Za-z_]+", match.group(1).strip() or "")
+            }
+            for internal in internals:
+                readable = (
+                    configured_categories.get(internal)
+                    or sanitize_category_display_name_text(display)
+                    or display_from_internal_text(internal, internal)
+                )
+                counts[(internal, readable)] = counts.get((internal, readable), 0) + 1
+    for internal, display in configured_categories.items():
+        counts[(internal, display)] = max(1, counts.get((internal, display), 0))
+    best_by_internal: dict[str, dict[str, object]] = {}
+    for (internal, display), count in counts.items():
+        configured_display = configured_categories.get(internal)
+        if configured_display and display != configured_display:
+            continue
+        current = best_by_internal.get(internal)
+        if current is None or count > int(current.get("count", 0)):
+            best_by_internal[internal] = {"internal": internal, "display": display, "count": count}
+    pairs = sorted(
+        best_by_internal.values(),
+        key=lambda item: (str(item.get("display") or "").casefold(), str(item.get("internal") or "").casefold()),
+    )
+    return pairs, loaded_files, scan_roots
 
 
 def parse_utc_datetime(value: object) -> datetime | None:
@@ -548,6 +666,13 @@ def enable_crash_logging() -> Path | None:
         log_dir = root / "MMDCharacterImporter" / "logs"
         log_dir.mkdir(parents=True, exist_ok=True)
         log_path = log_dir / "gui_crash.log"
+        try:
+            if log_path.exists() and log_path.stat().st_size > 5 * 1024 * 1024:
+                rotated = log_dir / "gui_crash.log.1"
+                rotated.unlink(missing_ok=True)
+                log_path.rename(rotated)
+        except Exception:
+            pass
         _CRASH_LOG_HANDLE = log_path.open("a", encoding="utf-8")
         _CRASH_LOG_HANDLE.write("\n--- MMD Character Importer GUI start ---\n")
         _CRASH_LOG_HANDLE.flush()
@@ -567,6 +692,56 @@ def enable_crash_logging() -> Path | None:
         return None
 
 
+class CategoryScanWorker(QtCore.QThread):
+    done = QtCore.Signal(object)
+
+    def run(self) -> None:
+        try:
+            pairs, loaded_files, scan_roots = scan_known_category_pairs()
+        except Exception:
+            pairs, loaded_files, scan_roots = [], [], []
+        self.done.emit(
+            {
+                "pairs": pairs,
+                "sources": [str(path) for path in loaded_files],
+                "roots": scan_roots,
+            }
+        )
+
+
+def locate_installed_blender_exe() -> Path | None:
+    """Find the importer-managed Blender without triggering setup/downloads."""
+    try:
+        root = core.software_blender_root()
+        if not root.exists():
+            return None
+        for version_dir in sorted(root.iterdir(), reverse=True):
+            if not version_dir.is_dir() or version_dir.suffix == ".extracting":
+                continue
+            exe = core.find_blender_exe_in_dir(version_dir)
+            if exe is not None and exe.exists():
+                return exe
+    except Exception:
+        return None
+    return None
+
+
+def open_blend_in_blender(path_text: str, parent: QtWidgets.QWidget | None = None) -> None:
+    path = Path(clean_path_text(path_text))
+    if not path.exists() or path.suffix.lower() != ".blend":
+        QtWidgets.QMessageBox.warning(parent, "Open in Blender", "Select an existing .blend file first.")
+        return
+    exe = locate_installed_blender_exe()
+    try:
+        if exe is not None:
+            subprocess.Popen([str(exe), str(path)])
+        else:
+            # No managed Blender yet; fall back to the system .blend association.
+            os.startfile(str(path))  # noqa: S606
+    except Exception as exc:
+        QtWidgets.QMessageBox.warning(parent, "Open in Blender", f"Could not open the .blend file:\n{exc}")
+
+
 class PathRow(QtWidgets.QWidget):
     changed = QtCore.Signal(str)
 
@@ -578,6 +753,7 @@ class PathRow(QtWidgets.QWidget):
         default: str = "",
         required: bool = False,
         hint: str = "",
+        open_blend: bool = False,
     ) -> None:
         super().__init__()
         self.mode = mode
@@ -597,22 +773,43 @@ class PathRow(QtWidgets.QWidget):
         self.button = QtWidgets.QPushButton("Browse")
         self.button.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_DirOpenIcon))
 
+        self.open_blend_button: QtWidgets.QPushButton | None = None
+        if open_blend:
+            self.open_blend_button = QtWidgets.QPushButton("Open in Blender")
+            self.open_blend_button.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_DesktopIcon))
+            self.open_blend_button.setToolTip("Open this .blend in the importer-managed Blender to inspect or edit it.")
+            self.open_blend_button.setEnabled(False)
+            self.open_blend_button.clicked.connect(lambda: open_blend_in_blender(self.value(), self))
+
         layout = QtWidgets.QGridLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         header = QtWidgets.QHBoxLayout()
         header.addWidget(self.label, 0, QtCore.Qt.AlignmentFlag.AlignVCenter)
         header.addWidget(self.badge, 0, QtCore.Qt.AlignmentFlag.AlignVCenter)
         header.addWidget(self.hint, 1, QtCore.Qt.AlignmentFlag.AlignVCenter)
-        layout.addLayout(header, 0, 0, 1, 3)
+        columns = 4 if self.open_blend_button is not None else 3
+        layout.addLayout(header, 0, 0, 1, columns)
         layout.addWidget(self.edit, 1, 0, 1, 2)
         layout.addWidget(self.button, 1, 2)
+        if self.open_blend_button is not None:
+            layout.addWidget(self.open_blend_button, 1, 3)
         layout.setRowStretch(0, 0)
         layout.setRowStretch(1, 0)
         self.button.clicked.connect(self.browse)
         self.edit.textChanged.connect(self.changed)
+        if self.open_blend_button is not None:
+            self.edit.textChanged.connect(self._update_open_blend_enabled)
+            self._update_open_blend_enabled()
+
+    def _update_open_blend_enabled(self, _text: str = "") -> None:
+        if self.open_blend_button is None:
+            return
+        path = Path(clean_path_text(self.edit.text())) if self.edit.text().strip() else None
+        self.open_blend_button.setEnabled(bool(path and path.suffix.lower() == ".blend" and path.exists()))
 
     def value(self) -> str:
-        return self.edit.text().strip()
+        # Tolerate Windows "Copy as path" quoting in every path field.
+        return clean_path_text(self.edit.text())
 
     def set_value(self, value: str) -> None:
         self.edit.setText(value)
@@ -886,8 +1083,13 @@ class SortBonesManualMergeWorker(QtCore.QThread):
 
     def cancel(self) -> None:
         self.cancel_requested = True
-        if self.process and self.process.poll() is None:
-            self.process.terminate()
+        process = self.process
+        if process is not None:
+            try:
+                if process.poll() is None:
+                    process.terminate()
+            except Exception:
+                pass
 
     def _cancelled(self) -> bool:
         return self.cancel_requested
@@ -906,11 +1108,14 @@ class SortBonesManualMergeWorker(QtCore.QThread):
             self.process = subprocess.Popen([str(setup.blender_exe), str(manual_path)], **core.hidden_subprocess_kwargs())
             while True:
                 return_code = self.process.poll()
+                if self.cancel_requested:
+                    # Check cancellation before the exit code: cancel() already
+                    # terminated Blender, so a non-zero code here is not an error.
+                    if return_code is None:
+                        self.process.terminate()
+                    raise RuntimeError("Manual bone merge was cancelled.")
                 if return_code is not None:
                     break
-                if self.cancel_requested:
-                    self.process.terminate()
-                    raise RuntimeError("Manual bone merge was cancelled.")
                 self.msleep(250)
             if return_code != 0:
                 raise RuntimeError(f"Blender exited with code {return_code} during manual bone merging.")
@@ -1331,6 +1536,62 @@ class BodygroupManualEditWorker(QtCore.QThread):
                         )
             except Exception:
                 pass
+            self.failed.emit(str(exc) + "\n\n" + traceback.format_exc())
+
+
+class CollisionManualEditWorker(QtCore.QThread):
+    """Open the collision-sorted blend in Blender, then validate the user's Physics edits."""
+
+    log = QtCore.Signal(str)
+    done = QtCore.Signal(dict)
+    failed = QtCore.Signal(str)
+
+    def __init__(self, edited_blend: str) -> None:
+        super().__init__()
+        self.edited_blend = edited_blend
+        self.cancel_requested = False
+        self.process: subprocess.Popen | None = None
+
+    def cancel(self) -> None:
+        self.cancel_requested = True
+        process = self.process
+        if process is not None:
+            try:
+                if process.poll() is None:
+                    process.terminate()
+            except Exception:
+                pass
+
+    def _cancelled(self) -> bool:
+        return self.cancel_requested
+
+    def _log(self, message: str) -> None:
+        self.log.emit(message)
+
+    def run(self) -> None:
+        try:
+            blend_path = Path(self.edited_blend).resolve()
+            if not blend_path.exists():
+                raise FileNotFoundError(blend_path)
+            setup = core.ensure_portable_blender(self._log)
+            self._log(f"Opening Blender to edit the collision shape: {blend_path}")
+            self._log("Edit ONLY the Physics object in edit mode, save, then close Blender to continue.")
+            self.process = subprocess.Popen([str(setup.blender_exe), str(blend_path)], **core.hidden_subprocess_kwargs())
+            while True:
+                return_code = self.process.poll()
+                if self.cancel_requested:
+                    if return_code is None:
+                        self.process.terminate()
+                    raise RuntimeError("Manual collision editing was cancelled.")
+                if return_code is not None:
+                    break
+                self.msleep(250)
+            if return_code != 0:
+                raise RuntimeError(f"Blender exited with code {return_code} during manual collision editing.")
+            self._log("Blender closed; validating the edited Physics mesh.")
+            report = core.validate_manual_collision_blend(blend_path, progress=self._log, cancel_check=self._cancelled)
+            self.done.emit(report)
+        except Exception as exc:
             self.failed.emit(str(exc) + "\n\n" + traceback.format_exc())
 
 
@@ -2056,7 +2317,7 @@ class QcAnalyzeWorker(QtCore.QThread):
     done = QtCore.Signal(dict)
     failed = QtCore.Signal(str)
 
-    def __init__(self, input_path: str, author: str, category: str, model_name: str, gmod_root: str, studiomdl: str) -> None:
+    def __init__(self, input_path: str, author: str, category: str, model_name: str, gmod_root: str, studiomdl: str, gender: str = "female") -> None:
         super().__init__()
         self.input_path = input_path
         self.author = author
@@ -2064,6 +2325,7 @@ class QcAnalyzeWorker(QtCore.QThread):
         self.model_name = model_name
         self.gmod_root = gmod_root
         self.studiomdl = studiomdl
+        self.gender = gender
         self.cancel_requested = False
 
     def cancel(self) -> None:
@@ -2086,6 +2348,7 @@ class QcAnalyzeWorker(QtCore.QThread):
                 studiomdl_path=self.studiomdl,
                 progress=self._log,
                 cancel_check=self._cancelled,
+                gender=self.gender,
             )
             self.done.emit(
                 {
@@ -2167,6 +2430,30 @@ FULL_IMPORT_STEP_TITLES = {
 }
 
 
+class MainPmxAnalyzeWorker(QtCore.QThread):
+    """Run the preflight PMX parse + workspace hash off the GUI thread."""
+
+    done = QtCore.Signal(object, object)
+    failed = QtCore.Signal(str)
+
+    def __init__(self, pmx_path: str, source_dir: str, workspace_root: str = "") -> None:
+        super().__init__()
+        self.pmx_path = pmx_path
+        self.source_dir = source_dir
+        self.workspace_root = workspace_root
+
+    def run(self) -> None:
+        try:
+            pmx = Path(self.pmx_path)
+            source = Path(self.source_dir)
+            analysis = core.analyze_pmx(pmx, source)
+            custom_root = Path(self.workspace_root) if self.workspace_root else None
+            workspace = core.build_workspace(pmx, source, analysis, workspace_root=custom_root)
+            self.done.emit(analysis, workspace)
+        except Exception as exc:
+            self.failed.emit(str(exc))
+
+
 class FullImportWorker(QtCore.QThread):
     log = QtCore.Signal(str)
     progress = QtCore.Signal(int, str, str, str)
@@ -2186,6 +2473,8 @@ class FullImportWorker(QtCore.QThread):
         bodygroup_vertex_limit: int = int(getattr(core, "DEFAULT_BODYGROUP_VERTEX_LIMIT", 65535)),
         clear_custom_normals: bool = False,
         workspace_root: str = "",
+        collision_quality: str = "balanced",
+        gender: str = "female",
     ) -> None:
         super().__init__()
         self.pmx_path = Path(pmx_path)
@@ -2199,6 +2488,8 @@ class FullImportWorker(QtCore.QThread):
         self.bodygroup_vertex_limit = int(bodygroup_vertex_limit or getattr(core, "DEFAULT_BODYGROUP_VERTEX_LIMIT", 65535))
         self.clear_custom_normals = bool(clear_custom_normals)
         self.workspace_root = workspace_root
+        self.collision_quality = str(collision_quality or "balanced")
+        self.gender = "male" if str(gender or "").strip().lower() == "male" else "female"
         self.cancel_requested = False
         self.step_results: dict[int, dict[str, object]] = {}
         self.optional_warnings: list[str] = []
@@ -2285,6 +2576,10 @@ class FullImportWorker(QtCore.QThread):
             self._stage(step, title, "Running optional step", "#d29922")
             fn()
         except Exception as exc:
+            # A user cancel surfaces as an exception from the step; do not
+            # swallow it as a warning and continue with later steps.
+            if self.cancel_requested or "cancelled" in str(exc).lower():
+                raise
             warning = f"Optional Step {step} ({title}) failed: {exc}"
             self.optional_warnings.append(warning)
             self._log("[Main Import] WARNING: " + warning)
@@ -2401,7 +2696,7 @@ class FullImportWorker(QtCore.QThread):
             collision_analysis = core.analyze_collision_blend(
                 flex_result.output_blend,
                 source_bodygroups=None,
-                quality_preset="fast_preview",
+                quality_preset=self.collision_quality,
                 progress=self._log,
                 cancel_check=self._cancelled,
             )
@@ -2469,9 +2764,11 @@ class FullImportWorker(QtCore.QThread):
                 studiomdl_path=studiomdl,
                 progress=self._log,
                 cancel_check=self._cancelled,
+                gender=self.gender,
             )
             qc_plan = qc_analysis.plan
             qc_plan["author"] = "sheepylord"
+            qc_plan["gender"] = self.gender
             qc_plan["auto_porting"] = True
             qc_plan["character_category"] = self.character_category
             if self.model_name:
@@ -2512,6 +2809,9 @@ class FullImportWorker(QtCore.QThread):
                 }
             )
         except Exception as exc:
+            if self.cancel_requested:
+                self.failed.emit("Main import was cancelled by the user.")
+                return
             step_text = f"Step {self.current_step}" if self.current_step else "an unknown step"
             title = FULL_IMPORT_STEP_TITLES.get(self.current_step, "")
             self.failed.emit(f"Main import failed during {step_text}{f' ({title})' if title else ''}: {exc}\n\n" + traceback.format_exc())
@@ -2863,6 +3163,35 @@ class ImporterWindow(QtWidgets.QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.settings_store = QtCore.QSettings("MMDCharacterImporter", "PortingTool")
+        self._loading_settings = False
+        self._settings_save_timer = QtCore.QTimer(self)
+        self._settings_save_timer.setSingleShot(True)
+        self._settings_save_timer.setInterval(500)
+        self._settings_save_timer.timeout.connect(self._write_settings_now)
+        self._workflow_status_timer = QtCore.QTimer(self)
+        self._workflow_status_timer.setSingleShot(True)
+        self._workflow_status_timer.setInterval(250)
+        self._workflow_status_timer.timeout.connect(self._refresh_workflow_statuses_now)
+        self._main_source_timer = QtCore.QTimer(self)
+        self._main_source_timer.setSingleShot(True)
+        self._main_source_timer.setInterval(400)
+        self._main_source_timer.timeout.connect(
+            lambda: self.populate_main_pmx_files(prefer_saved=False, reset_model_name=True)
+        )
+        self.main_analyze_worker: MainPmxAnalyzeWorker | None = None
+        self._main_analyze_generation = 0
+        self._step_tab_index_cache: dict[int, int] = {}
+        self._texture_folder_scan_cache: dict[str, list[Path]] = {}
+        self.gender_combos: list[QtWidgets.QComboBox] = []
+        # Ordered membership per additional CoACD collision group; the first
+        # bone in each list is the group's merge target.
+        self._collision_group_members: dict[int, list[str]] = {}
+        # Heavy step previews (multi-MB JSON parses, PMX analyzes) queued until
+        # the user actually opens that step's tab.
+        self._pending_step_previews: dict[int, Callable[[], None]] = {}
+        # True once the user hand-edited jigglebone/physics rows of the current
+        # QC plan; re-analyzing would silently discard those edits.
+        self._qc_plan_user_modified = False
         self.language_code = str(self.settings_store.value("ui_language", "en_us", str) or "en_us")
         self.i18n_fallback = self.load_i18n_catalog("en_us")
         self.i18n_catalog = self.load_i18n_catalog(self.language_code)
@@ -2919,7 +3248,8 @@ class ImporterWindow(QtWidgets.QMainWindow):
         self.model_manager_addons_dir = ""
         self.category_suggestion_sources: list[str] = []
         self.category_scan_roots: list[Path] = []
-        self.known_category_pairs: list[dict[str, object]] = self.scan_known_category_suggestions()
+        self.known_category_pairs: list[dict[str, object]] = self.configured_category_pairs()
+        self.category_scan_worker: CategoryScanWorker | None = None
         self.category_completers: list[QtWidgets.QCompleter] = []
         self.workflow_specs: dict[int, dict[str, object]] = {}
         self.workflow_status_labels: dict[int, QtWidgets.QLabel] = {}
@@ -2979,6 +3309,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
         self.apply_startup_geometry()
         self.tabs = QtWidgets.QTabWidget()
         self.tabs.currentChanged.connect(lambda _index: self.refresh_workflow_statuses() if self.workflow_specs else None)
+        self.tabs.currentChanged.connect(self._run_pending_step_previews)
         self.setCentralWidget(self.tabs)
         self._build_main_tab()
         self._build_model_manager_tab()
@@ -3001,13 +3332,21 @@ class ImporterWindow(QtWidgets.QMainWindow):
         self._install_workflow_guidance()
         self._wrap_tabs_for_small_screens()
         self._apply_style()
+        # These controls were missing persistence hooks (verified in review).
+        if hasattr(self, "collision_quality_combo"):
+            self.collision_quality_combo.currentIndexChanged.connect(lambda _index: self.save_settings())
+        if hasattr(self, "material_always_merge_check"):
+            self.material_always_merge_check.toggled.connect(lambda _value: self.save_settings())
+        if hasattr(self, "flex_isolate_bodygroup_check"):
+            self.flex_isolate_bodygroup_check.toggled.connect(lambda _value: self.save_settings())
         self._load_settings()
         self.apply_i18n()
         self.set_advanced_steps_visible(False)
-        QtCore.QTimer.singleShot(0, self.populate_pmx_files)
+        QtCore.QTimer.singleShot(0, lambda: self._defer_step_preview(1, self.populate_pmx_files))
         QtCore.QTimer.singleShot(0, self.populate_main_pmx_files)
         QtCore.QTimer.singleShot(0, self.refresh_workflow_statuses)
         QtCore.QTimer.singleShot(0, self.refresh_workspace_cache_size)
+        QtCore.QTimer.singleShot(200, self.start_category_scan)
         QtCore.QTimer.singleShot(1500, self.start_update_check)
         self.statusBar().showMessage(self._t("app.status.ready", "Ready"))
 
@@ -3019,83 +3358,199 @@ class ImporterWindow(QtWidgets.QMainWindow):
             self.setMinimumSize(900, 580)
             return
         available = screen.availableGeometry()
-        target_width = min(1180, max(900, available.width() - 60))
-        target_height = min(720, max(580, available.height() - 90))
-        self.resize(target_width, target_height)
+        # Do not floor beyond what the screen can show (short screens/projectors).
+        target_width = max(640, min(1180, available.width() - 60))
+        target_height = max(420, min(720, available.height() - 90))
         self.setMinimumSize(min(900, target_width), min(580, target_height))
+        saved_geometry = self.settings_store.value("window_geometry")
+        if isinstance(saved_geometry, (QtCore.QByteArray, bytes, bytearray)) and self.restoreGeometry(
+            QtCore.QByteArray(saved_geometry)
+        ):
+            frame = self.frameGeometry()
+            for candidate in QtWidgets.QApplication.screens():
+                if candidate.availableGeometry().intersects(frame):
+                    return
+            # Stored geometry is fully off-screen (monitor removed); fall through.
+        self.resize(target_width, target_height)
         self.move(
             available.x() + max(0, (available.width() - target_width) // 2),
             available.y() + max(0, (available.height() - target_height) // 2),
         )
 
-    def scan_known_category_suggestions(self) -> list[dict[str, object]]:
+    def closeEvent(self, event: QtGui.QCloseEvent) -> None:
+        worker = self.worker
+        if worker is not None and worker.isRunning():
+            choice = QtWidgets.QMessageBox.question(
+                self,
+                self._t("app.close.busy_title", "Step still running"),
+                self._t(
+                    "app.close.busy_text",
+                    "A step is still running. Cancel it and exit? Blender or compile processes will be stopped.",
+                ),
+                QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+                QtWidgets.QMessageBox.StandardButton.No,
+            )
+            if choice != QtWidgets.QMessageBox.StandardButton.Yes:
+                event.ignore()
+                return
+            if hasattr(worker, "cancel"):
+                try:
+                    worker.cancel()
+                except Exception:
+                    pass
+            worker.wait(10000)
+        for attr in (
+            "update_check_worker",
+            "workspace_size_worker",
+            "workspace_cleanup_worker",
+            "managed_blender_delete_worker",
+            "model_manager_scan_worker",
+            "model_manager_remove_worker",
+            "category_scan_worker",
+            "main_analyze_worker",
+        ):
+            aux = getattr(self, attr, None)
+            if isinstance(aux, QtCore.QThread) and aux.isRunning():
+                if hasattr(aux, "cancel"):
+                    try:
+                        aux.cancel()
+                    except Exception:
+                        pass
+                aux.requestInterruption()
+                aux.wait(3000)
+        try:
+            self.settings_store.setValue("window_geometry", self.saveGeometry())
+            self.flush_settings()
+            self.settings_store.sync()
+        except Exception:
+            pass
+        super().closeEvent(event)
+
+    def _defer_step_preview(self, step: int, callback: Callable[[], None]) -> None:
+        """Run heavy preview loading now if the step's tab is visible, else when it opens.
+
+        Restoring settings fires the input-changed handlers for every step,
+        and several of them parse multi-MB analysis/preview JSON or a whole
+        PMX; doing that for all steps at startup froze the window for ~9s.
+        """
+        if self.step_to_tab_index(step) == self.tabs.currentIndex():
+            callback()
+            return
+        self._pending_step_previews[step] = callback
+
+    def _run_pending_step_previews(self, index: int) -> None:
+        for step in list(self._pending_step_previews):
+            if self.step_to_tab_index(step) == index:
+                callback = self._pending_step_previews.pop(step)
+                try:
+                    callback()
+                except Exception:
+                    pass
+
+    def _output_folder_row(self, edit: QtWidgets.QLineEdit) -> QtWidgets.QWidget:
+        """Wrap an output-folder field with an Open button for the intermediate folder."""
+        box = QtWidgets.QWidget()
+        layout = QtWidgets.QHBoxLayout(box)
+        layout.setContentsMargins(0, 0, 0, 0)
+        layout.setSpacing(6)
+        button = QtWidgets.QPushButton("Open")
+        button.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_DirOpenIcon))
+        button.setToolTip("Open this step's intermediate output folder in Explorer.")
+        button.clicked.connect(lambda _checked=False, target=edit: self.open_intermediate_folder(target.text()))
+        layout.addWidget(edit, 1)
+        layout.addWidget(button, 0)
+        return box
+
+    def open_intermediate_folder(self, raw: object) -> None:
+        text = clean_path_text(raw)
+        if not text:
+            self.statusBar().showMessage("No output folder is set for this step yet.", 5000)
+            return
+        path = Path(text)
+        if not path.is_dir():
+            self.statusBar().showMessage(f"The output folder does not exist yet: {path}", 5000)
+            return
+        try:
+            os.startfile(str(path))  # noqa: S606
+        except Exception as exc:
+            self.show_error("Open folder", str(exc))
+
+    def _make_gender_combo(self) -> QtWidgets.QComboBox:
+        combo = QtWidgets.QComboBox()
+        combo.addItem("Female (default)", "female")
+        combo.addItem("Male", "male")
+        combo.setToolTip(
+            "Animation set the compiled playermodel/NPC uses in Garry's Mod: "
+            "female (f_anm, female_shared, alyx) or male (m_anm, male_shared)."
+        )
+        combo.currentIndexChanged.connect(lambda _index, source=combo: self.on_gender_combo_changed(source))
+        self.gender_combos.append(combo)
+        return combo
+
+    def current_character_gender(self) -> str:
+        for combo in getattr(self, "gender_combos", []):
+            return "male" if str(combo.currentData() or "") == "male" else "female"
+        return "female"
+
+    def set_character_gender(self, gender: str) -> None:
+        gender = "male" if str(gender or "").strip().lower() == "male" else "female"
+        for combo in getattr(self, "gender_combos", []):
+            blocker = QtCore.QSignalBlocker(combo)
+            try:
+                index = combo.findData(gender)
+                if index >= 0:
+                    combo.setCurrentIndex(index)
+            finally:
+                del blocker
+
+    def on_gender_combo_changed(self, source: QtWidgets.QComboBox) -> None:
+        self.set_character_gender(str(source.currentData() or "female"))
+        self.save_settings()
+
+    def configured_category_pairs(self) -> list[dict[str, object]]:
+        """Fast, config-only category pairs so completers exist at startup; the disk scan runs async."""
         configured_categories, scan_roots, loaded_files = load_category_suggestion_config()
         self.category_suggestion_sources = [str(path) for path in loaded_files]
         self.category_scan_roots = scan_roots
-        counts: dict[tuple[str, str], int] = {}
-        model_re = re.compile(r'models[/\\]+sheepylord[/\\]+([^/"\\]+)[/\\]', re.IGNORECASE)
-        category_re = re.compile(r'local\s+Category\s*=\s*"([^"]+)"', re.IGNORECASE)
-
-        def iter_lua_autorun_files(root: Path, max_depth: int = 6, max_seconds: float = 4.0):
-            started = time.monotonic()
-            stack: list[tuple[Path, int]] = [(root, 0)]
-            while stack and time.monotonic() - started <= max_seconds:
-                folder, depth = stack.pop()
-                try:
-                    entries = list(os.scandir(folder))
-                except Exception:
-                    continue
-                if folder.name.lower() == "autorun" and folder.parent.name.lower() == "lua":
-                    for entry in entries:
-                        if entry.is_file() and entry.name.lower().endswith(".lua"):
-                            yield Path(entry.path)
-                    continue
-                if depth >= max_depth:
-                    continue
-                for entry in reversed(entries):
-                    if not entry.is_dir(follow_symlinks=False):
-                        continue
-                    name = entry.name.lower()
-                    if name in {"materials", "models", "sound", "resource", "particles", "maps", "data", ".git", "__pycache__"}:
-                        continue
-                    stack.append((Path(entry.path), depth + 1))
-
-        for root in scan_roots:
-            if root is None or not root.exists() or not root.is_dir():
-                continue
-            for lua_path in iter_lua_autorun_files(root):
-                try:
-                    text = lua_path.read_text(encoding="utf-8", errors="ignore")
-                except Exception:
-                    continue
-                display_match = category_re.search(text)
-                display = display_match.group(1).strip() if display_match else ""
-                internals = {
-                    match.group(1).strip()
-                    for match in model_re.finditer(text)
-                    if re.fullmatch(r"[A-Za-z_]+", match.group(1).strip() or "")
-                }
-                for internal in internals:
-                    readable = (
-                        configured_categories.get(internal)
-                        or sanitize_category_display_name_text(display)
-                        or self.qc_display_from_internal(internal, internal)
-                    )
-                    counts[(internal, readable)] = counts.get((internal, readable), 0) + 1
-        for internal, display in configured_categories.items():
-            counts[(internal, display)] = max(1, counts.get((internal, display), 0))
-        best_by_internal: dict[str, dict[str, object]] = {}
-        for (internal, display), count in counts.items():
-            configured_display = configured_categories.get(internal)
-            if configured_display and display != configured_display:
-                continue
-            current = best_by_internal.get(internal)
-            if current is None or count > int(current.get("count", 0)):
-                best_by_internal[internal] = {"internal": internal, "display": display, "count": count}
         return sorted(
-            best_by_internal.values(),
+            ({"internal": internal, "display": display, "count": 1} for internal, display in configured_categories.items()),
             key=lambda item: (str(item.get("display") or "").casefold(), str(item.get("internal") or "").casefold()),
         )
+
+    def start_category_scan(self) -> None:
+        if not self.category_scan_roots:
+            return
+        if self.category_scan_worker and self.category_scan_worker.isRunning():
+            return
+        worker = CategoryScanWorker(self)
+        worker.done.connect(self.category_scan_done)
+        worker.finished.connect(worker.deleteLater)
+        self.category_scan_worker = worker
+        worker.start()
+
+    def category_scan_done(self, payload: object) -> None:
+        self.category_scan_worker = None
+        if not isinstance(payload, dict):
+            return
+        pairs = payload.get("pairs")
+        if not isinstance(pairs, list) or not pairs:
+            return
+        self.known_category_pairs = pairs
+        sources = payload.get("sources")
+        if isinstance(sources, list):
+            self.category_suggestion_sources = [str(item) for item in sources]
+        roots = payload.get("roots")
+        if isinstance(roots, list):
+            self.category_scan_roots = [Path(str(item)) for item in roots]
+        self.refresh_category_completer_models()
+
+    def refresh_category_completer_models(self) -> None:
+        internal_items = [self.category_completion_text(item, display_first=False) for item in self.known_category_pairs]
+        display_items = [self.category_completion_text(item, display_first=True) for item in self.known_category_pairs]
+        for index, completer in enumerate(self.category_completers):
+            model = completer.model()
+            if isinstance(model, QtCore.QStringListModel):
+                model.setStringList(display_items if index % 2 else internal_items)
 
     def known_category_display_for_internal(self, internal: str) -> str:
         key = str(internal or "").casefold()
@@ -3221,7 +3676,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
         self.category_completers.extend([internal_completer, display_completer])
 
     def install_internal_identifier_filter(self, edit: QtWidgets.QLineEdit) -> None:
-        validator = QtGui.QRegularExpressionValidator(QtCore.QRegularExpression(r"[A-Za-z_]*"), edit)
+        validator = QtGui.QRegularExpressionValidator(QtCore.QRegularExpression(r"[A-Za-z0-9_]*"), edit)
         edit.setValidator(validator)
 
         def clean(value: str) -> None:
@@ -3740,11 +4195,19 @@ class ImporterWindow(QtWidgets.QMainWindow):
         QtCore.QTimer.singleShot(0, self.refresh_workflow_statuses)
 
     def step_to_tab_index(self, step: int) -> int:
-        prefix = f"{int(step)} "
+        # Tab indexes are stable (tabs are hidden, never removed), so cache the
+        # mapping while the untranslated "N Title" prefixes are present; some
+        # locales do not keep the numeric prefix after translation.
+        step = int(step)
+        cached = self._step_tab_index_cache.get(step, -1)
+        if 0 <= cached < self.tabs.count():
+            return cached
+        prefix = f"{step} "
         for index in range(self.tabs.count()):
             if self.tabs.tabText(index).startswith(prefix):
+                self._step_tab_index_cache[step] = index
                 return index
-        return int(step)
+        return -1
 
     def tab_index_for_content_widget(self, widget: QtWidgets.QWidget | None) -> int:
         if widget is None:
@@ -3796,6 +4259,9 @@ class ImporterWindow(QtWidgets.QMainWindow):
                 del blocker
         if visible:
             self.statusBar().showMessage(self._t("app.status.advanced_visible", "Advanced porting steps are visible."))
+            # The advanced tabs chain from the user's Step 1 settings, not from
+            # the main one-click interface.
+            self.refresh_step_inputs_from_step1_workspace()
         else:
             self.statusBar().showMessage(
                 self._t("app.status.main_only", "Main import interface only. Use Show advanced porting steps for manual correction.")
@@ -4190,6 +4656,11 @@ class ImporterWindow(QtWidgets.QMainWindow):
         return "ready"
 
     def refresh_workflow_statuses(self) -> None:
+        # Debounced: this walks markers/globs for all 15 steps (hundreds of
+        # filesystem probes) and is retriggered per keystroke in path fields.
+        self._workflow_status_timer.start()
+
+    def _refresh_workflow_statuses_now(self) -> None:
         state_text = {
             "locked": (self.translate_static_text("Locked"), "#8f98a3"),
             "ready": (self.translate_static_text("Ready"), "#58a6ff"),
@@ -4251,11 +4722,28 @@ class ImporterWindow(QtWidgets.QMainWindow):
         missing_spec = self.workflow_specs.get(missing, {})
         dialog = QtWidgets.QMessageBox(self)
         dialog.setIcon(QtWidgets.QMessageBox.Icon.Warning)
-        dialog.setWindowTitle("Upstream step incomplete")
-        dialog.setText(f"Step {step} cannot run until Step {missing} is complete.")
-        dialog.setInformativeText(f"Complete Step {missing}: {missing_spec.get('title', '')}, then return here.")
-        jump = dialog.addButton(f"Jump to Step {missing}", QtWidgets.QMessageBox.ButtonRole.AcceptRole)
-        dialog.addButton("Cancel", QtWidgets.QMessageBox.ButtonRole.RejectRole)
+        dialog.setWindowTitle(self._t("workflow.upstream_incomplete_title", "Upstream step incomplete"))
+        dialog.setText(
+            self._t(
+                "workflow.upstream_incomplete_text",
+                "Step {step} cannot run until Step {missing} is complete.",
+                step=step,
+                missing=missing,
+            )
+        )
+        dialog.setInformativeText(
+            self._t(
+                "workflow.upstream_incomplete_detail",
+                "Complete Step {missing}: {title}, then return here.",
+                missing=missing,
+                title=missing_spec.get("title", ""),
+            )
+        )
+        jump = dialog.addButton(
+            self._t("workflow.jump_to_step", "Jump to Step {missing}", missing=missing),
+            QtWidgets.QMessageBox.ButtonRole.AcceptRole,
+        )
+        dialog.addButton(self._t("app.cancel", "Cancel"), QtWidgets.QMessageBox.ButtonRole.RejectRole)
         dialog.exec()
         if dialog.clickedButton() == jump:
             self.switch_to_step(missing)
@@ -4574,12 +5062,14 @@ class ImporterWindow(QtWidgets.QMainWindow):
         )
         self.main_clear_custom_normals_hint.setObjectName("fieldHint")
         self.main_clear_custom_normals_hint.setWordWrap(True)
+        self.main_gender_combo = self._make_gender_combo()
         self.main_form_labels = {
             "workspace": QtWidgets.QLabel("Workspace"),
             "category_internal": QtWidgets.QLabel("Category internal name"),
             "category_display": QtWidgets.QLabel("Category display name"),
             "character_internal": QtWidgets.QLabel("Character internal name"),
             "character_display": QtWidgets.QLabel("Character display name"),
+            "gender": QtWidgets.QLabel("Animation gender"),
             "rtx_vertex_limit": QtWidgets.QLabel("RTX vertex limit"),
             "clear_custom_normals": QtWidgets.QLabel("Model custom normals"),
         }
@@ -4592,6 +5082,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
         form.addRow(self.main_form_labels["category_display"], self.main_category_display_edit)
         form.addRow(self.main_form_labels["character_internal"], self.main_model_name_edit)
         form.addRow(self.main_form_labels["character_display"], self.main_model_display_edit)
+        form.addRow(self.main_form_labels["gender"], self.main_gender_combo)
         form.addRow(self.main_form_labels["rtx_vertex_limit"], self.main_rtx_bodygroup_limit_check)
         main_clear_custom_normals_box = QtWidgets.QWidget()
         main_clear_custom_normals_layout = QtWidgets.QVBoxLayout(main_clear_custom_normals_box)
@@ -4910,6 +5401,8 @@ class ImporterWindow(QtWidgets.QMainWindow):
         workspace_row.addWidget(self.workspace_browse_button, 0)
         workspace_layout = QtWidgets.QFormLayout()
         workspace_layout.addRow("Workspace", workspace_row)
+        self.import_gender_combo = self._make_gender_combo()
+        workspace_layout.addRow("Animation gender", self.import_gender_combo)
         layout.addLayout(workspace_layout)
 
         self.preflight_group = QtWidgets.QGroupBox("Preflight")
@@ -5069,13 +5562,14 @@ class ImporterWindow(QtWidgets.QMainWindow):
             "Blender files (*.blend);;All files (*.*)",
             required=True,
             hint="Use the .blend produced by step 1",
+            open_blend=True,
         )
         layout.addWidget(self.fix_input_row)
 
         self.fix_output_edit = QtWidgets.QLineEdit()
         self.fix_output_edit.setReadOnly(True)
         fix_output_layout = QtWidgets.QFormLayout()
-        fix_output_layout.addRow("Output folder", self.fix_output_edit)
+        fix_output_layout.addRow("Output folder", self._output_folder_row(self.fix_output_edit))
         layout.addLayout(fix_output_layout)
 
         self.fix_summary_group = QtWidgets.QGroupBox("Fix Operations")
@@ -5195,13 +5689,14 @@ class ImporterWindow(QtWidgets.QMainWindow):
             "Blender files (*.blend);;All files (*.*)",
             required=True,
             hint="Use the .blend produced by step 2",
+            open_blend=True,
         )
         layout.addWidget(self.spine_input_row)
 
         self.spine_output_edit = QtWidgets.QLineEdit()
         self.spine_output_edit.setReadOnly(True)
         spine_output_layout = QtWidgets.QFormLayout()
-        spine_output_layout.addRow("Output folder", self.spine_output_edit)
+        spine_output_layout.addRow("Output folder", self._output_folder_row(self.spine_output_edit))
         layout.addLayout(spine_output_layout)
 
         self.spine_summary_group = QtWidgets.QGroupBox("Spine Plan")
@@ -5373,6 +5868,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
             "Blender files (*.blend);;All files (*.*)",
             required=True,
             hint="Use the .blend produced by step 3",
+            open_blend=True,
         )
         layout.addWidget(self.sort_input_row)
 
@@ -5383,7 +5879,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
         self.sort_limit_spin.setRange(1, 254)
         self.sort_limit_spin.setValue(254)
         self.sort_limit_spin.setToolTip("Source/GMod hard bone limit. Leave at 254 unless you need a lower target.")
-        sort_settings.addRow("Output folder", self.sort_output_edit)
+        sort_settings.addRow("Output folder", self._output_folder_row(self.sort_output_edit))
         sort_settings.addRow("Bone limit", self.sort_limit_spin)
         layout.addLayout(sort_settings)
 
@@ -5598,6 +6094,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
             "Blender files (*.blend);;All files (*.*)",
             required=True,
             hint="Use the .blend produced by step 4",
+            open_blend=True,
         )
         layout.addWidget(self.material_input_row)
 
@@ -5609,7 +6106,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
         self.material_limit_spin.setValue(32)
         self.material_limit_spin.setToolTip("Source/GMod material target for the final model.")
         self.material_always_merge_check = QtWidgets.QCheckBox("Always open material merging after initial combine")
-        settings.addRow("Output folder", self.material_output_edit)
+        settings.addRow("Output folder", self._output_folder_row(self.material_output_edit))
         settings.addRow("Material limit", self.material_limit_spin)
         settings.addRow("", self.material_always_merge_check)
         layout.addLayout(settings)
@@ -5941,6 +6438,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
             "Blender files (*.blend);;All files (*.*)",
             required=True,
             hint="Use the material-sorted or material-merged .blend produced by step 5",
+            open_blend=True,
         )
         tab_layout.addWidget(self.bodygroup_input_row)
 
@@ -5979,7 +6477,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
         self.bodygroup_rtx_limit_check.setToolTip(
             "Default GMod builds allow 65,535 vertices per bodygroup. Enable this for RTX Remix builds that require 32,767."
         )
-        settings.addRow("Output folder", self.bodygroup_output_edit)
+        settings.addRow("Output folder", self._output_folder_row(self.bodygroup_output_edit))
         settings.addRow("Scale factor", self.bodygroup_scale_spin)
         settings.addRow("Scale preset", preset_layout)
         settings.addRow("Auto split", self.bodygroup_always_auto_split_check)
@@ -6177,6 +6675,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
             "Blender files (*.blend);;All files (*.*)",
             required=True,
             hint="Use the bodygroup-sorted .blend produced by step 6",
+            open_blend=True,
         )
         tab_layout.addWidget(self.flex_input_row)
 
@@ -6185,7 +6684,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
         self.flex_output_edit.setReadOnly(True)
         self.flex_isolate_bodygroup_check = QtWidgets.QCheckBox("Preview selected bodygroup only")
         self.flex_isolate_bodygroup_check.setToolTip("Off: preview the whole model. On: hide other bodygroups while previewing a flex.")
-        settings.addRow("Output folder", self.flex_output_edit)
+        settings.addRow("Output folder", self._output_folder_row(self.flex_output_edit))
         settings.addRow("Preview", self.flex_isolate_bodygroup_check)
         tab_layout.addLayout(settings)
 
@@ -6376,6 +6875,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
             "Blender files (*.blend);;All files (*.*)",
             required=True,
             hint="Use the flex-sorted .blend produced by step 7",
+            open_blend=True,
         )
         tab_layout.addWidget(self.collision_input_row)
 
@@ -6387,7 +6887,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
         self.collision_quality_combo.addItem("Balanced", "balanced")
         self.collision_quality_combo.addItem("High Quality", "high_quality")
         self.collision_quality_combo.setToolTip("Fast Preview is much quicker for table/overlay review. Balanced and High Quality spend more time in CoACD.")
-        settings.addRow("Output folder", self.collision_output_edit)
+        settings.addRow("Output folder", self._output_folder_row(self.collision_output_edit))
         settings.addRow("CoACD quality", self.collision_quality_combo)
         tab_layout.addLayout(settings)
 
@@ -6407,6 +6907,13 @@ class ImporterWindow(QtWidgets.QMainWindow):
         self.collision_validate_button = QtWidgets.QPushButton("Validate")
         self.collision_validate_button.setEnabled(False)
         self.collision_validate_button.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_DialogApplyButton))
+        self.collision_manual_edit_button = QtWidgets.QPushButton("Open Blender to Edit Collision Shape")
+        self.collision_manual_edit_button.setEnabled(False)
+        self.collision_manual_edit_button.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_DesktopIcon))
+        self.collision_manual_edit_button.setToolTip(
+            "Optional substep after Apply Collision: reshape the Physics mesh in Blender so the hulls match the "
+            "character, then the importer validates the edits and regenerates Physics.smd."
+        )
         self.collision_cancel_button = QtWidgets.QPushButton("Cancel")
         self.collision_cancel_button.setEnabled(False)
         self.collision_cancel_button.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_DialogCancelButton))
@@ -6419,6 +6926,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
             self.collision_sources_button,
             self.collision_analyze_button,
             self.collision_apply_button,
+            self.collision_manual_edit_button,
             self.collision_validate_button,
             self.collision_cancel_button,
             self.open_collision_folder_button,
@@ -6432,22 +6940,26 @@ class ImporterWindow(QtWidgets.QMainWindow):
         self.collision_summary_label.setWordWrap(True)
         tab_layout.addWidget(self.collision_summary_label)
 
-        self.collision_bone_group = QtWidgets.QGroupBox("CoACD Bones")
+        self.collision_bone_group = QtWidgets.QGroupBox("CoACD Bones - Additional Collision Groups")
         bone_layout = QtWidgets.QVBoxLayout(self.collision_bone_group)
         self.collision_bone_hint_label = QtWidgets.QLabel(
-            "Optional. Assign group numbers 1-14 to additional direct parent-child bone chains, then choose a rotation type for each group."
+            "Optional. Pick a Group number (1-14) on a bone to start a collision group: the first bone you add becomes "
+            "the group's Target bone, and every other bone in the group is merged into it. A bone can join a group only "
+            "if it is the Target's parent, a direct child of a bone already in the group, or shares the Target's parent. "
+            "Each group needs one rotation type. Group bones are tinted with the group's color in the preview."
         )
         self.collision_bone_hint_label.setObjectName("fieldHint")
         self.collision_bone_hint_label.setWordWrap(True)
         bone_layout.addWidget(self.collision_bone_hint_label)
         self.collision_bone_table = QtWidgets.QTableWidget(0, 7)
         self.collision_bone_table.setHorizontalHeaderLabels(
-            ["Group", "Rotation Type", "Bone", "Parent", "Children", "Default Target", "Warnings"]
+            ["Group", "Role", "Rotation Type", "Bone", "Parent", "Children", "Warnings"]
         )
         self.collision_bone_table.horizontalHeader().setStretchLastSection(True)
         self.collision_bone_table.horizontalHeader().setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
         self.collision_bone_table.horizontalHeader().setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
-        self.collision_bone_table.horizontalHeader().setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        self.collision_bone_table.horizontalHeader().setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        self.collision_bone_table.horizontalHeader().setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeMode.Stretch)
         self.collision_bone_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
         self.collision_bone_table.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
         self.collision_bone_table.setMouseTracking(True)
@@ -6456,7 +6968,8 @@ class ImporterWindow(QtWidgets.QMainWindow):
         self.collision_bone_table.verticalHeader().setDefaultSectionSize(34)
         self.collision_bone_table.verticalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Fixed)
         self.collision_bone_table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
-        bone_layout.addWidget(self.collision_bone_table)
+        self.collision_bone_table.setMinimumHeight(380)
+        bone_layout.addWidget(self.collision_bone_table, 1)
         self.collision_bone_group.setVisible(False)
         tab_layout.addWidget(self.collision_bone_group)
 
@@ -6620,6 +7133,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
         self.collision_sources_button.clicked.connect(self.start_collision_source_scan)
         self.collision_analyze_button.clicked.connect(self.start_collision_analyze)
         self.collision_apply_button.clicked.connect(self.start_collision_apply)
+        self.collision_manual_edit_button.clicked.connect(self.start_collision_manual_edit)
         self.collision_validate_button.clicked.connect(self.show_collision_validation)
         self.collision_cancel_button.clicked.connect(self.cancel_collision)
         self.open_collision_folder_button.clicked.connect(self.open_collision_folder)
@@ -6642,6 +7156,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
             "file",
             "Blender files (*.blend)",
             hint="Use the collision-sorted blend produced by Step 8.",
+            open_blend=True,
         )
         tab_layout.addWidget(self.proportion_input_row)
 
@@ -6653,7 +7168,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
         self.proportion_remove_zero_weight_check.setToolTip(
             "Before raw Source export, delete non-essential bones that have no weights on exported bodygroups and reparent their children."
         )
-        settings.addRow("Output folder", self.proportion_output_edit)
+        settings.addRow("Output folder", self._output_folder_row(self.proportion_output_edit))
         settings.addRow("Export cleanup", self.proportion_remove_zero_weight_check)
         self.detect_collision_blend_button = QtWidgets.QPushButton("Detect Step 8 Output")
         self.detect_collision_blend_button.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_FileDialogContentsView))
@@ -6792,7 +7307,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
         settings = QtWidgets.QFormLayout()
         self.carms_output_edit = QtWidgets.QLineEdit()
         self.carms_output_edit.setReadOnly(True)
-        settings.addRow("Output folder", self.carms_output_edit)
+        settings.addRow("Output folder", self._output_folder_row(self.carms_output_edit))
         self.carms_weight_spin = QtWidgets.QDoubleSpinBox()
         self.carms_weight_spin.setRange(0.001, 1.0)
         self.carms_weight_spin.setDecimals(3)
@@ -6952,7 +7467,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
         settings = QtWidgets.QFormLayout()
         self.vrd_output_edit = QtWidgets.QLineEdit()
         self.vrd_output_edit.setReadOnly(True)
-        settings.addRow("Output folder", self.vrd_output_edit)
+        settings.addRow("Output folder", self._output_folder_row(self.vrd_output_edit))
         self.detect_vrd_step9_button = QtWidgets.QPushButton("Detect Step 9 Output")
         self.detect_vrd_step9_button.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_FileDialogContentsView))
         settings.addRow("", self.detect_vrd_step9_button)
@@ -7176,7 +7691,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
         settings = QtWidgets.QFormLayout()
         self.texture_output_edit = QtWidgets.QLineEdit()
         self.texture_output_edit.setReadOnly(True)
-        settings.addRow("Output folder", self.texture_output_edit)
+        settings.addRow("Output folder", self._output_folder_row(self.texture_output_edit))
         self.detect_texture_mapping_button = QtWidgets.QPushButton("Detect Material Mapping")
         self.detect_texture_mapping_button.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_FileDialogContentsView))
         settings.addRow("", self.detect_texture_mapping_button)
@@ -7389,7 +7904,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
         self.icon_output_edit.setReadOnly(True)
         settings.addRow("Icon basename", self.icon_basename_edit)
         settings.addRow("Render frame", self.icon_frame_spin)
-        settings.addRow("Output folder", self.icon_output_edit)
+        settings.addRow("Output folder", self._output_folder_row(self.icon_output_edit))
         self.detect_icon_step1_button = QtWidgets.QPushButton("Detect Step 1 Output")
         self.detect_icon_step1_button.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_FileDialogContentsView))
         settings.addRow("", self.detect_icon_step1_button)
@@ -7636,10 +8151,12 @@ class ImporterWindow(QtWidgets.QMainWindow):
         settings.addRow("Character category display name", self.qc_category_display_edit)
         settings.addRow("Model internal name", self.qc_model_name_edit)
         settings.addRow("Model display name", self.qc_model_display_edit)
+        self.qc_gender_combo = self._make_gender_combo()
+        settings.addRow("Animation gender", self.qc_gender_combo)
         settings.addRow("Jiggle direction", self.qc_invert_jiggle_check)
         settings.addRow("GMod addons install", self.qc_copy_to_gmod_addons_check)
         settings.addRow("MCI metadata JSON", self.qc_include_mci_metadata_check)
-        settings.addRow("Output folder", self.qc_output_edit)
+        settings.addRow("Output folder", self._output_folder_row(self.qc_output_edit))
         detect_row = QtWidgets.QHBoxLayout()
         self.detect_qc_outputs_button = QtWidgets.QPushButton("Detect Step Outputs")
         self.detect_qc_outputs_button.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_FileDialogContentsView))
@@ -8020,7 +8537,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
         form.addRow("RTX link", self.release_rtx_link_edit)
         form.addRow("Quote language", self.release_quote_language_edit)
         form.addRow("Quote author", self.release_quote_author_edit)
-        form.addRow("Output folder", self.release_output_edit)
+        form.addRow("Output folder", self._output_folder_row(self.release_output_edit))
         for hidden_field in (
             self.release_image_url_edit,
             self.release_rtx_link_edit,
@@ -8254,6 +8771,16 @@ class ImporterWindow(QtWidgets.QMainWindow):
             self.tabs.setTabEnabled(index, False)
 
     def _load_settings(self) -> None:
+        # Guard: widget change signals are already connected to save_settings,
+        # so restoring values below would re-entrantly rewrite the store with
+        # half-restored defaults and wipe not-yet-loaded keys.
+        self._loading_settings = True
+        try:
+            self._load_settings_body()
+        finally:
+            self._loading_settings = False
+
+    def _load_settings_body(self) -> None:
         saved_language = str(self.settings_store.value("ui_language", self.language_code, str) or self.language_code)
         if saved_language != self.language_code:
             self.language_code = saved_language
@@ -8346,7 +8873,10 @@ class ImporterWindow(QtWidgets.QMainWindow):
         icon_face_vmds = str(self.settings_store.value("icon_face_vmds", "", str) or "")
         if icon_face_vmds and hasattr(self, "icon_face_vmd_row"):
             self.icon_face_vmd_row.set_value(icon_face_vmds)
-        icon_frame = int(self.settings_store.value("icon_frame", 334, int) or 334)
+        try:
+            icon_frame = int(self.settings_store.value("icon_frame", 334, int))
+        except Exception:
+            icon_frame = 334
         if hasattr(self, "icon_frame_spin"):
             self.icon_frame_spin.setValue(icon_frame)
         if hasattr(self, "icon_preview_frame_slider"):
@@ -8471,6 +9001,13 @@ class ImporterWindow(QtWidgets.QMainWindow):
             widget.setChecked(fix_clear_normals)
         if hasattr(self, "flex_isolate_bodygroup_check"):
             self.flex_isolate_bodygroup_check.setChecked(bool(self.settings_store.value("flex_isolate_bodygroup", False, bool)))
+        if hasattr(self, "collision_quality_combo"):
+            saved_quality = str(self.settings_store.value("collision_quality", "", str) or "")
+            quality_index = self.collision_quality_combo.findData(saved_quality) if saved_quality else -1
+            if quality_index >= 0:
+                self.collision_quality_combo.setCurrentIndex(quality_index)
+        if getattr(self, "gender_combos", None):
+            self.set_character_gender(str(self.settings_store.value("character_gender", "female", str) or "female"))
         if hasattr(self, "carms_weight_spin"):
             try:
                 self.carms_weight_spin.setValue(float(self.settings_store.value("carms_weight_threshold", 0.12, float)))
@@ -8478,6 +9015,46 @@ class ImporterWindow(QtWidgets.QMainWindow):
                 self.carms_weight_spin.setValue(0.12)
 
     def save_settings(self) -> None:
+        if self._loading_settings:
+            return
+        # Debounce: this is connected to textChanged of dozens of fields, and a
+        # full write flushes ~70 keys to the registry.
+        self._settings_save_timer.start()
+
+    def flush_settings(self) -> None:
+        self._settings_save_timer.stop()
+        self._write_settings_now()
+
+    def _reject_if_busy(self) -> bool:
+        """All step tabs share self.worker; surface feedback instead of silently ignoring clicks."""
+        worker = self.worker
+        if worker is not None and worker.isRunning():
+            self.statusBar().showMessage(
+                self._t(
+                    "app.status.busy",
+                    "Another step is still running ({name}). Wait for it to finish or cancel it first.",
+                    name=type(worker).__name__,
+                ),
+                5000,
+            )
+            return True
+        # Maintenance deletes the very folders the steps read/write.
+        for attr in ("workspace_cleanup_worker", "managed_blender_delete_worker"):
+            aux = getattr(self, attr, None)
+            if isinstance(aux, QtCore.QThread) and aux.isRunning():
+                self.statusBar().showMessage(
+                    self._t(
+                        "app.status.maintenance_busy",
+                        "A maintenance task is still running. Wait for it to finish first.",
+                    ),
+                    5000,
+                )
+                return True
+        return False
+
+    def _write_settings_now(self) -> None:
+        if self._loading_settings:
+            return
         self.settings_store.setValue("ui_language", self.language_code)
         if hasattr(self, "main_source_row"):
             self.settings_store.setValue("main_source_dir", self.main_source_row.value())
@@ -8533,6 +9110,10 @@ class ImporterWindow(QtWidgets.QMainWindow):
             self.settings_store.setValue("flex_input_blend", self.flex_input_row.value())
         if hasattr(self, "flex_isolate_bodygroup_check"):
             self.settings_store.setValue("flex_isolate_bodygroup", self.flex_isolate_bodygroup_check.isChecked())
+        if hasattr(self, "collision_quality_combo"):
+            self.settings_store.setValue("collision_quality", str(self.collision_quality_combo.currentData() or ""))
+        if getattr(self, "gender_combos", None):
+            self.settings_store.setValue("character_gender", self.current_character_gender())
         if hasattr(self, "collision_input_row"):
             self.settings_store.setValue("collision_input_blend", self.collision_input_row.value())
         if hasattr(self, "proportion_input_row"):
@@ -8599,7 +9180,6 @@ class ImporterWindow(QtWidgets.QMainWindow):
             self.settings_store.setValue("release_quote_language", self.release_quote_language_edit.text().strip())
         if hasattr(self, "release_quote_author_edit"):
             self.settings_store.setValue("release_quote_author", self.release_quote_author_edit.text().strip())
-        self.settings_store.sync()
 
     def append_translated_log(self, widget: QtWidgets.QPlainTextEdit, message: str, progress_callback: Callable[[str], None] | None = None) -> None:
         display = self.translate_runtime_text(str(message))
@@ -8858,7 +9438,9 @@ class ImporterWindow(QtWidgets.QMainWindow):
         self.main_open_output_button.setEnabled(False)
         if self.main_model_preview is not None:
             self.main_model_preview.clear_model()
-        self.populate_main_pmx_files(prefer_saved=False, reset_model_name=True)
+        # Debounced: the folder field fires per keystroke and the PMX scan is
+        # a recursive disk walk.
+        self._main_source_timer.start()
         self.save_settings()
 
     def populate_main_pmx_files(self, prefer_saved: bool = True, reset_model_name: bool = False) -> None:
@@ -8915,7 +9497,8 @@ class ImporterWindow(QtWidgets.QMainWindow):
         if pmx:
             raw_candidates.append(pmx.stem)
         for raw in raw_candidates:
-            candidate = re.sub(r"[^A-Za-z_]+", "_", core.slugify(raw)).strip("_")
+            candidate = re.sub(r"[^A-Za-z0-9_]+", "_", core.slugify(raw)).strip("_")
+            candidate = sanitize_internal_identifier_text(candidate)
             if candidate:
                 return candidate
         return "mmd_model" if pmx or analysis else ""
@@ -8923,7 +9506,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
     def set_main_model_name_from_candidate(self, candidate: str, force: bool = False) -> None:
         if not hasattr(self, "main_model_name_edit"):
             return
-        candidate = re.sub(r"[^A-Za-z_]+", "_", str(candidate or "")).strip("_")
+        candidate = sanitize_internal_identifier_text(re.sub(r"[^A-Za-z0-9_]+", "_", str(candidate or "")).strip("_"))
         if force or not self.main_model_name_edit.text().strip():
             if candidate:
                 self.main_model_name_edit.setText(candidate)
@@ -8938,45 +9521,78 @@ class ImporterWindow(QtWidgets.QMainWindow):
         silent: bool = False,
         reset_model_name: bool = False,
         show_special_warning_dialog: bool = False,
-    ) -> core.PmxAnalysis | None:
+        on_ready: Callable[[core.PmxAnalysis], None] | None = None,
+    ) -> None:
+        """Start the preflight analysis on a worker thread.
+
+        The full PMX parse plus whole-file SHA-1 froze the GUI for seconds on
+        large models; results arrive via _main_analyze_done. ``on_ready`` is
+        invoked with the analysis only if this request is still the latest.
+        """
         pmx = self.current_main_pmx_path()
         source_raw = self.main_source_row.value()
         if not pmx or not source_raw:
             if not silent:
                 self.show_error("Preflight failed", "Select a model folder and PMX file first.")
-            return None
-        try:
-            source = Path(source_raw)
-            analysis = core.analyze_pmx(pmx, source)
-            custom_root = Path(self.main_workspace_edit.text().strip()) if self.main_workspace_edit.text().strip() else None
-            workspace = core.build_workspace(pmx, source, analysis, workspace_root=custom_root)
-            self.current_main_analysis = analysis
-            self.current_main_workspace = workspace
-            self.main_workspace_edit.setText(str(workspace.root))
-            self.render_main_analysis(analysis)
-            self.load_main_preview(silent=True)
-            candidate = self.main_model_name_candidate(pmx, analysis)
-            if reset_model_name:
-                self.set_main_model_name_from_candidate(candidate, force=True)
-            elif not self.main_model_name_edit.text().strip():
-                self.set_main_model_name_from_candidate(candidate, force=False)
-            if not silent:
-                self.append_main_log(f"Analyzed PMX: {pmx}")
-                if show_special_warning_dialog:
-                    self.show_special_preflight_warning_dialog(analysis)
-            self.save_settings()
-            return analysis
-        except Exception as exc:
-            self.current_main_analysis = None
-            self.current_main_workspace = None
-            self.main_workspace_edit.clear()
-            self.main_stats_label.setText("Could not analyze the selected PMX.")
-            self.main_warning_label.setText(f'<span style="color:#f85149;">{html.escape(str(exc))}</span>')
-            if self.main_model_preview is not None:
-                self.main_model_preview.clear_model()
-            if not silent:
-                self.show_error("Preflight failed", str(exc))
-            return None
+            return
+        self._main_analyze_generation += 1
+        generation = self._main_analyze_generation
+        self.main_stats_label.setText(self._t("main.analyzing", "Analyzing the selected PMX..."))
+        worker = MainPmxAnalyzeWorker(str(pmx), source_raw, self.main_workspace_edit.text().strip())
+        worker.done.connect(
+            lambda analysis, workspace, gen=generation: self._main_analyze_done(
+                gen, analysis, workspace, silent, reset_model_name, show_special_warning_dialog, on_ready
+            )
+        )
+        worker.failed.connect(lambda message, gen=generation: self._main_analyze_failed(gen, str(message), silent))
+        worker.finished.connect(worker.deleteLater)
+        self.main_analyze_worker = worker
+        worker.start()
+
+    def _main_analyze_done(
+        self,
+        generation: int,
+        analysis: core.PmxAnalysis,
+        workspace: core.Workspace,
+        silent: bool,
+        reset_model_name: bool,
+        show_special_warning_dialog: bool,
+        on_ready: Callable[[core.PmxAnalysis], None] | None,
+    ) -> None:
+        if generation != self._main_analyze_generation:
+            return
+        self.main_analyze_worker = None
+        self.current_main_analysis = analysis
+        self.current_main_workspace = workspace
+        self.main_workspace_edit.setText(str(workspace.root))
+        self.render_main_analysis(analysis)
+        self.load_main_preview(silent=True)
+        candidate = self.main_model_name_candidate(Path(str(analysis.pmx_path)), analysis)
+        if reset_model_name:
+            self.set_main_model_name_from_candidate(candidate, force=True)
+        elif not self.main_model_name_edit.text().strip():
+            self.set_main_model_name_from_candidate(candidate, force=False)
+        if not silent:
+            self.append_main_log(f"Analyzed PMX: {analysis.pmx_path}")
+            if show_special_warning_dialog:
+                self.show_special_preflight_warning_dialog(analysis)
+        self.save_settings()
+        if on_ready is not None:
+            on_ready(analysis)
+
+    def _main_analyze_failed(self, generation: int, message: str, silent: bool) -> None:
+        if generation != self._main_analyze_generation:
+            return
+        self.main_analyze_worker = None
+        self.current_main_analysis = None
+        self.current_main_workspace = None
+        self.main_workspace_edit.clear()
+        self.main_stats_label.setText("Could not analyze the selected PMX.")
+        self.main_warning_label.setText(f'<span style="color:#f85149;">{html.escape(message)}</span>')
+        if self.main_model_preview is not None:
+            self.main_model_preview.clear_model()
+        if not silent:
+            self.show_error("Preflight failed", message)
 
     def render_main_analysis(self, analysis: core.PmxAnalysis) -> None:
         self.main_stats_label.setText(
@@ -9032,14 +9648,13 @@ class ImporterWindow(QtWidgets.QMainWindow):
         if steam_dir:
             for lib in core._find_steam_library_folders(steam_dir):
                 for name in ("GarrysMod_RTX_c", "GarrysMod"):
-                    candidates.append(lib / "steamapps" / "common" / name / "bin" / "studiomdl.exe")
-        # 3. Fallback hardcoded paths
-        for root in (
-            Path("H:/SteamLibrary/steamapps/common/GarrysMod_RTX_c"),
-            Path("H:/SteamLibrary/steamapps/common/GarrysMod"),
-            Path("C:/Program Files (x86)/Steam/steamapps/common/GarrysMod"),
-        ):
+                    base = lib / "steamapps" / "common" / name
+                    candidates.append(base / "bin" / "studiomdl.exe")
+                    candidates.append(base / "bin" / "win64" / "studiomdl.exe")
+        # 3. Fallback standard install path
+        for root in (Path("C:/Program Files (x86)/Steam/steamapps/common/GarrysMod"),):
             candidates.append(root / "bin" / "studiomdl.exe")
+            candidates.append(root / "bin" / "win64" / "studiomdl.exe")
         seen: set[Path] = set()
         for candidate in candidates:
             candidate = safe_resolve_path(candidate)
@@ -9488,10 +10103,19 @@ class ImporterWindow(QtWidgets.QMainWindow):
         return sanitize_display_name_text(explicit or self.qc_display_from_internal(self.main_effective_model_name(), "Mmd Model"))
 
     def start_full_import(self) -> None:
-        if self.worker and self.worker.isRunning():
+        if self._reject_if_busy():
             return
-        analysis = self.analyze_main_pmx(silent=False)
-        if not analysis:
+        analysis = self.current_main_analysis
+        if analysis is None or self.current_main_workspace is None:
+            # Preflight has not finished (or selection changed); run it on the
+            # worker thread and continue automatically once it is ready.
+            self.statusBar().showMessage(self._t("main.analyzing", "Analyzing the selected PMX..."), 5000)
+            self.analyze_main_pmx(silent=False, on_ready=self._start_full_import_with_analysis)
+            return
+        self._start_full_import_with_analysis(analysis)
+
+    def _start_full_import_with_analysis(self, analysis: core.PmxAnalysis) -> None:
+        if self._reject_if_busy():
             return
         errors = self.validate_main_import_inputs()
         if errors:
@@ -9532,6 +10156,12 @@ class ImporterWindow(QtWidgets.QMainWindow):
             self.bodygroup_vertex_limit(),
             self.main_clear_custom_normals_enabled(),
             workspace_text,
+            collision_quality=(
+                str(self.collision_quality_combo.currentData() or "balanced")
+                if hasattr(self, "collision_quality_combo")
+                else "balanced"
+            ),
+            gender=self.current_character_gender(),
         )
         self.worker.log.connect(self.append_main_log)
         self.worker.progress.connect(self.set_main_progress)
@@ -10359,7 +10989,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
         self.warning_label.clear()
         if self.model_preview is not None:
             self.model_preview.clear_model()
-        self.populate_pmx_files()
+        self._defer_step_preview(1, self.populate_pmx_files)
         self.save_settings()
 
     def populate_pmx_files(self) -> None:
@@ -10428,6 +11058,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
             self.open_workspace_button.setEnabled(workspace.root.exists())
             self.render_analysis(analysis)
             self.load_current_preview(silent=True)
+            self.refresh_step_inputs_from_step1_workspace()
             if not silent:
                 self.append_log(f"Analyzed PMX: {pmx}")
                 if show_special_warning_dialog:
@@ -10499,7 +11130,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
         )
 
     def start_import(self) -> None:
-        if self.worker and self.worker.isRunning():
+        if self._reject_if_busy():
             return
         self.set_step_working(1, "Preparing Step 1 import")
         analysis = self.analyze_current_pmx(silent=False, show_special_warning_dialog=False)
@@ -10545,6 +11176,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
         if result.get("blend"):
             self.fix_input_row.set_value(str(result["blend"]))
             self.update_fix_output_preview(Path(str(result["blend"])))
+            self.refresh_step_inputs_from_step1_workspace()
             self.switch_to_step(2)
         self.set_progress(100, "Import Complete", str(result.get("blend", "")), "#2ea043")
         import_dir = Path(str(result["blend"])).parent if result.get("blend") else Path(str(result.get("workspace", ""))) / "1_import_mmd_model"
@@ -10585,6 +11217,73 @@ class ImporterWindow(QtWidgets.QMainWindow):
             self.fix_output_edit.clear()
             self.open_fix_folder_button.setEnabled(False)
 
+    # Step input rows chain from the manual Step 1 workspace, in pipeline order:
+    # (row attribute, workspace subfolder, canonical output suffix).
+    STEP_INPUT_CHAIN = (
+        ("fix_input_row", "1_import_mmd_model", "_import.blend"),
+        ("spine_input_row", "2_fix_model_source_skeleton", "_fixed.blend"),
+        ("sort_input_row", "3_fix_spine_bones", "_spine_fixed.blend"),
+        ("material_input_row", "4_sort_bones", "_bones_sorted.blend"),
+        ("bodygroup_input_row", "5_sort_materials", "_materials_sorted.blend"),
+        ("flex_input_row", "6_sort_bodygroups", "_bodygroups_sorted.blend"),
+        ("collision_input_row", "7_sort_flexes", "_flexes_sorted.blend"),
+        ("proportion_input_row", "8_sort_collision", "_collision_sorted.blend"),
+    )
+
+    def step1_workspace_root(self) -> Path | None:
+        """The workspace defined by the user's Step 1 tab settings (not the main interface)."""
+        if self.current_workspace is not None:
+            try:
+                return Path(self.current_workspace.root)
+            except Exception:
+                pass
+        text = self.workspace_edit.text().strip() if hasattr(self, "workspace_edit") else ""
+        return Path(text) if text else None
+
+    def refresh_step_inputs_from_step1_workspace(self) -> None:
+        """Point the advanced step tabs at the Step 1 tab's workspace outputs.
+
+        The advanced tabs are only reachable through "show advanced porting
+        steps", so their inputs should follow the user's Step 1 selection
+        rather than whatever the main one-click interface last produced.
+        Values the user already pointed inside this workspace are kept.
+        """
+        root = self.step1_workspace_root()
+        if root is None or not root.exists():
+            return
+        root_key = str(root).casefold()
+        for row_attr, folder_name, suffix in self.STEP_INPUT_CHAIN:
+            row = getattr(self, row_attr, None)
+            if not hasattr(row, "set_value"):
+                continue
+            current = clean_path_text(row.value() if hasattr(row, "value") else "")
+            if current and str(Path(current)).casefold().startswith(root_key) and Path(current).exists():
+                continue
+            folder = root / folder_name
+            candidate: Path | None = None
+            if folder.is_dir():
+                blends = [path for path in folder.glob("*.blend") if path.is_file()]
+                preferred = [path for path in blends if path.name.lower().endswith(suffix)]
+                pool = preferred or blends
+                if pool:
+                    candidate = max(pool, key=lambda path: path.stat().st_mtime)
+            if candidate is not None:
+                row.set_value(str(candidate))
+            elif current:
+                # Stale value from another workspace (e.g. the main interface).
+                row.set_value("")
+        export_dir = root / "9_export_proportion_trick" / "2_proportion_export"
+        if export_dir.is_dir():
+            for row_attr in ("carms_input_row", "vrd_input_row", "qc_input_row"):
+                row = getattr(self, row_attr, None)
+                if not hasattr(row, "set_value"):
+                    continue
+                current = clean_path_text(row.value() if hasattr(row, "value") else "")
+                if current and str(Path(current)).casefold().startswith(root_key) and Path(current).exists():
+                    continue
+                row.set_value(str(export_dir))
+        self.refresh_workflow_statuses()
+
     def detect_step1_output(self) -> None:
         candidates: list[Path] = []
         if self.current_workspace:
@@ -10603,7 +11302,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
         self.show_error("Detect Step 1 Output", "No existing step-1 .blend output was found. Run step 1 or browse to the imported .blend.")
 
     def start_fix(self) -> None:
-        if self.worker and self.worker.isRunning():
+        if self._reject_if_busy():
             return
         if not self.ensure_step_can_run(2):
             return
@@ -10718,7 +11417,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
         self.show_error("Detect Step 2 Output", "No existing step-2 .blend output was found. Run step 2 or browse to the fixed .blend.")
 
     def start_spine_analyze(self) -> None:
-        if self.worker and self.worker.isRunning():
+        if self._reject_if_busy():
             return
         if not self.ensure_step_can_run(3):
             return
@@ -10948,7 +11647,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
         QtWidgets.QMessageBox.information(self, "Spine plan validation", detail)
 
     def start_spine_fix(self) -> None:
-        if self.worker and self.worker.isRunning():
+        if self._reject_if_busy():
             return
         if not self.ensure_step_can_run(3):
             return
@@ -11067,7 +11766,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
         self.show_error("Detect Step 3 Output", "No existing step-3 .blend output was found. Run step 3 or browse to the spine-fixed .blend.")
 
     def start_sort_analyze(self) -> None:
-        if self.worker and self.worker.isRunning():
+        if self._reject_if_busy():
             return
         if not self.ensure_step_can_run(4):
             return
@@ -11151,7 +11850,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
             self.append_sort_log(f"Could not prepare manual bone merge blend: {exc}")
 
     def start_sort_manual_merge(self) -> None:
-        if self.worker and self.worker.isRunning():
+        if self._reject_if_busy():
             return
         if not self.ensure_step_can_run(4):
             return
@@ -11246,10 +11945,10 @@ class ImporterWindow(QtWidgets.QMainWindow):
         return sorted(names, key=str.lower)
 
     def refresh_sort_bone_combos(self) -> None:
+        if not hasattr(self, "sort_protect_combo"):
+            return
         names = self.sort_bone_names()
         for combo in (self.sort_protect_combo, self.sort_source_combo, self.sort_target_combo):
-            if not hasattr(self, "sort_protect_combo"):
-                return
             current = combo.currentText()
             combo.blockSignals(True)
             combo.clear()
@@ -11526,7 +12225,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
         QtWidgets.QMessageBox.information(self, "Sort bones validation", detail)
 
     def start_sort_bones(self) -> None:
-        if self.worker and self.worker.isRunning():
+        if self._reject_if_busy():
             return
         if not self.ensure_step_can_run(4):
             return
@@ -11652,7 +12351,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
         self.show_error("Detect Step 4 Output", "No existing step-4 .blend output was found. Run step 4 or browse to the bone-sorted .blend.")
 
     def start_material_scan(self) -> None:
-        if self.worker and self.worker.isRunning():
+        if self._reject_if_busy():
             return
         if not self.ensure_step_can_run(5):
             return
@@ -12273,7 +12972,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
         QtWidgets.QMessageBox.information(self, "Material validation", detail)
 
     def start_material_apply(self) -> None:
-        if self.worker and self.worker.isRunning():
+        if self._reject_if_busy():
             return
         if not self.ensure_step_can_run(5):
             return
@@ -12296,7 +12995,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
         self.material_apply_button.setEnabled(False)
         self.detect_sort_blend_button.setEnabled(False)
         self.material_cancel_button.setEnabled(True)
-        self.worker = MaterialApplyWorker(str(input_blend), self.current_material_plan, self.material_limit_spin.value())
+        self.worker = MaterialApplyWorker(str(input_blend), deepcopy(self.current_material_plan), self.material_limit_spin.value())
         self.worker.log.connect(self.append_material_log)
         self.worker.done.connect(self.material_apply_done)
         self.worker.failed.connect(self.material_failed)
@@ -12465,7 +13164,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
         QtWidgets.QMessageBox.information(self, "Material merge validation", "The current material merge plan is internally consistent.")
 
     def start_material_merge(self) -> None:
-        if self.worker and self.worker.isRunning():
+        if self._reject_if_busy():
             return
         if not self.ensure_step_can_run(5):
             return
@@ -12649,7 +13348,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
             self.bodygroup_manual_blend_label.clear()
 
     def start_bodygroup_analyze(self) -> None:
-        if self.worker and self.worker.isRunning():
+        if self._reject_if_busy():
             return
         if not self.ensure_step_can_run(6):
             return
@@ -13163,7 +13862,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
         return errors
 
     def start_bodygroup_manual(self) -> None:
-        if self.worker and self.worker.isRunning():
+        if self._reject_if_busy():
             return
         if not self.ensure_step_can_run(6):
             return
@@ -13227,7 +13926,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
         self.bodygroup_report_label.setText(str(result.get("report", "")))
 
     def start_bodygroup_apply(self) -> None:
-        if self.worker and self.worker.isRunning():
+        if self._reject_if_busy():
             return
         if not self.ensure_step_can_run(6):
             return
@@ -13262,7 +13961,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
         self.bodygroup_cancel_button.setEnabled(True)
         self.worker = BodygroupApplyWorker(
             str(input_blend),
-            self.current_bodygroup_plan,
+            deepcopy(self.current_bodygroup_plan),
             self.bodygroup_scale_spin.value(),
             self.bodygroup_scale_preset,
             self.bodygroup_always_auto_split_check.isChecked(),
@@ -13424,7 +14123,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
             self.flex_output_edit.clear()
 
     def start_flex_analyze(self) -> None:
-        if self.worker and self.worker.isRunning():
+        if self._reject_if_busy():
             return
         if not self.ensure_step_can_run(7):
             return
@@ -13889,7 +14588,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
         return errors
 
     def start_flex_apply(self) -> None:
-        if self.worker and self.worker.isRunning():
+        if self._reject_if_busy():
             return
         if not self.ensure_step_can_run(7):
             return
@@ -13917,7 +14616,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
         self.flex_remove_button.setEnabled(False)
         self.detect_bodygroup_blend_button.setEnabled(False)
         self.flex_cancel_button.setEnabled(True)
-        self.worker = FlexApplyWorker(str(input_blend), self.current_flex_plan)
+        self.worker = FlexApplyWorker(str(input_blend), deepcopy(self.current_flex_plan))
         self.worker.log.connect(self.append_flex_log)
         self.worker.done.connect(self.flex_apply_done)
         self.worker.failed.connect(self.flex_failed)
@@ -14103,6 +14802,11 @@ class ImporterWindow(QtWidgets.QMainWindow):
             self.collision_smd_label.setText(str(physics_smd) if physics_smd.exists() else "")
             self.collision_log_label.setText(str(collision_dir / "blender_sort_collision.log"))
             self.open_collision_folder_button.setEnabled(collision_dir.exists())
+            if output_blend.exists():
+                self.collision_sorted_blend_path = str(output_blend)
+                self.collision_manual_edit_button.setEnabled(True)
+            else:
+                self.collision_manual_edit_button.setEnabled(False)
         except Exception:
             self.collision_output_edit.clear()
 
@@ -14119,46 +14823,100 @@ class ImporterWindow(QtWidgets.QMainWindow):
         return [entry for entry in presets if isinstance(entry, dict)] if isinstance(presets, list) else []
 
     def collision_bone_name_for_row(self, row: int) -> str:
-        item = self.collision_bone_table.item(row, 2) if 0 <= row < self.collision_bone_table.rowCount() else None
+        item = self.collision_bone_table.item(row, 3) if 0 <= row < self.collision_bone_table.rowCount() else None
         return str(item.data(QtCore.Qt.ItemDataRole.UserRole) or "") if item else ""
+
+    def collision_bone_row_for_name(self, bone_name: str) -> int:
+        for row in range(self.collision_bone_table.rowCount()):
+            if self.collision_bone_name_for_row(row) == bone_name:
+                return row
+        return -1
+
+    def collision_bone_group_rotation(self, group_id: int) -> str:
+        for bone_name in self._collision_group_members.get(group_id, []):
+            row = self.collision_bone_row_for_name(bone_name)
+            widget = self.collision_bone_table.cellWidget(row, 2) if row >= 0 else None
+            if isinstance(widget, QtWidgets.QComboBox):
+                rotation = str(widget.currentData() or "").upper()
+                if rotation:
+                    return rotation
+        return ""
 
     def selected_collision_bone_groups(self) -> list[dict[str, object]] | None:
         if not self.current_collision_bones:
             return None
-        grouped: dict[int, dict[str, object]] = {}
-        for row in range(self.collision_bone_table.rowCount()):
-            group_widget = self.collision_bone_table.cellWidget(row, 0)
-            if not isinstance(group_widget, QtWidgets.QComboBox):
-                continue
-            try:
-                group_id = int(group_widget.currentData() or 0)
-            except Exception:
-                group_id = 0
-            if group_id <= 0:
-                continue
-            bone_name = self.collision_bone_name_for_row(row)
-            if not bone_name:
-                continue
-            rotation_widget = self.collision_bone_table.cellWidget(row, 1)
-            rotation_type = ""
-            if isinstance(rotation_widget, QtWidgets.QComboBox):
-                rotation_type = str(rotation_widget.currentData() or "").upper()
-            entry = grouped.setdefault(group_id, {"group": group_id, "bones": [], "rotation_type": rotation_type})
-            if rotation_type and not str(entry.get("rotation_type") or ""):
-                entry["rotation_type"] = rotation_type
-            entry.setdefault("_rotation_types", set()).add(rotation_type)
-            entry["bones"].append(bone_name)
         result: list[dict[str, object]] = []
-        for group_id in sorted(grouped):
-            entry = grouped[group_id]
+        for group_id in sorted(self._collision_group_members):
+            members = [str(name) for name in self._collision_group_members.get(group_id, []) if str(name)]
+            if not members:
+                continue
             result.append(
                 {
                     "group": group_id,
-                    "bones": [str(name) for name in entry.get("bones", []) if str(name)],
-                    "rotation_type": str(entry.get("rotation_type") or ""),
+                    # Selection order matters: members[0] is the merge target.
+                    "bones": members,
+                    "target_bone": members[0],
+                    "rotation_type": self.collision_bone_group_rotation(group_id),
                 }
             )
         return result or None
+
+    def collision_group_addition_error(self, group_id: int, bone_name: str, members: list[str] | None = None) -> str:
+        """Enforce the interactive grouping rule for adding ``bone_name``.
+
+        A bone may join a non-empty group only when it is the target's parent,
+        a direct child of any bone already in the group, or shares the target's
+        parent (sibling).
+        """
+        if members is None:
+            members = self._collision_group_members.get(group_id) or []
+        if not members:
+            return ""
+        parent_by_name = {
+            str(entry.get("name") or ""): str(entry.get("parent") or "") for entry in self.collision_bone_entries()
+        }
+        target = members[0]
+        target_parent = parent_by_name.get(target, "")
+        bone_parent = parent_by_name.get(bone_name, "")
+        if bone_name == target_parent:
+            return ""
+        if bone_parent and bone_parent in set(members):
+            return ""
+        if target_parent and bone_parent == target_parent:
+            return ""
+        return (
+            f"{bone_name} cannot join group {group_id}: it must be the parent of the target bone {target}, "
+            f"a direct child of a bone already in the group, or share {target}'s parent."
+        )
+
+    def _revalidate_collision_group_members(self, group_id: int) -> list[str]:
+        """Re-check a group's members in selection order; return the dropped names."""
+        members = self._collision_group_members.get(group_id) or []
+        if not members:
+            return []
+        kept: list[str] = [members[0]]
+        dropped: list[str] = []
+        for bone_name in members[1:]:
+            if self.collision_group_addition_error(group_id, bone_name, kept):
+                dropped.append(bone_name)
+            else:
+                kept.append(bone_name)
+        self._collision_group_members[group_id] = kept
+        return dropped
+
+    def _set_collision_row_group_silent(self, bone_name: str, group_id: int) -> None:
+        row = self.collision_bone_row_for_name(bone_name)
+        if row < 0:
+            return
+        widget = self.collision_bone_table.cellWidget(row, 0)
+        if isinstance(widget, QtWidgets.QComboBox):
+            previous = self._updating_collision_bone_table
+            self._updating_collision_bone_table = True
+            try:
+                index = widget.findData(group_id)
+                widget.setCurrentIndex(index if index >= 0 else 0)
+            finally:
+                self._updating_collision_bone_table = previous
 
     def validate_collision_bone_groups(self) -> list[str]:
         if not self.current_collision_bones:
@@ -14169,31 +14927,6 @@ class ImporterWindow(QtWidgets.QMainWindow):
         errors: list[str] = []
         entries = self.collision_bone_entries()
         by_name = {str(entry.get("name") or ""): entry for entry in entries}
-        parent_by_name = {name: str(entry.get("parent") or "") for name, entry in by_name.items()}
-        children_by_name: dict[str, list[str]] = {name: [] for name in by_name}
-        for name, parent in parent_by_name.items():
-            if parent in children_by_name:
-                children_by_name[parent].append(name)
-        rotations_by_group: dict[int, set[str]] = {}
-        for row in range(self.collision_bone_table.rowCount()):
-            group_widget = self.collision_bone_table.cellWidget(row, 0)
-            rotation_widget = self.collision_bone_table.cellWidget(row, 1)
-            if not isinstance(group_widget, QtWidgets.QComboBox):
-                continue
-            try:
-                group_id = int(group_widget.currentData() or 0)
-            except Exception:
-                group_id = 0
-            if group_id <= 0:
-                continue
-            rotation_type = ""
-            if isinstance(rotation_widget, QtWidgets.QComboBox):
-                rotation_type = str(rotation_widget.currentData() or "").upper()
-            rotations_by_group.setdefault(group_id, set()).add(rotation_type)
-        for group_id, rotations in rotations_by_group.items():
-            nonblank = {rotation for rotation in rotations if rotation}
-            if len(nonblank) > 1:
-                errors.append(f"CoACD bone group {group_id} has conflicting rotation types.")
         if len(groups) > 14:
             errors.append("At most 14 additional CoACD bone groups are allowed.")
         if len(groups) + 18 > 32:
@@ -14205,7 +14938,6 @@ class ImporterWindow(QtWidgets.QMainWindow):
             rotation_type = str(group.get("rotation_type") or "")
             if not rotation_type:
                 errors.append(f"CoACD bone group {group_id} needs a rotation type.")
-            selected = set(bones)
             for bone_name in bones:
                 entry = by_name.get(bone_name)
                 if entry is None:
@@ -14216,28 +14948,24 @@ class ImporterWindow(QtWidgets.QMainWindow):
                 if bone_name in used:
                     errors.append(f"CoACD bone {bone_name} is assigned to more than one group.")
                 used.add(bone_name)
-            roots = [name for name in bones if parent_by_name.get(name, "") not in selected]
-            if len(roots) != 1:
-                errors.append(f"CoACD bone group {group_id} must form one direct parent-child chain.")
+            if not bones:
+                errors.append(f"CoACD bone group {group_id} has no bones.")
                 continue
-            ordered = [roots[0]]
-            current = roots[0]
-            while True:
-                selected_children = [name for name in children_by_name.get(current, []) if name in selected]
-                if not selected_children:
-                    break
-                if len(selected_children) > 1:
-                    errors.append(f"CoACD bone group {group_id} branches at {current}; choose one chain.")
-                    break
-                current = selected_children[0]
-                ordered.append(current)
-            if set(ordered) != selected:
-                errors.append(f"CoACD bone group {group_id} must be a continuous direct parent-child chain.")
+            # Same incremental rule the interactive selection enforces:
+            # target first, then parent-of-target / child-of-selected / sibling.
+            accepted = [bones[0]]
+            for bone_name in bones[1:]:
+                message = self.collision_group_addition_error(group_id, bone_name, accepted)
+                if message:
+                    errors.append(message)
+                else:
+                    accepted.append(bone_name)
         return sorted(set(errors))
 
     def populate_collision_bone_table(self) -> None:
         entries = self.collision_bone_entries()
         presets = self.collision_rotation_presets()
+        self._collision_group_members = {}
         self._updating_collision_bone_table = True
         self.collision_bone_table.setRowCount(len(entries))
         for row, entry in enumerate(entries):
@@ -14248,8 +14976,13 @@ class ImporterWindow(QtWidgets.QMainWindow):
             for group_id in range(1, 15):
                 group_combo.addItem(str(group_id), group_id)
             group_combo.setEnabled(not is_default)
-            group_combo.currentIndexChanged.connect(lambda _index, r=row: self.on_collision_bone_combo_changed(r))
+            group_combo.currentIndexChanged.connect(lambda _index, r=row: self.on_collision_bone_group_changed(r))
             self.collision_bone_table.setCellWidget(row, 0, group_combo)
+
+            role_item = QtWidgets.QTableWidgetItem("Default target" if is_default else "")
+            role_item.setData(QtCore.Qt.ItemDataRole.UserRole, name)
+            role_item.setFlags(role_item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable)
+            self.collision_bone_table.setItem(row, 1, role_item)
 
             rotation_combo = QtWidgets.QComboBox()
             rotation_combo.addItem("", "")
@@ -14259,8 +14992,8 @@ class ImporterWindow(QtWidgets.QMainWindow):
                 if code:
                     rotation_combo.addItem(f"{code} - {label}", code)
             rotation_combo.setEnabled(False)
-            rotation_combo.currentIndexChanged.connect(lambda _index, r=row: self.on_collision_bone_combo_changed(r))
-            self.collision_bone_table.setCellWidget(row, 1, rotation_combo)
+            rotation_combo.currentIndexChanged.connect(lambda _index, r=row: self.on_collision_bone_rotation_changed(r))
+            self.collision_bone_table.setCellWidget(row, 2, rotation_combo)
 
             children = entry.get("children", [])
             children_text = ", ".join(str(child) for child in children if child) if isinstance(children, list) else ""
@@ -14269,10 +15002,9 @@ class ImporterWindow(QtWidgets.QMainWindow):
                 name,
                 str(entry.get("parent") or ""),
                 children_text,
-                "Yes" if is_default else "No",
                 warnings,
             ]
-            for column, value in enumerate(values, start=2):
+            for column, value in enumerate(values, start=3):
                 item = QtWidgets.QTableWidgetItem(value)
                 item.setData(QtCore.Qt.ItemDataRole.UserRole, name)
                 if value:
@@ -14282,35 +15014,144 @@ class ImporterWindow(QtWidgets.QMainWindow):
         self._updating_collision_bone_table = False
         for row in range(self.collision_bone_table.rowCount()):
             self.collision_bone_table.setRowHeight(row, 34)
+        self.update_collision_group_visuals()
 
-    def on_collision_bone_combo_changed(self, row: int) -> None:
-        if self._updating_collision_bone_table:
-            return
-        group_widget = self.collision_bone_table.cellWidget(row, 0)
-        rotation_widget = self.collision_bone_table.cellWidget(row, 1)
-        group_id = 0
-        if isinstance(group_widget, QtWidgets.QComboBox):
-            try:
-                group_id = int(group_widget.currentData() or 0)
-            except Exception:
-                group_id = 0
-        if isinstance(rotation_widget, QtWidgets.QComboBox):
-            rotation_widget.setEnabled(group_id > 0)
-            if group_id <= 0 and rotation_widget.currentIndex() != 0:
-                self._updating_collision_bone_table = True
-                rotation_widget.setCurrentIndex(0)
-                self._updating_collision_bone_table = False
+    def _invalidate_collision_plan_after_group_change(self) -> None:
         if self.current_collision_plan is not None:
             self.current_collision_analysis = None
             self.current_collision_plan = None
             self.collision_table.setRowCount(0)
             self.collision_apply_button.setEnabled(False)
             self.collision_validate_button.setEnabled(False)
-        self.refresh_collision_bone_preview()
+            if self.collision_preview is not None:
+                self.collision_preview.set_collision_overlay({})
+
+    def on_collision_bone_group_changed(self, row: int) -> None:
+        if self._updating_collision_bone_table:
+            return
+        bone_name = self.collision_bone_name_for_row(row)
+        if not bone_name:
+            return
+        group_widget = self.collision_bone_table.cellWidget(row, 0)
+        new_group = 0
+        if isinstance(group_widget, QtWidgets.QComboBox):
+            try:
+                new_group = int(group_widget.currentData() or 0)
+            except Exception:
+                new_group = 0
+        old_group = 0
+        for group_id, members in self._collision_group_members.items():
+            if bone_name in members:
+                old_group = group_id
+                break
+        if new_group == old_group:
+            self.update_collision_group_visuals()
+            return
+        # Joining a non-empty group must obey the connectivity rule.
+        if new_group > 0:
+            message = self.collision_group_addition_error(new_group, bone_name)
+            if message:
+                self._set_collision_row_group_silent(bone_name, old_group)
+                self.statusBar().showMessage(message, 8000)
+                return
+        cleared: list[str] = []
+        if old_group > 0:
+            members = self._collision_group_members.get(old_group) or []
+            if members and members[0] == bone_name:
+                # Removing the target disbands its group.
+                cleared = [name for name in members if name != bone_name]
+                self._collision_group_members[old_group] = []
+                if cleared:
+                    self.statusBar().showMessage(
+                        f"Group {old_group} was disbanded because its target bone {bone_name} was removed.", 8000
+                    )
+            else:
+                if bone_name in members:
+                    members.remove(bone_name)
+                cleared = self._revalidate_collision_group_members(old_group)
+                if cleared:
+                    self.statusBar().showMessage(
+                        f"Removed from group {old_group} (no longer connected): {', '.join(cleared)}.", 8000
+                    )
+        for name in cleared:
+            self._set_collision_row_group_silent(name, 0)
+        if new_group > 0:
+            members = self._collision_group_members.setdefault(new_group, [])
+            members.append(bone_name)
+            if len(members) == 1:
+                self.statusBar().showMessage(
+                    f"{bone_name} is the target bone of group {new_group}; bones added next merge into it.", 8000
+                )
+        rotation_widget = self.collision_bone_table.cellWidget(row, 2)
+        if isinstance(rotation_widget, QtWidgets.QComboBox):
+            rotation_widget.setEnabled(new_group > 0)
+            if new_group <= 0 and rotation_widget.currentIndex() != 0:
+                self._updating_collision_bone_table = True
+                rotation_widget.setCurrentIndex(0)
+                self._updating_collision_bone_table = False
+            elif new_group > 0 and rotation_widget.currentIndex() == 0:
+                # Inherit the group's rotation type so new members stay consistent.
+                group_rotation = self.collision_bone_group_rotation(new_group)
+                if group_rotation:
+                    index = rotation_widget.findData(group_rotation)
+                    if index >= 0:
+                        self._updating_collision_bone_table = True
+                        rotation_widget.setCurrentIndex(index)
+                        self._updating_collision_bone_table = False
+        self._invalidate_collision_plan_after_group_change()
+        self.update_collision_group_visuals()
         self.update_collision_summary()
 
+    def on_collision_bone_rotation_changed(self, row: int) -> None:
+        if self._updating_collision_bone_table:
+            return
+        # Rotation choice only affects the plan; never rebuild the preview here
+        # (re-feeding the full model froze the GUI for seconds per change).
+        self._invalidate_collision_plan_after_group_change()
+        self.update_collision_summary()
+
+    def update_collision_group_visuals(self) -> None:
+        """Sync Role labels, per-group row tints, and preview bone colors."""
+        membership: dict[str, tuple[int, bool]] = {}
+        for group_id, members in self._collision_group_members.items():
+            for index, name in enumerate(members):
+                membership[name] = (group_id, index == 0)
+        default_names = {
+            str(entry.get("name") or "")
+            for entry in self.collision_bone_entries()
+            if bool(entry.get("is_default_target", False))
+        }
+        for row in range(self.collision_bone_table.rowCount()):
+            bone_name = self.collision_bone_name_for_row(row)
+            role_item = self.collision_bone_table.item(row, 1)
+            if role_item is None:
+                continue
+            assignment = membership.get(bone_name)
+            if bone_name in default_names:
+                role_item.setText("Default target")
+                role_item.setBackground(QtGui.QBrush())
+            elif assignment is None:
+                role_item.setText("")
+                role_item.setBackground(QtGui.QBrush())
+            else:
+                group_id, is_target = assignment
+                target = (self._collision_group_members.get(group_id) or [bone_name])[0]
+                role_item.setText("Target" if is_target else f"Merge into {target}")
+                red, green, blue = collision_group_color(group_id)
+                tint = QtGui.QColor(int(red * 255), int(green * 255), int(blue * 255))
+                tint.setAlpha(150 if is_target else 90)
+                role_item.setBackground(QtGui.QBrush(tint))
+            role_item.setToolTip(role_item.text())
+        if self.collision_preview is not None:
+            colors: dict[str, tuple[float, float, float]] = {}
+            for group_id, members in self._collision_group_members.items():
+                color = collision_group_color(group_id)
+                for name in members:
+                    colors[name] = color
+            self.collision_preview.set_bone_group_color_overlay(colors)
+
     def start_collision_bone_scan(self) -> None:
-        if self.worker and self.worker.isRunning():
+        if self._reject_if_busy():
             return
         if not self.ensure_step_can_run(8):
             return
@@ -14367,6 +15208,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
         self.collision_preview.set_bone_overlay(self.current_collision_bones.get("bone_preview", {}))
         self.collision_preview.set_collision_overlay(self.collision_preview_from_plan() if self.current_collision_plan else {})
         self.refresh_collision_bone_preview_state()
+        self.update_collision_group_visuals()
 
     def refresh_collision_bone_preview_state(self) -> None:
         if self.collision_preview is None:
@@ -14415,7 +15257,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
         return enabled
 
     def start_collision_source_scan(self) -> None:
-        if self.worker and self.worker.isRunning():
+        if self._reject_if_busy():
             return
         if not self.ensure_step_can_run(8):
             return
@@ -14595,7 +15437,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
         self.update_collision_summary()
 
     def start_collision_analyze(self) -> None:
-        if self.worker and self.worker.isRunning():
+        if self._reject_if_busy():
             return
         if not self.ensure_step_can_run(8):
             return
@@ -14980,7 +15822,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
         QtWidgets.QMessageBox.information(self, "Collision validation", "The collision plan is ready to apply.")
 
     def start_collision_apply(self) -> None:
-        if self.worker and self.worker.isRunning():
+        if self._reject_if_busy():
             return
         if not self.ensure_step_can_run(8):
             return
@@ -15010,7 +15852,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
         self.detect_flex_blend_button.setEnabled(False)
         self.collision_quality_combo.setEnabled(False)
         self.collision_cancel_button.setEnabled(True)
-        self.worker = CollisionApplyWorker(str(input_blend), self.current_collision_plan)
+        self.worker = CollisionApplyWorker(str(input_blend), deepcopy(self.current_collision_plan))
         self.worker.log.connect(self.append_collision_log)
         self.worker.done.connect(self.collision_apply_done)
         self.worker.failed.connect(self.collision_failed)
@@ -15037,6 +15879,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
         self.collision_settings_label.setText(str(result.get("physics_settings", "")))
         self.collision_smd_label.setText(str(result.get("physics_smd", "")))
         self.open_collision_folder_button.setEnabled(True)
+        self.collision_manual_edit_button.setEnabled(bool(self.collision_sorted_blend_path))
         report = result.get("report_data") if isinstance(result.get("report_data"), dict) else {}
         validation = report.get("validation") if isinstance(report.get("validation"), dict) else {}
         if validation.get("ok"):
@@ -15052,6 +15895,80 @@ class ImporterWindow(QtWidgets.QMainWindow):
             QtWidgets.QMessageBox.information(self, "Collision complete", "The Physics mesh was generated and validated.")
         else:
             self.set_collision_progress(100, "Collision Complete With Warnings", self.collision_sorted_blend_path, "#d29922")
+
+    def start_collision_manual_edit(self) -> None:
+        if self._reject_if_busy():
+            return
+        blend_text = self.collision_sorted_blend_path or self.collision_blend_label.text().strip()
+        blend_path = Path(clean_path_text(blend_text)) if blend_text else None
+        if blend_path is None or not blend_path.exists():
+            self.show_error(
+                "Edit collision shape",
+                "Run Apply Collision first; the collision-sorted .blend with the Physics object is required.",
+            )
+            return
+        instructions = QtWidgets.QMessageBox(self)
+        instructions.setIcon(QtWidgets.QMessageBox.Icon.Information)
+        instructions.setWindowTitle("Open Blender to Edit Collision Shape")
+        instructions.setText(
+            "Blender will open the collision-sorted blend so you can refine the collision shape by hand."
+        )
+        instructions.setInformativeText(
+            "- Edit ONLY the \"Physics\" object, in Edit Mode, so the hulls match the character's shape.\n"
+            "- Do NOT add isolated vertices: new geometry must stay part of a piece's faces and keep its bone weights "
+            "(extrude/move existing geometry instead of adding loose points).\n"
+            "- Do not rename or delete the Physics object, the armature, or the vertex groups.\n"
+            "- When finished: save the file (Ctrl+S) and close Blender.\n\n"
+            "After Blender closes, the importer validates your edits and regenerates Physics.smd."
+        )
+        instructions.setStandardButtons(
+            QtWidgets.QMessageBox.StandardButton.Ok | QtWidgets.QMessageBox.StandardButton.Cancel
+        )
+        instructions.setDefaultButton(QtWidgets.QMessageBox.StandardButton.Ok)
+        if instructions.exec() != QtWidgets.QMessageBox.StandardButton.Ok:
+            return
+        self.set_step_working(8, "Editing collision shape in Blender")
+        self.set_collision_progress(10, "Manual Collision Edit", "Waiting for Blender to close", "#d29922")
+        self.collision_manual_edit_button.setEnabled(False)
+        self.collision_apply_button.setEnabled(False)
+        self.collision_analyze_button.setEnabled(False)
+        self.collision_cancel_button.setEnabled(True)
+        self.worker = CollisionManualEditWorker(str(blend_path))
+        self.worker.log.connect(self.append_collision_log)
+        self.worker.done.connect(self.collision_manual_edit_done)
+        self.worker.failed.connect(self.collision_manual_edit_failed)
+        self.worker.start()
+
+    def collision_manual_edit_done(self, report: dict) -> None:
+        self.collision_manual_edit_button.setEnabled(True)
+        self.collision_apply_button.setEnabled(self.current_collision_plan is not None)
+        self.collision_analyze_button.setEnabled(True)
+        self.collision_cancel_button.setEnabled(False)
+        validation = report.get("validation") if isinstance(report.get("validation"), dict) else {}
+        warnings = [str(item) for item in validation.get("warnings", []) if item] if isinstance(validation.get("warnings"), list) else []
+        smd_path = str(report.get("physics_smd_path") or "")
+        if smd_path:
+            self.collision_smd_label.setText(smd_path)
+        self.set_collision_progress(100, "Manual Collision Edit Complete", smd_path, "#2ea043")
+        self.clear_step_state(8)
+        self.refresh_workflow_statuses()
+        message = "Your collision shape edits were validated and Physics.smd was regenerated from the edited mesh."
+        if warnings:
+            message += "\n\nWarnings:\n" + "\n".join(f"- {item}" for item in warnings[:8])
+        QtWidgets.QMessageBox.information(self, "Collision edit validated", message)
+
+    def collision_manual_edit_failed(self, message: str) -> None:
+        self.collision_manual_edit_button.setEnabled(True)
+        self.collision_apply_button.setEnabled(self.current_collision_plan is not None)
+        self.collision_analyze_button.setEnabled(True)
+        self.collision_cancel_button.setEnabled(False)
+        self.set_collision_progress(self.collision_progress_bar.value(), "Manual Collision Edit Failed", "See the log for details.", "#f85149")
+        self.set_step_failed(8, "Manual collision edit validation failed")
+        self.show_error(
+            "Collision edit validation failed",
+            message
+            + "\n\nFix the listed problems in Blender (Open Blender to Edit Collision Shape again), save, and re-validate.",
+        )
 
     def append_proportion_log(self, message: str) -> None:
         display = self.translate_runtime_text(str(message))
@@ -15202,7 +16119,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
             self.proportion_output_edit.clear()
 
     def start_proportion_run(self) -> None:
-        if self.worker and self.worker.isRunning():
+        if self._reject_if_busy():
             return
         if not self.ensure_step_can_run(9):
             return
@@ -15734,7 +16651,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
             self.carms_output_edit.clear()
 
     def start_carms_run(self) -> None:
-        if self.worker and self.worker.isRunning():
+        if self._reject_if_busy():
             return
         if not self.ensure_step_can_run(10):
             return
@@ -15895,7 +16812,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
         if self.vrd_preview is not None:
             self.vrd_preview.clear()
         if value.strip():
-            self.update_vrd_output_preview(Path(value.strip()))
+            self._defer_step_preview(11, lambda path=Path(value.strip()): self.update_vrd_output_preview(path))
         else:
             self.vrd_output_edit.clear()
             self.open_vrd_folder_button.setEnabled(False)
@@ -15937,7 +16854,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
             self.vrd_output_edit.clear()
 
     def start_vrd_analyze(self) -> None:
-        if self.worker and self.worker.isRunning():
+        if self._reject_if_busy():
             return
         if not self.ensure_step_can_run(11):
             return
@@ -15994,7 +16911,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
         self.clear_step_state(11, "Step 11 analysis complete")
 
     def start_vrd_apply(self) -> None:
-        if self.worker and self.worker.isRunning():
+        if self._reject_if_busy():
             return
         if not self.ensure_step_can_run(11):
             return
@@ -16610,8 +17527,12 @@ class ImporterWindow(QtWidgets.QMainWindow):
         if not isinstance(rows, list):
             rows = []
             self.current_vrd_plan["rows"] = rows
+        existing_uids = {str(entry.get("uid") or "") for entry in rows if isinstance(entry, dict)}
+        next_index = len(rows) + 1
+        while f"manual_vrd_{next_index:03d}" in existing_uids:
+            next_index += 1
         row = {
-            "uid": f"manual_vrd_{len(rows) + 1:03d}",
+            "uid": f"manual_vrd_{next_index:03d}",
             "enabled": True,
             "procedural_bone": "",
             "driver_bone": "ValveBiped.Bip01_L_Thigh",
@@ -16662,7 +17583,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
         return errors
 
     def regenerate_vrd_preview(self) -> None:
-        if self.worker and self.worker.isRunning():
+        if self._reject_if_busy():
             return
         input_raw = self.vrd_input_row.value()
         if not input_raw:
@@ -16855,7 +17776,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
         self.show_error("Detect Material Mapping", "No Step 5 materials.npy/materials.json was found. Run Step 5 or browse to the material mapping.")
 
     def start_texture_analyze(self) -> None:
-        if self.worker and self.worker.isRunning():
+        if self._reject_if_busy():
             return
         if not self.ensure_step_can_run(12):
             return
@@ -16917,7 +17838,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
         self.clear_step_state(12, "Step 12 analysis complete")
 
     def start_texture_process(self) -> None:
-        if self.worker and self.worker.isRunning():
+        if self._reject_if_busy():
             return
         if not self.ensure_step_can_run(12):
             return
@@ -16935,7 +17856,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
         self.texture_process_button.setEnabled(False)
         self.detect_texture_mapping_button.setEnabled(False)
         self.texture_cancel_button.setEnabled(True)
-        self.worker = TextureProcessWorker(input_raw, self.current_texture_plan)
+        self.worker = TextureProcessWorker(input_raw, deepcopy(self.current_texture_plan))
         self.worker.log.connect(self.append_texture_log)
         self.worker.done.connect(self.texture_process_done)
         self.worker.failed.connect(self.texture_failed)
@@ -16969,8 +17890,8 @@ class ImporterWindow(QtWidgets.QMainWindow):
                 self.populate_texture_table(self.current_texture_plan)
         except Exception:
             pass
-        self.set_texture_progress(100, "Step 12 Complete", self.texture_output_dir, "#2ea043")
         if errors <= 0:
+            self.set_texture_progress(100, "Step 12 Complete", self.texture_output_dir, "#2ea043")
             self.complete_step_from_result(
                 12,
                 result,
@@ -16979,9 +17900,15 @@ class ImporterWindow(QtWidgets.QMainWindow):
                 report_key="report",
                 validation={"ok": True, "processed_count": processed, "error_count": errors},
             )
+            QtWidgets.QMessageBox.information(self, "Step 12 complete", "Texture PNG processing completed.")
         else:
+            self.set_texture_progress(100, "Step 12 Completed With Errors", self.texture_output_dir, "#d29922")
             self.set_step_failed(12, "Step 12 texture processing completed with errors")
-        QtWidgets.QMessageBox.information(self, "Step 12 complete", "Texture PNG processing completed.")
+            QtWidgets.QMessageBox.warning(
+                self,
+                "Step 12 completed with errors",
+                f"Texture processing finished, but {errors:,} texture(s) failed. Check the texture log and report for details.",
+            )
 
     def texture_failed(self, message: str) -> None:
         self.texture_analyze_button.setEnabled(True)
@@ -17066,10 +17993,22 @@ class ImporterWindow(QtWidgets.QMainWindow):
         for folder in search_dirs:
             if not folder or not folder.exists() or not folder.is_dir():
                 continue
-            iterator = folder.rglob("*") if folder.name == "0_source_mmd_assets" else folder.glob("*")
-            for candidate in iterator:
-                if not candidate.is_file() or candidate.suffix.lower() not in {".png", ".tga", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}:
-                    continue
+            # Scan each folder once per table population: when one recorded
+            # path is stale they usually all are, and the 0_source_mmd_assets
+            # rglob is expensive (O(rows x files) without the cache).
+            cache_key = str(folder).casefold()
+            files = self._texture_folder_scan_cache.get(cache_key)
+            if files is None:
+                files = []
+                iterator = folder.rglob("*") if folder.name == "0_source_mmd_assets" else folder.glob("*")
+                try:
+                    for candidate in iterator:
+                        if candidate.is_file() and candidate.suffix.lower() in {".png", ".tga", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}:
+                            files.append(candidate)
+                except Exception:
+                    pass
+                self._texture_folder_scan_cache[cache_key] = files
+            for candidate in files:
                 if candidate.stem.casefold() in stems:
                     candidates.append(candidate.resolve())
         if not candidates:
@@ -17087,6 +18026,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
 
     def populate_texture_table(self, plan: dict[str, object]) -> None:
         rows = [entry for entry in plan.get("rows", []) if isinstance(entry, dict)] if isinstance(plan.get("rows"), list) else []
+        self._texture_folder_scan_cache = {}
         self._updating_texture_table = True
         self.texture_table.setRowCount(len(rows))
         for row_index, entry in enumerate(rows):
@@ -17569,7 +18509,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
         self.show_error("Detect Step 1 Output", "No Step 1 workspace or copied PMX was found. Run Step 1 or browse to a PMX/import blend.")
 
     def start_icon_generate(self, use_custom: bool = False) -> None:
-        if self.worker and self.worker.isRunning():
+        if self._reject_if_busy():
             return
         if not self.ensure_step_can_run(13):
             return
@@ -17987,6 +18927,8 @@ class ImporterWindow(QtWidgets.QMainWindow):
             if isinstance(combo, QtWidgets.QComboBox):
                 combo.setCurrentText(jiggle_type)
             changed += 1
+        if changed:
+            self._qc_plan_user_modified = True
         self.sync_qc_jiggle_controls_from_selection()
         self.update_qc_summary()
         self.qc_filter_status_label.setText(f"Updated {changed:,} selected editable bone(s) to {jiggle_type}.")
@@ -18000,6 +18942,8 @@ class ImporterWindow(QtWidgets.QMainWindow):
             entry["jiggle_params"] = self.qc_default_jiggle_params(jiggle_type)
             entry.pop("jiggle_constraint_overrides", None)
             changed += 1
+        if changed:
+            self._qc_plan_user_modified = True
         self.sync_qc_jiggle_controls_from_selection()
         self.update_qc_summary()
         self.qc_filter_status_label.setText(f"Reset jiggle parameters for {changed:,} selected editable bone(s).")
@@ -18068,6 +19012,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
                     params = self.qc_default_jiggle_params(str(entry.get("jiggle_type") or "Directional Jiggle"))
                     entry["jiggle_params"] = params
                 params[key] = float(value)
+        self._qc_plan_user_modified = True
         self.update_qc_summary()
 
     def qc_physics_rows(self) -> list[dict[str, object]]:
@@ -18153,6 +19098,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
             constraints = row.setdefault("constraints", {})
             if isinstance(constraints, dict):
                 constraints[axis] = constraint
+        self._qc_plan_user_modified = True
         self.update_qc_summary()
 
     def reload_qc_physics_from_plan_defaults(self) -> None:
@@ -18170,9 +19116,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
         return text or fallback
 
     def qc_display_from_internal(self, text: str, fallback: str = "") -> str:
-        words = [part for part in str(text or "").replace("_", " ").split() if part]
-        display = " ".join(part[:1].upper() + part[1:] for part in words)
-        return sanitize_display_name_text(display or fallback)
+        return display_from_internal_text(text, fallback)
 
     def update_qc_display_placeholders(self) -> None:
         if hasattr(self, "qc_category_display_edit"):
@@ -18201,7 +19145,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
         if self.qc_preview is not None:
             self.qc_preview.clear()
         if value.strip():
-            self.update_qc_output_preview(Path(value.strip()))
+            self._defer_step_preview(14, lambda path=Path(value.strip()): self.update_qc_output_preview(path))
         else:
             self.qc_output_edit.clear()
             self.open_qc_folder_button.setEnabled(False)
@@ -18310,14 +19254,13 @@ class ImporterWindow(QtWidgets.QMainWindow):
         if steam_dir:
             for lib in core._find_steam_library_folders(steam_dir):
                 for name in ("GarrysMod_RTX_c", "GarrysMod"):
-                    candidates.append(lib / "steamapps" / "common" / name / "bin" / "studiomdl.exe")
-        # 3. Fallback hardcoded paths
-        for root in (
-            Path("H:/SteamLibrary/steamapps/common/GarrysMod_RTX_c"),
-            Path("H:/SteamLibrary/steamapps/common/GarrysMod"),
-            Path("C:/Program Files (x86)/Steam/steamapps/common/GarrysMod"),
-        ):
+                    base = lib / "steamapps" / "common" / name
+                    candidates.append(base / "bin" / "studiomdl.exe")
+                    candidates.append(base / "bin" / "win64" / "studiomdl.exe")
+        # 3. Fallback standard install path
+        for root in (Path("C:/Program Files (x86)/Steam/steamapps/common/GarrysMod"),):
             candidates.append(root / "bin" / "studiomdl.exe")
+            candidates.append(root / "bin" / "win64" / "studiomdl.exe")
         seen: set[Path] = set()
         for candidate in candidates:
             candidate = safe_resolve_path(candidate)
@@ -18340,7 +19283,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
         )
 
     def start_qc_analyze(self) -> None:
-        if self.worker and self.worker.isRunning():
+        if self._reject_if_busy():
             return
         if not self.ensure_step_can_run(14):
             return
@@ -18356,9 +19299,22 @@ class ImporterWindow(QtWidgets.QMainWindow):
         if internal_errors:
             self.show_error("QC validation", "Blocking errors:\n" + "\n".join(f"- {error}" for error in internal_errors))
             return
+        if self.current_qc_plan is not None and self._qc_plan_user_modified:
+            reply = QtWidgets.QMessageBox.warning(
+                self,
+                "Regenerate QC plan",
+                "You changed jigglebone or physics settings in the current QC plan.\n\n"
+                "Re-analyzing rebuilds the plan from the Step 9 outputs and will discard ALL of those edits.\n\n"
+                "Continue and lose the edits?",
+                QtWidgets.QMessageBox.StandardButton.Yes | QtWidgets.QMessageBox.StandardButton.No,
+                QtWidgets.QMessageBox.StandardButton.No,
+            )
+            if reply != QtWidgets.QMessageBox.StandardButton.Yes:
+                return
         self.current_qc_analysis = None
         self.current_qc_plan = None
         self.current_qc_files = None
+        self._qc_plan_user_modified = False
         self.qc_log.clear()
         self.qc_bone_table.setRowCount(0)
         self.qc_files_table.setRowCount(0)
@@ -18381,6 +19337,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
             self.qc_model_name_edit.text().strip(),
             gmod_root,
             studiomdl,
+            gender=self.current_character_gender(),
         )
         self.worker.log.connect(self.append_qc_log)
         self.worker.done.connect(self.qc_analyze_done)
@@ -18395,6 +19352,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
         self.qc_compile_button.setEnabled(True)
         self.current_qc_analysis = result.get("analysis_data") if isinstance(result.get("analysis_data"), dict) else None
         self.current_qc_plan = result.get("plan_data") if isinstance(result.get("plan_data"), dict) else None
+        self._qc_plan_user_modified = False
         self.qc_output_dir = str(result.get("qc_dir", ""))
         self.qc_output_edit.setText(self.qc_output_dir)
         self.qc_analysis_label.setText(str(result.get("analysis", "")))
@@ -18539,6 +19497,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
         entry["jiggle_type"] = text
         entry["jiggle_params"] = self.qc_default_jiggle_params(text)
         entry.pop("jiggle_constraint_overrides", None)
+        self._qc_plan_user_modified = True
         self.sync_qc_jiggle_controls_from_selection()
         self.update_qc_summary()
 
@@ -18715,6 +19674,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
             or self.known_category_display_for_internal(category)
             or self.qc_display_from_internal(category, "Sheepy Lord")
         )
+        plan["gender"] = self.current_character_gender()
         plan["invert_jiggle_direction"] = bool(self.qc_invert_jiggle_check.isChecked()) if hasattr(self, "qc_invert_jiggle_check") else False
         plan["copy_to_gmod_addons"] = (
             bool(self.qc_copy_to_gmod_addons_check.isChecked()) if hasattr(self, "qc_copy_to_gmod_addons_check") else False
@@ -18735,7 +19695,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
         return plan
 
     def start_qc_compile(self) -> None:
-        if self.worker and self.worker.isRunning():
+        if self._reject_if_busy():
             return
         if not self.ensure_step_can_run(14):
             return
@@ -18782,7 +19742,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
         self.detect_qc_outputs_button.setEnabled(False)
         self.detect_qc_gmod_button.setEnabled(False)
         self.qc_cancel_button.setEnabled(True)
-        self.worker = QcCompileWorker(input_raw, plan or {})
+        self.worker = QcCompileWorker(input_raw, deepcopy(plan) if plan else {})
         self.worker.log.connect(self.append_qc_log)
         self.worker.done.connect(self.qc_compile_done)
         self.worker.failed.connect(self.qc_failed)
@@ -18999,7 +19959,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
         self.show_error("Detect Step 14 Output", "No Step 14 QC folder with qc_plan.json was found.")
 
     def start_release_analyze(self) -> None:
-        if self.worker and self.worker.isRunning():
+        if self._reject_if_busy():
             return
         if not self.ensure_step_can_run(15):
             return
@@ -19174,7 +20134,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
         self.release_preview_edit.setPlainText("\n".join(preview))
 
     def start_release_generate(self, operation: str) -> None:
-        if self.worker and self.worker.isRunning():
+        if self._reject_if_busy():
             return
         if not self.ensure_step_can_run(15):
             return
@@ -19558,6 +20518,59 @@ def dispatch_bundled_processor_from_argv() -> int | None:
     return 0
 
 
+def apply_dark_theme(app: QtWidgets.QApplication) -> None:
+    """Deterministic dark theme.
+
+    The UI hardcodes dark accent colors (#1b1f24 banners, #191b1f previews,
+    #2ea043/#f85149 status text), which clash with a light system palette, so
+    apply a matching Fusion palette regardless of the OS theme. Set the
+    QSettings key ui_theme to "system" to opt out.
+    """
+
+    app.setStyle("Fusion")
+    palette = QtGui.QPalette()
+    window = QtGui.QColor("#1b1f24")
+    base = QtGui.QColor("#14171a")
+    button = QtGui.QColor("#22272e")
+    text = QtGui.QColor("#c9d1d9")
+    muted = QtGui.QColor("#8f98a3")
+    disabled = QtGui.QColor("#6b7280")
+    highlight = QtGui.QColor("#1f6feb")
+    palette.setColor(QtGui.QPalette.ColorRole.Window, window)
+    palette.setColor(QtGui.QPalette.ColorRole.WindowText, text)
+    palette.setColor(QtGui.QPalette.ColorRole.Base, base)
+    palette.setColor(QtGui.QPalette.ColorRole.AlternateBase, window)
+    palette.setColor(QtGui.QPalette.ColorRole.Text, text)
+    palette.setColor(QtGui.QPalette.ColorRole.PlaceholderText, muted)
+    palette.setColor(QtGui.QPalette.ColorRole.Button, button)
+    palette.setColor(QtGui.QPalette.ColorRole.ButtonText, text)
+    palette.setColor(QtGui.QPalette.ColorRole.BrightText, QtGui.QColor("#ffffff"))
+    palette.setColor(QtGui.QPalette.ColorRole.Highlight, highlight)
+    palette.setColor(QtGui.QPalette.ColorRole.HighlightedText, QtGui.QColor("#ffffff"))
+    palette.setColor(QtGui.QPalette.ColorRole.Link, QtGui.QColor("#58a6ff"))
+    palette.setColor(QtGui.QPalette.ColorRole.LinkVisited, QtGui.QColor("#bc8cff"))
+    palette.setColor(QtGui.QPalette.ColorRole.ToolTipBase, button)
+    palette.setColor(QtGui.QPalette.ColorRole.ToolTipText, text)
+    for role in (
+        QtGui.QPalette.ColorRole.WindowText,
+        QtGui.QPalette.ColorRole.Text,
+        QtGui.QPalette.ColorRole.ButtonText,
+    ):
+        palette.setColor(QtGui.QPalette.ColorGroup.Disabled, role, disabled)
+    palette.setColor(QtGui.QPalette.ColorGroup.Disabled, QtGui.QPalette.ColorRole.Highlight, QtGui.QColor("#30363d"))
+    app.setPalette(palette)
+    app.setStyleSheet(
+        """
+        QToolTip {
+            background: #22272e;
+            color: #c9d1d9;
+            border: 1px solid #3a3f46;
+            padding: 4px 6px;
+        }
+        """
+    )
+
+
 def main() -> int:
     dispatched_exit_code = dispatch_bundled_processor_from_argv()
     if dispatched_exit_code is not None:
@@ -19565,6 +20578,11 @@ def main() -> int:
     crash_log_path = enable_crash_logging()
     app = QtWidgets.QApplication(sys.argv)
     app.setApplicationName("MMD Character Importer")
+    theme_preference = str(
+        QtCore.QSettings("MMDCharacterImporter", "PortingTool").value("ui_theme", "dark") or "dark"
+    ).lower()
+    if theme_preference != "system":
+        apply_dark_theme(app)
     icon_path = importer_icon_path()
     if icon_path:
         app.setWindowIcon(QtGui.QIcon(str(icon_path)))

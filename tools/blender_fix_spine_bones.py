@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Iterable
 
 import bpy
+import numpy as np
 from mathutils import Vector
 
 
@@ -163,11 +164,20 @@ def collect_model_preview(armature: bpy.types.Object, max_vertices: int = 500000
     for obj in mesh_objects():
         offset = len(vertices)
         transform = to_armature @ obj.matrix_world
-        for vertex in obj.data.vertices:
-            vertices.append(v3(transform @ vertex.co))
-        for edge in obj.data.edges:
-            a, b = edge.vertices[:]
-            edges.append((offset + int(a), offset + int(b)))
+        vertex_count = len(obj.data.vertices)
+        if vertex_count:
+            coords = np.empty(vertex_count * 3, dtype=np.float64)
+            obj.data.vertices.foreach_get("co", coords)
+            coords = coords.reshape(-1, 3)
+            matrix = np.array([[float(transform[row][col]) for col in range(4)] for row in range(4)], dtype=np.float64)
+            transformed = coords @ matrix[:3, :3].T + matrix[:3, 3]
+            vertices.extend(np.round(transformed, 6).tolist())
+        edge_count = len(obj.data.edges)
+        if edge_count:
+            edge_indices = np.empty(edge_count * 2, dtype=np.int64)
+            obj.data.edges.foreach_get("vertices", edge_indices)
+            edge_indices = edge_indices.reshape(-1, 2) + offset
+            edges.extend((int(a), int(b)) for a, b in edge_indices.tolist())
 
     if not vertices:
         return {"vertices": [], "edges": [], "source_vertex_count": 0, "source_edge_count": 0, "sample_stride": 1}
@@ -291,6 +301,24 @@ def exact_or_named_candidate(names: set[str], target: str, hints: tuple[str, ...
             scored.append((score, name))
     scored.sort(key=lambda item: (-item[0], item[1].lower()))
     return scored[0][1] if scored else None
+
+
+def attachment_side(target: str) -> str | None:
+    if "_R_" in target:
+        return "R"
+    if "_L_" in target:
+        return "L"
+    return None
+
+
+def matches_attachment_side(name: str, side: str, bones: dict[str, bpy.types.Bone]) -> bool:
+    bone = bones.get(name)
+    if bone is None:
+        return True
+    x = float(bone.head_local.x)
+    if abs(x) <= 0.0005:
+        return True
+    return x < 0.0 if side == "R" else x > 0.0
 
 
 def score_spine1_candidate(
@@ -694,9 +722,18 @@ def proposal_for_armature(armature: bpy.types.Object, weighted: set[str]) -> dic
             added_spine_position(SPINE2, selected, bones),
         )
 
+    used_attachment_sources = {source for source in selected.values() if source}
     for target in ATTACHMENT_TARGETS:
-        selected[target] = exact_or_named_candidate(names, target, (target.rsplit("_", 1)[-1], target))
+        side = attachment_side(target)
+        available = {
+            name
+            for name in names
+            if name == target
+            or (name not in used_attachment_sources and (side is None or matches_attachment_side(name, side, bones)))
+        }
+        selected[target] = exact_or_named_candidate(available, target, (target.rsplit("_", 1)[-1], target))
         if selected[target]:
+            used_attachment_sources.add(selected[target])
             targets[target] = make_entry(target, selected[target], "keep" if selected[target] == target else "rename", SPINE4, 1.0 if selected[target] == target else 0.5)
         else:
             targets[target] = make_entry(target, None, "missing", SPINE4, 0.0, [f"{target} must map to an existing bone."])
@@ -789,7 +826,13 @@ def source_mapping_from_plan(plan: dict[str, object]) -> dict[str, str]:
         action = str(raw_entry.get("action") or "")
         source = raw_entry.get("source")
         if action in {"keep", "rename"} and source and str(source) != str(target):
-            mapping[str(source)] = str(target)
+            source_name = str(source)
+            if source_name in mapping:
+                raise RuntimeError(
+                    f"Invalid spine plan: source bone {source_name} is mapped to multiple targets "
+                    f"({mapping[source_name]} and {target})."
+                )
+            mapping[source_name] = str(target)
     return mapping
 
 
@@ -934,7 +977,8 @@ def apply_renames(armature: bpy.types.Object, plan: dict[str, object]) -> list[s
         raise RuntimeError("Invalid spine plan: target name(s) already exist and are not being renamed away: " + ", ".join(protected_targets))
 
     temp_by_source = {source: f"__mci_spine_tmp_{index:03d}__" for index, source in enumerate(mapping)}
-    source_had_weights = {source: source in weighted_bone_names() for source in mapping}
+    weighted_before = weighted_bone_names()
+    source_had_weights = {source: source in weighted_before for source in mapping}
     vg_temp_by_object: dict[str, dict[str, str]] = {}
     print("Renaming mapped spine bones through temporary names.")
     ensure_object_mode()
@@ -1161,10 +1205,28 @@ def topological_bone_order(armature: bpy.types.Object) -> list[str]:
     return ordered
 
 
+def idprop_to_python(value: object) -> object:
+    to_dict = getattr(value, "to_dict", None)
+    if callable(to_dict):
+        return to_dict()
+    to_list = getattr(value, "to_list", None)
+    if callable(to_list):
+        return to_list()
+    return value
+
+
 def rebuild_armature_data(armature: bpy.types.Object) -> None:
     ensure_object_mode()
     old_data = armature.data
     order = topological_bone_order(armature)
+    object_bone_state = {
+        bone.name: {
+            "hide": bool(bone.hide),
+            "hide_select": bool(bone.hide_select),
+            "custom_props": {key: idprop_to_python(bone[key]) for key in bone.keys()},
+        }
+        for bone in old_data.bones
+    }
     bpy.context.view_layer.objects.active = armature
     armature.select_set(True)
     bpy.ops.object.mode_set(mode="EDIT")
@@ -1201,6 +1263,8 @@ def rebuild_armature_data(armature: bpy.types.Object) -> None:
             bone.tail = info["tail"]
             bone.roll = info["roll"]
             bone.use_deform = info["use_deform"]
+            bone.hide = bool(info["hide"])
+            bone.hide_select = bool(info["hide_select"])
             created[name] = bone
         for name in order:
             parent = bone_data[name]["parent"]
@@ -1209,6 +1273,17 @@ def rebuild_armature_data(armature: bpy.types.Object) -> None:
                 created[name].use_connect = bool(bone_data[name]["use_connect"])
     finally:
         bpy.ops.object.mode_set(mode="OBJECT")
+    for name, state in object_bone_state.items():
+        bone = new_data.bones.get(name)
+        if bone is None:
+            continue
+        bone.hide = state["hide"]
+        bone.hide_select = state["hide_select"]
+        for key, value in state["custom_props"].items():
+            try:
+                bone[key] = value
+            except Exception:
+                pass
     new_data.name = old_name
     if old_data.users == 0:
         bpy.data.armatures.remove(old_data)
@@ -1324,7 +1399,7 @@ def write_json(path: Path, payload: dict[str, object]) -> None:
     path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
-def analyze_current_file(input_blend: Path) -> tuple[dict[str, object], dict[str, object]]:
+def analyze_current_file(input_blend: Path, include_preview: bool = True) -> tuple[dict[str, object], dict[str, object]]:
     armature = active_armature()
     weighted = weighted_bone_names()
     bones = collect_bones(armature, weighted)
@@ -1341,7 +1416,7 @@ def analyze_current_file(input_blend: Path) -> tuple[dict[str, object], dict[str
         "unsafe_bone_names": [bone.name for bone in armature.data.bones if not is_safe_bone_name(bone.name)],
         "safe_name_policy": "Bone names must use A-Z, a-z, 0-9, and underscore. Required ValveBiped.Bip01_* Source bones are preserved as exceptions.",
         "bones": bones,
-        "model_preview": collect_model_preview(armature),
+        "model_preview": collect_model_preview(armature) if include_preview else {},
         "target_chain": CHAIN_TARGETS,
         "attachments": ATTACHMENT_TARGETS,
         "side_landmarks": SIDE_LANDMARKS,
@@ -1377,13 +1452,27 @@ def main() -> int:
     if not args.report_json:
         raise RuntimeError("--report-json is required for apply mode")
     plan = load_plan(args.plan_json)
-    before_analysis, _proposal = analyze_current_file(args.input_blend)
+    before_analysis, _proposal = analyze_current_file(args.input_blend, include_preview=False)
     armature = active_armature()
     result = apply_plan(armature, plan)
     if not result["validation"]["ok"]:
         print("Validation failed after spine repair.")
         for error in result["validation"]["errors"]:
             print(f"Error: {error}")
+        # Write a structured failure report so the GUI can surface the
+        # validation errors instead of a generic missing-output message.
+        failure_report = {
+            "version": 1,
+            "input_blend": str(args.input_blend),
+            "output_blend": str(args.output_blend),
+            "plan_json": str(args.plan_json),
+            "elapsed_seconds": round(time.monotonic() - started, 3),
+            "before": before_analysis,
+            "applied": result,
+            "validation": result["validation"],
+        }
+        write_json(args.report_json, failure_report)
+        print(f"Wrote spine fix failure report: {args.report_json}")
         raise RuntimeError("Spine validation failed after apply.")
     args.output_blend.parent.mkdir(parents=True, exist_ok=True)
     print(f"Saving spine-fixed blend file: {args.output_blend}")

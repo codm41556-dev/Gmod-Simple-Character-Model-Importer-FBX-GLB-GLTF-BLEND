@@ -11,11 +11,13 @@ import html.parser
 import json
 import math
 import os
+import queue
 import re
 import shutil
 import struct
 import subprocess
 import sys
+import threading
 import time
 import urllib.parse
 import urllib.request
@@ -914,11 +916,14 @@ def file_sha1(path: Path, chunk_size: int = 1024 * 1024) -> str:
 
 
 def hash_file_metadata(path: Path) -> str:
+    # Fingerprint by file name + size only. PyInstaller onefile builds extract
+    # bundled resources to a new %TEMP%\_MEIxxxxxx directory (fresh path and
+    # mtime) on every launch, so including those would invalidate the setup
+    # cache each session and force a full add-on re-verification.
     digest = hashlib.sha1()
     stat = path.stat()
-    digest.update(str(path.resolve()).encode("utf-8", errors="replace"))
+    digest.update(path.name.encode("utf-8", errors="replace"))
     digest.update(str(stat.st_size).encode("ascii"))
-    digest.update(str(int(stat.st_mtime)).encode("ascii"))
     return digest.hexdigest()
 
 
@@ -1095,31 +1100,43 @@ def latest_official_blender_zip_url(progress: ProgressCallback | None = None) ->
     return urllib.parse.urljoin(BLENDER_LTS_INDEX_URL, filename), filename
 
 
-def download_file(url: str, target: Path, progress: ProgressCallback | None = None) -> None:
+def download_file(
+    url: str,
+    target: Path,
+    progress: ProgressCallback | None = None,
+    cancel_check: CancelCheck | None = None,
+) -> None:
     target.parent.mkdir(parents=True, exist_ok=True)
     temp_target = target.with_name(target.name + ".part")
     if temp_target.exists():
         temp_target.unlink()
     request = urllib.request.Request(url, headers={"User-Agent": "MMDCharacterImporter/1.0"})
     emit(progress, f"Downloading {url}")
-    with urllib.request.urlopen(request, timeout=120) as response, temp_target.open("wb") as handle:
-        length_header = response.headers.get("Content-Length")
-        total = int(length_header) if length_header and length_header.isdigit() else 0
-        received = 0
-        last_report = 0.0
-        while True:
-            chunk = response.read(1024 * 512)
-            if not chunk:
-                break
-            handle.write(chunk)
-            received += len(chunk)
-            now = time.monotonic()
-            if now - last_report > 2.0:
-                if total:
-                    emit(progress, f"Downloaded {received / 1024 / 1024:.1f} MB / {total / 1024 / 1024:.1f} MB")
-                else:
-                    emit(progress, f"Downloaded {received / 1024 / 1024:.1f} MB")
-                last_report = now
+    try:
+        with urllib.request.urlopen(request, timeout=120) as response, temp_target.open("wb") as handle:
+            length_header = response.headers.get("Content-Length")
+            total = int(length_header) if length_header and length_header.isdigit() else 0
+            received = 0
+            last_report = 0.0
+            while True:
+                if cancel_check and cancel_check():
+                    raise RuntimeError("operation was cancelled")
+                chunk = response.read(1024 * 512)
+                if not chunk:
+                    break
+                handle.write(chunk)
+                received += len(chunk)
+                now = time.monotonic()
+                if now - last_report > 2.0:
+                    if total:
+                        emit(progress, f"Downloaded {received / 1024 / 1024:.1f} MB / {total / 1024 / 1024:.1f} MB")
+                    else:
+                        emit(progress, f"Downloaded {received / 1024 / 1024:.1f} MB")
+                    last_report = now
+    except BaseException:
+        with contextlib.suppress(OSError):
+            temp_target.unlink()
+        raise
     temp_target.replace(target)
 
 
@@ -1131,7 +1148,7 @@ def valid_zip(path: Path) -> bool:
         return False
 
 
-def blender_zip_path(progress: ProgressCallback | None = None) -> Path:
+def blender_zip_path(progress: ProgressCallback | None = None, cancel_check: CancelCheck | None = None) -> Path:
     if BUNDLED_BLENDER_ZIP.exists() and valid_zip(BUNDLED_BLENDER_ZIP):
         emit(progress, f"Using bundled Blender zip: {BUNDLED_BLENDER_ZIP}")
         return BUNDLED_BLENDER_ZIP
@@ -1143,9 +1160,11 @@ def blender_zip_path(progress: ProgressCallback | None = None) -> Path:
         url, filename = latest_official_blender_zip_url(progress)
         target = downloads / filename
         if not target.exists() or target.stat().st_size <= 0 or not valid_zip(target):
-            download_file(url, target, progress)
+            download_file(url, target, progress, cancel_check=cancel_check)
         return target
     except Exception as exc:
+        if "operation was cancelled" in str(exc):
+            raise
         raise RuntimeError(f"could not download Blender and no valid bundled fallback exists: {exc}") from exc
 
 
@@ -1158,18 +1177,47 @@ def find_blender_exe_in_dir(root: Path) -> Path | None:
     return None
 
 
-def extract_blender(zip_path: Path, progress: ProgressCallback | None = None) -> Path:
+def extract_blender(
+    zip_path: Path,
+    progress: ProgressCallback | None = None,
+    cancel_check: CancelCheck | None = None,
+) -> Path:
     version = parse_version_from_blender_zip_name(zip_path.name)
     target_root = software_blender_root() / version
     existing = find_blender_exe_in_dir(target_root) if target_root.exists() else None
-    if existing:
+    # The "portable" folder is created only after a fully successful extraction,
+    # so it doubles as a completion marker: blender.exe without it means a
+    # previous extraction was interrupted and the install is likely broken.
+    if existing and (existing.parent / "portable").exists():
         emit(progress, f"Using existing portable Blender: {existing}")
         return existing
+    if target_root.exists():
+        emit(progress, f"Removing incomplete portable Blender extraction: {target_root}")
+        shutil.rmtree(target_root, ignore_errors=True)
 
-    target_root.mkdir(parents=True, exist_ok=True)
+    target_root.parent.mkdir(parents=True, exist_ok=True)
+    temp_root = target_root.with_name(target_root.name + ".extracting")
+    if temp_root.exists():
+        shutil.rmtree(temp_root, ignore_errors=True)
+    temp_root.mkdir(parents=True, exist_ok=True)
     emit(progress, f"Extracting Blender {version} to {target_root}")
-    with zipfile.ZipFile(zip_path) as archive:
-        archive.extractall(target_root)
+    try:
+        with zipfile.ZipFile(zip_path) as archive:
+            members = archive.infolist()
+            total = len(members)
+            last_report = time.monotonic()
+            for index, member in enumerate(members, start=1):
+                if cancel_check and cancel_check():
+                    raise RuntimeError("operation was cancelled")
+                archive.extract(member, temp_root)
+                now = time.monotonic()
+                if now - last_report > 2.0:
+                    emit(progress, f"Extracting Blender: {index:,} / {total:,} files ({index * 100 // max(total, 1)}%)")
+                    last_report = now
+    except BaseException:
+        shutil.rmtree(temp_root, ignore_errors=True)
+        raise
+    os.replace(temp_root, target_root)
     blender = find_blender_exe_in_dir(target_root)
     if not blender:
         raise RuntimeError(f"Blender extraction completed but blender.exe was not found under {target_root}")
@@ -1203,6 +1251,33 @@ def is_suppressed_process_output_line(line: str) -> bool:
     )
 
 
+def kill_process_tree(process: subprocess.Popen) -> None:
+    """Terminate a child process and all of its descendants.
+
+    Plain terminate()/kill() on Windows only kills the direct child, which
+    orphans grandchildren such as studiomdl.exe/VTFCmd.exe/gmad.exe spawned by
+    helper scripts; taskkill /T walks the whole tree.
+    """
+
+    if os.name == "nt":
+        with contextlib.suppress(Exception):
+            subprocess.run(
+                ["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+                timeout=15,
+                **hidden_subprocess_kwargs(),
+            )
+    if process.poll() is None:
+        process.terminate()
+    try:
+        process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        with contextlib.suppress(Exception):
+            process.wait(timeout=5)
+
+
 def run_process_streamed(
     command: list[str],
     progress: ProgressCallback | None = None,
@@ -1228,34 +1303,54 @@ def run_process_streamed(
             **hidden_subprocess_kwargs(),
         )
         assert process.stdout is not None
+        # Drain stdout on a dedicated thread so the main loop can poll
+        # cancel_check every ~100 ms even while the subprocess is silent;
+        # a blocking readline() here would make Cancel unresponsive during
+        # long quiet stretches (CoACD, Cycles renders, studiomdl compiles).
+        line_queue: queue.Queue[str | None] = queue.Queue()
+
+        def drain_stdout() -> None:
+            try:
+                for raw_line in process.stdout:
+                    line_queue.put(raw_line)
+            except Exception:
+                pass
+            finally:
+                line_queue.put(None)
+
+        reader_thread = threading.Thread(target=drain_stdout, daemon=True)
+        reader_thread.start()
         cancelled = False
+        stream_finished = False
         while True:
             if cancel_check and cancel_check():
-                process.terminate()
-                try:
-                    process.wait(timeout=10)
-                except subprocess.TimeoutExpired:
-                    process.kill()
+                kill_process_tree(process)
                 cancelled = True
                 break
 
-            line = process.stdout.readline()
-            if line:
-                clean = line.rstrip("\r\n")
-                if is_suppressed_process_output_line(clean):
-                    suppressed_bmesh_shape_warnings += 1
-                    continue
-                output_lines.append(clean)
-                if log_handle:
-                    log_handle.write(clean + "\n")
-                    log_handle.flush()
-                if clean:
-                    emit(progress, clean)
+            try:
+                line = line_queue.get(timeout=0.1)
+            except queue.Empty:
+                if stream_finished and process.poll() is not None:
+                    break
                 continue
 
-            if process.poll() is not None:
-                break
-            time.sleep(0.05)
+            if line is None:
+                stream_finished = True
+                if process.poll() is not None:
+                    break
+                continue
+
+            clean = line.rstrip("\r\n")
+            if is_suppressed_process_output_line(clean):
+                suppressed_bmesh_shape_warnings += 1
+                continue
+            output_lines.append(clean)
+            if log_handle:
+                log_handle.write(clean + "\n")
+                log_handle.flush()
+            if clean:
+                emit(progress, clean)
 
         return_code = process.wait()
         if suppressed_bmesh_shape_warnings:
@@ -1418,6 +1513,7 @@ def verify_and_install_addons(
     blender_exe: Path,
     progress: ProgressCallback | None = None,
     check_only: bool = False,
+    cancel_check: CancelCheck | None = None,
 ) -> str:
     if not BLENDER_SETUP_SCRIPT.exists():
         raise FileNotFoundError(BLENDER_SETUP_SCRIPT)
@@ -1438,6 +1534,8 @@ def verify_and_install_addons(
         str(blender_exe),
         "--background",
         "--factory-startup",
+        "--python-exit-code",
+        "1",
         "--python",
         str(BLENDER_SETUP_SCRIPT),
         "--",
@@ -1457,7 +1555,7 @@ def verify_and_install_addons(
     if check_only:
         command.append("--check-only")
     emit(progress, "Verifying bundled Blender add-ons...")
-    output = run_process_streamed(command, progress=progress)
+    output = run_process_streamed(command, progress=progress, cancel_check=cancel_check)
     if "Blender add-on setup verified." not in output:
         raise RuntimeError("Blender add-on setup did not report successful verification.")
     return output
@@ -1530,11 +1628,14 @@ def _system_blender_candidates() -> list[Path]:
     for base in (program_files, program_files_x86, local_appdata):
         if base:
             search_roots.append(Path(base) / "Blender Foundation")
-    # Steam Blender
+    # Steam Blender: probe only the fixed install location instead of walking
+    # every Steam library with rglob (which can scan 100k+ game files).
     steam_path = _find_steam_dir()
     if steam_path:
         for lib in _find_steam_library_folders(steam_path):
-            search_roots.append(lib / "steamapps" / "common")
+            steam_blender = lib / "steamapps" / "common" / "Blender" / "blender.exe"
+            if steam_blender.exists():
+                candidates.append(steam_blender)
 
     for root in search_roots:
         if not root.exists():
@@ -1599,9 +1700,9 @@ def warn_about_system_blender(progress: ProgressCallback | None = None) -> None:
     _find_system_blender(progress)
 
 
-def find_managed_blender(progress: ProgressCallback | None = None) -> Path:
-    zip_path = blender_zip_path(progress)
-    return extract_blender(zip_path, progress)
+def find_managed_blender(progress: ProgressCallback | None = None, cancel_check: CancelCheck | None = None) -> Path:
+    zip_path = blender_zip_path(progress, cancel_check=cancel_check)
+    return extract_blender(zip_path, progress, cancel_check=cancel_check)
 
 
 def reusable_managed_blender_from_state(state: dict[str, object], progress: ProgressCallback | None = None) -> Path | None:
@@ -1637,7 +1738,10 @@ def reusable_managed_blender_from_state(state: dict[str, object], progress: Prog
     return None
 
 
-def ensure_portable_blender(progress: ProgressCallback | None = None) -> SetupResult:
+def ensure_portable_blender(
+    progress: ProgressCallback | None = None,
+    cancel_check: CancelCheck | None = None,
+) -> SetupResult:
     warn_about_system_blender(progress)
     state = read_setup_state()
     state_blender = setup_state_is_current(state)
@@ -1651,7 +1755,7 @@ def ensure_portable_blender(progress: ProgressCallback | None = None) -> SetupRe
 
     blender = reusable_managed_blender_from_state(state, progress)
     if blender is None:
-        blender = find_managed_blender(progress)
+        blender = find_managed_blender(progress, cancel_check=cancel_check)
     try:
         version, version_source, _version_output = blender_version_details(blender)
     except Exception as exc:
@@ -1682,7 +1786,7 @@ def ensure_portable_blender(progress: ProgressCallback | None = None) -> SetupRe
             "WARNING: Could not read managed Blender version from --version output; "
             f"using version inferred from folder name: {version}.",
         )
-    setup_output = verify_and_install_addons(blender, progress=progress, check_only=False)
+    setup_output = verify_and_install_addons(blender, progress=progress, check_only=False, cancel_check=cancel_check)
     write_setup_state(
         {
             "created_at": time.strftime("%Y-%m-%dT%H:%M:%S"),
@@ -2083,9 +2187,11 @@ def analyze_pmx(pmx_path: Path, source_dir: Path | None = None) -> PmxAnalysis:
                 value = float(position[axis])
                 vertex_bounds_min[axis] = min(vertex_bounds_min[axis], value)
                 vertex_bounds_max[axis] = max(vertex_bounds_max[axis], value)
+        # PMX coordinates are Y-up (mmd_tools converts to Blender's Z-up later),
+        # so the model height is the Y extent (axis index 1).
         model_height = (
-            vertex_bounds_max[2] - vertex_bounds_min[2]
-            if analysis.vertex_count > 0 and all(math.isfinite(value) for value in (vertex_bounds_min[2], vertex_bounds_max[2]))
+            vertex_bounds_max[1] - vertex_bounds_min[1]
+            if analysis.vertex_count > 0 and all(math.isfinite(value) for value in (vertex_bounds_min[1], vertex_bounds_max[1]))
             else 0.0
         )
 
@@ -2244,7 +2350,13 @@ def build_workspace(pmx_path: Path, source_dir: Path, analysis: PmxAnalysis | No
     source_assets_dir = root / "0_source_mmd_assets"
     import_dir = root / "1_import_mmd_model"
     fix_dir = root / "2_fix_model_source_skeleton"
-    rel_pmx = pmx_path.relative_to(source_dir)
+    try:
+        rel_pmx = pmx_path.relative_to(source_dir)
+    except ValueError as exc:
+        raise RuntimeError(
+            f"The PMX file {pmx_path} is not inside the selected model folder {source_dir}. "
+            "Select the folder that contains the PMX file as the source directory."
+        ) from exc
     copied_pmx = source_assets_dir / rel_pmx
     blend_path = import_dir / f"{slugify(pmx_path.stem)}_import.blend"
     fixed_blend_path = fix_dir / f"{slugify(pmx_path.stem)}_fixed.blend"
@@ -2609,23 +2721,42 @@ def release_paths_for_step14_input(input_path: Path) -> tuple[Path, Path, Path, 
 def copy_asset_tree(source_dir: Path, target_dir: Path, progress: ProgressCallback | None = None) -> None:
     source_dir = source_dir.resolve()
     target_dir.mkdir(parents=True, exist_ok=True)
+    files = [path for path in source_dir.rglob("*") if path.is_file()]
+    total_bytes = 0
+    for path in files:
+        try:
+            total_bytes += path.stat().st_size
+        except OSError:
+            pass
+    if total_bytes > 2 * 1024 ** 3:
+        emit(
+            progress,
+            f"WARNING: The selected model folder contains {len(files):,} files "
+            f"({total_bytes / 1024 ** 3:.1f} GB) and the whole folder is copied into the workspace. "
+            "Select the specific model's own folder to avoid duplicating unrelated files.",
+        )
     copied = 0
-    for path in source_dir.rglob("*"):
-        if not path.is_file():
-            continue
+    last_report = time.monotonic()
+    for index, path in enumerate(files, start=1):
         rel = path.relative_to(source_dir)
         target = target_dir / rel
         target.parent.mkdir(parents=True, exist_ok=True)
+        skip = False
         if target.exists():
             try:
                 source_stat = path.stat()
                 target_stat = target.stat()
                 if source_stat.st_size == target_stat.st_size and int(source_stat.st_mtime) == int(target_stat.st_mtime):
-                    continue
+                    skip = True
             except OSError:
                 pass
-        shutil.copy2(path, target)
-        copied += 1
+        if not skip:
+            shutil.copy2(path, target)
+            copied += 1
+        now = time.monotonic()
+        if now - last_report > 2.0:
+            emit(progress, f"Copying source assets: {index:,} / {len(files):,} files")
+            last_report = now
     emit(progress, f"Copied/updated {copied} source asset files into {target_dir}")
 
 
@@ -2635,8 +2766,17 @@ def import_pmx_to_blender(
     progress: ProgressCallback | None = None,
     cancel_check: CancelCheck | None = None,
     workspace_root: Path | None = None,
+    analysis: PmxAnalysis | None = None,
 ) -> ImportResult:
-    analysis = analyze_pmx(pmx_path, source_dir)
+    pmx_path = pmx_path.resolve()
+    source_dir = source_dir.resolve()
+    if not path_is_under(pmx_path, source_dir):
+        raise RuntimeError(
+            f"The PMX file {pmx_path} is not inside the selected model folder {source_dir}. "
+            "Select the folder that contains the PMX file as the source directory."
+        )
+    if analysis is None:
+        analysis = analyze_pmx(pmx_path, source_dir)
     workspace = build_workspace(pmx_path, source_dir, analysis, workspace_root=workspace_root)
     workspace.import_dir.mkdir(parents=True, exist_ok=True)
     workspace.preflight_report_path.write_text(analysis.to_json(), encoding="utf-8")
@@ -2645,11 +2785,13 @@ def import_pmx_to_blender(
     if not workspace.copied_pmx.exists():
         raise FileNotFoundError(f"copied PMX was not found: {workspace.copied_pmx}")
 
-    setup = ensure_portable_blender(progress)
+    setup = ensure_portable_blender(progress, cancel_check=cancel_check)
     command = [
         str(setup.blender_exe),
         "--background",
         "--factory-startup",
+        "--python-exit-code",
+        "1",
         "--python",
         str(BLENDER_IMPORT_SCRIPT),
         "--",
@@ -2696,11 +2838,13 @@ def fix_imported_blend(
     fix_report_path = default_report if output_blend == default_output_blend else fix_dir / "blender_fix_model_report.json"
     fix_dir.mkdir(parents=True, exist_ok=True)
 
-    setup = ensure_portable_blender(progress)
+    setup = ensure_portable_blender(progress, cancel_check=cancel_check)
     command = [
         str(setup.blender_exe),
         "--background",
         "--factory-startup",
+        "--python-exit-code",
+        "1",
         "--python",
         str(BLENDER_FIX_SCRIPT),
         "--",
@@ -2751,11 +2895,13 @@ def analyze_spine_blend(
     log_path = spine_dir / "blender_fix_spine_bones.log"
     spine_dir.mkdir(parents=True, exist_ok=True)
 
-    setup = ensure_portable_blender(progress)
+    setup = ensure_portable_blender(progress, cancel_check=cancel_check)
     command = [
         str(setup.blender_exe),
         "--background",
         "--factory-startup",
+        "--python-exit-code",
+        "1",
         "--python",
         str(BLENDER_SPINE_SCRIPT),
         "--",
@@ -2823,11 +2969,13 @@ def fix_spine_blend(
     else:
         plan_path.write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    setup = ensure_portable_blender(progress)
+    setup = ensure_portable_blender(progress, cancel_check=cancel_check)
     command = [
         str(setup.blender_exe),
         "--background",
         "--factory-startup",
+        "--python-exit-code",
+        "1",
         "--python",
         str(BLENDER_SPINE_SCRIPT),
         "--",
@@ -2886,11 +3034,13 @@ def analyze_sort_bones_blend(
     log_path = sort_dir / "blender_sort_bones.log"
     sort_dir.mkdir(parents=True, exist_ok=True)
 
-    setup = ensure_portable_blender(progress)
+    setup = ensure_portable_blender(progress, cancel_check=cancel_check)
     command = [
         str(setup.blender_exe),
         "--background",
         "--factory-startup",
+        "--python-exit-code",
+        "1",
         "--python",
         str(BLENDER_SORT_BONES_SCRIPT),
         "--",
@@ -2961,11 +3111,13 @@ def sort_bones_blend(
     else:
         plan_path.write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    setup = ensure_portable_blender(progress)
+    setup = ensure_portable_blender(progress, cancel_check=cancel_check)
     command = [
         str(setup.blender_exe),
         "--background",
         "--factory-startup",
+        "--python-exit-code",
+        "1",
         "--python",
         str(BLENDER_SORT_BONES_SCRIPT),
         "--",
@@ -3026,11 +3178,13 @@ def scan_materials_blend(
     log_path = material_dir / "blender_sort_materials.log"
     material_dir.mkdir(parents=True, exist_ok=True)
 
-    setup = ensure_portable_blender(progress)
+    setup = ensure_portable_blender(progress, cancel_check=cancel_check)
     command = [
         str(setup.blender_exe),
         "--background",
         "--factory-startup",
+        "--python-exit-code",
+        "1",
         "--python",
         str(BLENDER_SORT_MATERIALS_SCRIPT),
         "--",
@@ -3099,11 +3253,13 @@ def apply_materials_initial_blend(
     else:
         plan_path.write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    setup = ensure_portable_blender(progress)
+    setup = ensure_portable_blender(progress, cancel_check=cancel_check)
     command = [
         str(setup.blender_exe),
         "--background",
         "--factory-startup",
+        "--python-exit-code",
+        "1",
         "--python",
         str(BLENDER_SORT_MATERIALS_SCRIPT),
         "--",
@@ -3194,11 +3350,13 @@ def merge_materials_blend(
     else:
         merge_plan_path.write_text(json.dumps(merge_plan, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    setup = ensure_portable_blender(progress)
+    setup = ensure_portable_blender(progress, cancel_check=cancel_check)
     command = [
         str(setup.blender_exe),
         "--background",
         "--factory-startup",
+        "--python-exit-code",
+        "1",
         "--python",
         str(BLENDER_SORT_MATERIALS_SCRIPT),
         "--",
@@ -3263,11 +3421,13 @@ def analyze_bodygroups_blend(
     log_path = bodygroup_dir / "blender_sort_bodygroups.log"
     bodygroup_dir.mkdir(parents=True, exist_ok=True)
 
-    setup = ensure_portable_blender(progress)
+    setup = ensure_portable_blender(progress, cancel_check=cancel_check)
     command = [
         str(setup.blender_exe),
         "--background",
         "--factory-startup",
+        "--python-exit-code",
+        "1",
         "--python",
         str(BLENDER_SORT_BODYGROUPS_SCRIPT),
         "--",
@@ -3347,11 +3507,13 @@ def sort_bodygroups_blend(
     else:
         plan_path.write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    setup = ensure_portable_blender(progress)
+    setup = ensure_portable_blender(progress, cancel_check=cancel_check)
     command = [
         str(setup.blender_exe),
         "--background",
         "--factory-startup",
+        "--python-exit-code",
+        "1",
         "--python",
         str(BLENDER_SORT_BODYGROUPS_SCRIPT),
         "--",
@@ -3411,11 +3573,13 @@ def analyze_flexes_blend(
     flex_dir, _output_blend, analysis_path, plan_path, _report_path, _flexes_json = flex_paths_for_bodygroup_blend(input_blend)
     log_path = flex_dir / "blender_sort_flexes.log"
     flex_dir.mkdir(parents=True, exist_ok=True)
-    setup = ensure_portable_blender(progress)
+    setup = ensure_portable_blender(progress, cancel_check=cancel_check)
     command = [
         str(setup.blender_exe),
         "--background",
         "--factory-startup",
+        "--python-exit-code",
+        "1",
         "--python",
         str(BLENDER_SORT_FLEXES_SCRIPT),
         "--",
@@ -3479,11 +3643,13 @@ def sort_flexes_blend(
     else:
         plan_path.write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    setup = ensure_portable_blender(progress)
+    setup = ensure_portable_blender(progress, cancel_check=cancel_check)
     command = [
         str(setup.blender_exe),
         "--background",
         "--factory-startup",
+        "--python-exit-code",
+        "1",
         "--python",
         str(BLENDER_SORT_FLEXES_SCRIPT),
         "--",
@@ -3556,11 +3722,13 @@ def scan_collision_source_bodygroups(
             json.dumps({"additional_groups": additional_bone_groups}, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
-    setup = ensure_portable_blender(progress)
+    setup = ensure_portable_blender(progress, cancel_check=cancel_check)
     command = [
         str(setup.blender_exe),
         "--background",
         "--factory-startup",
+        "--python-exit-code",
+        "1",
         "--python",
         str(BLENDER_SORT_COLLISION_SCRIPT),
         "--",
@@ -3606,11 +3774,13 @@ def scan_collision_bones(
     bones_path = collision_bones_path_for_flex_blend(input_blend)
     log_path = collision_dir / "blender_sort_collision_bones.log"
     collision_dir.mkdir(parents=True, exist_ok=True)
-    setup = ensure_portable_blender(progress)
+    setup = ensure_portable_blender(progress, cancel_check=cancel_check)
     command = [
         str(setup.blender_exe),
         "--background",
         "--factory-startup",
+        "--python-exit-code",
+        "1",
         "--python",
         str(BLENDER_SORT_COLLISION_SCRIPT),
         "--",
@@ -3670,11 +3840,13 @@ def analyze_collision_blend(
             json.dumps({"additional_groups": additional_bone_groups}, ensure_ascii=False, indent=2),
             encoding="utf-8",
         )
-    setup = ensure_portable_blender(progress)
+    setup = ensure_portable_blender(progress, cancel_check=cancel_check)
     command = [
         str(setup.blender_exe),
         "--background",
         "--factory-startup",
+        "--python-exit-code",
+        "1",
         "--python",
         str(BLENDER_SORT_COLLISION_SCRIPT),
         "--",
@@ -3749,11 +3921,13 @@ def sort_collision_blend(
     else:
         plan_path.write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
 
-    setup = ensure_portable_blender(progress)
+    setup = ensure_portable_blender(progress, cancel_check=cancel_check)
     command = [
         str(setup.blender_exe),
         "--background",
         "--factory-startup",
+        "--python-exit-code",
+        "1",
         "--python",
         str(BLENDER_SORT_COLLISION_SCRIPT),
         "--",
@@ -3801,6 +3975,79 @@ def sort_collision_blend(
     )
 
 
+def validate_manual_collision_blend(
+    edited_blend: Path,
+    progress: ProgressCallback | None = None,
+    cancel_check: CancelCheck | None = None,
+) -> dict[str, object]:
+    """Validate a hand-edited collision-sorted blend and re-export Physics.smd.
+
+    Used by the optional Step 8 substep where the user reshapes the Physics
+    mesh in Blender; the validation report carries structured errors (isolated
+    vertices, unweighted geometry, missing Physics object).
+    """
+
+    edited_blend = edited_blend.resolve()
+    if not edited_blend.exists():
+        raise FileNotFoundError(edited_blend)
+    if not BLENDER_SORT_COLLISION_SCRIPT.exists():
+        raise FileNotFoundError(BLENDER_SORT_COLLISION_SCRIPT)
+    collision_dir = edited_blend.parent
+    report_path = collision_dir / "collision_manual_validation_report.json"
+    physics_smd_path = collision_dir / "Physics.smd"
+    log_path = collision_dir / "blender_collision_manual_validation.log"
+    setup = ensure_portable_blender(progress, cancel_check=cancel_check)
+    command = [
+        str(setup.blender_exe),
+        "--background",
+        "--factory-startup",
+        "--python-exit-code",
+        "1",
+        "--python",
+        str(BLENDER_SORT_COLLISION_SCRIPT),
+        "--",
+        "--mode",
+        "validate-manual",
+        "--input-blend",
+        str(edited_blend),
+        "--report-json",
+        str(report_path),
+        "--physics-smd",
+        str(physics_smd_path),
+    ]
+    emit(progress, f"Validating manually edited collision shape: {edited_blend}")
+    started = time.monotonic()
+    report_path.unlink(missing_ok=True)
+    process_error: Exception | None = None
+    try:
+        run_process_streamed(command, progress=progress, log_path=log_path, cancel_check=cancel_check)
+    except Exception as exc:
+        if "cancelled" in str(exc).lower():
+            raise
+        process_error = exc
+    report: dict[str, object] | None = None
+    if report_path.exists():
+        try:
+            loaded = json.loads(report_path.read_text(encoding="utf-8"))
+            report = loaded if isinstance(loaded, dict) else None
+        except Exception:
+            report = None
+    if report is not None:
+        validation = report.get("validation") if isinstance(report.get("validation"), dict) else {}
+        errors = [str(item) for item in validation.get("errors", []) if item] if isinstance(validation.get("errors"), list) else []
+        if errors:
+            raise RuntimeError("Manual collision validation failed:\n- " + "\n- ".join(errors))
+    if process_error is not None:
+        raise process_error
+    if report is None:
+        raise RuntimeError(f"Blender completed but did not write {report_path}")
+    report["report_path"] = str(report_path)
+    report["physics_smd_path"] = str(physics_smd_path)
+    report["log_path"] = str(log_path)
+    emit(progress, f"Manual collision validation finished in {time.monotonic() - started:.1f}s")
+    return report
+
+
 def validate_manual_bodygroups_blend(
     manual_edit_blend: Path,
     output_blend: Path | None = None,
@@ -3821,11 +4068,13 @@ def validate_manual_bodygroups_blend(
     report_path = bodygroup_dir / "blender_sort_bodygroups_report.json"
     bodygroup_dir.mkdir(parents=True, exist_ok=True)
 
-    setup = ensure_portable_blender(progress)
+    setup = ensure_portable_blender(progress, cancel_check=cancel_check)
     command = [
         str(setup.blender_exe),
         "--background",
         "--factory-startup",
+        "--python-exit-code",
+        "1",
         "--python",
         str(BLENDER_SORT_BODYGROUPS_SCRIPT),
         "--",
@@ -3898,11 +4147,13 @@ def run_proportion_export(
     workspace_dir.mkdir(parents=True, exist_ok=True)
     final_dir.mkdir(parents=True, exist_ok=True)
 
-    setup = ensure_portable_blender(progress)
+    setup = ensure_portable_blender(progress, cancel_check=cancel_check)
     command = [
         str(setup.blender_exe),
         "--background",
         "--factory-startup",
+        "--python-exit-code",
+        "1",
         "--python",
         str(BLENDER_PROPORTION_SCRIPT),
         "--",
@@ -3971,11 +4222,13 @@ def run_carms_sort(
         raise FileNotFoundError(BLENDER_CARMS_SCRIPT)
     carms_dir.mkdir(parents=True, exist_ok=True)
     log_path = carms_dir / "blender_sort_carms.log"
-    setup = ensure_portable_blender(progress)
+    setup = ensure_portable_blender(progress, cancel_check=cancel_check)
     command = [
         str(setup.blender_exe),
         "--background",
         "--factory-startup",
+        "--python-exit-code",
+        "1",
         "--python",
         str(BLENDER_CARMS_SCRIPT),
         "--",
@@ -4031,11 +4284,13 @@ def analyze_vrd(
         raise FileNotFoundError(BLENDER_VRD_SCRIPT)
     vrd_dir.mkdir(parents=True, exist_ok=True)
     log_path = vrd_dir / "blender_sort_vrd.log"
-    setup = ensure_portable_blender(progress)
+    setup = ensure_portable_blender(progress, cancel_check=cancel_check)
     command = [
         str(setup.blender_exe),
         "--background",
         "--factory-startup",
+        "--python-exit-code",
+        "1",
         "--python",
         str(BLENDER_VRD_SCRIPT),
         "--",
@@ -4110,11 +4365,13 @@ def apply_vrd(
     else:
         plan_path = default_plan_path
         plan_path.write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
-    setup = ensure_portable_blender(progress)
+    setup = ensure_portable_blender(progress, cancel_check=cancel_check)
     command = [
         str(setup.blender_exe),
         "--background",
         "--factory-startup",
+        "--python-exit-code",
+        "1",
         "--python",
         str(BLENDER_VRD_SCRIPT),
         "--",
@@ -4186,11 +4443,13 @@ def preview_vrd(
     else:
         plan_path = default_plan_path
         plan_path.write_text(json.dumps(plan, ensure_ascii=False, indent=2), encoding="utf-8")
-    setup = ensure_portable_blender(progress)
+    setup = ensure_portable_blender(progress, cancel_check=cancel_check)
     command = [
         str(setup.blender_exe),
         "--background",
         "--factory-startup",
+        "--python-exit-code",
+        "1",
         "--python",
         str(BLENDER_VRD_SCRIPT),
         "--",
@@ -4353,6 +4612,9 @@ def analyze_icons(
 ) -> IconAnalysisResult:
     input_path = input_path.resolve()
     icon_dir, analysis_path, plan_path, report_path, files_path, render_report_path, log_path = icon_paths_for_step1_input(input_path)
+    # Each icon phase gets its own log file so the render log does not
+    # overwrite the analyze output (run_process_streamed opens logs with "w").
+    log_path = icon_dir / "icons_analyze.log"
     if not ICON_PROCESSOR_SCRIPT.exists():
         raise FileNotFoundError(ICON_PROCESSOR_SCRIPT)
     icon_dir.mkdir(parents=True, exist_ok=True)
@@ -4438,7 +4700,7 @@ def run_icons(
     else:
         if not BLENDER_ICON_SCRIPT.exists():
             raise FileNotFoundError(BLENDER_ICON_SCRIPT)
-        setup = ensure_portable_blender(progress)
+        setup = ensure_portable_blender(progress, cancel_check=cancel_check)
         pmx_path = Path(str(plan.get("pmx_path") or ""))
         vmd_path = Path(str(plan.get("body_vmd_path") or plan.get("vmd_path") or DEFAULT_ICON_VMD))
         face_vmds = [Path(str(path)) for path in plan.get("face_vmd_paths", []) if str(path).strip()] if isinstance(plan.get("face_vmd_paths"), list) else []
@@ -4456,6 +4718,8 @@ def run_icons(
             str(setup.blender_exe),
             "--background",
             "--factory-startup",
+            "--python-exit-code",
+            "1",
             "--python",
             str(BLENDER_ICON_SCRIPT),
             "--",
@@ -4507,7 +4771,9 @@ def run_icons(
         process_command.extend(["--icon-basename", icon_basename])
     emit(progress, "Generating Step 13 spawn icon assets...")
     started = time.monotonic()
-    processor_log = log_path if custom_source_image else None
+    # The icon processor logs to its own file so it never overwrites (and is
+    # never discarded because of) the Blender render log written above.
+    processor_log = log_path if custom_source_image else icon_dir / "icons_process.log"
     run_process_streamed(process_command, progress=progress, log_path=processor_log, cancel_check=cancel_check)
     if not report_path.exists():
         raise RuntimeError(f"Icon processing completed but did not write {report_path}")
@@ -4543,6 +4809,7 @@ def analyze_qc(
     studiomdl_path: str = "",
     progress: ProgressCallback | None = None,
     cancel_check: CancelCheck | None = None,
+    gender: str = "female",
 ) -> QcAnalysisResult:
     input_path = input_path.resolve()
     final_dir, qc_dir, analysis_path, plan_path, report_path, files_path, log_path = qc_paths_for_step9_input(input_path)
@@ -4571,6 +4838,8 @@ def analyze_qc(
         command.extend(["--gmod-root", gmod_root])
     if studiomdl_path:
         command.extend(["--studiomdl", studiomdl_path])
+    if str(gender or "").strip().lower() == "male":
+        command.extend(["--gender", "male"])
     emit(progress, f"Starting Step 14 QC analysis: {final_dir}")
     started = time.monotonic()
     run_process_streamed(command, progress=progress, log_path=log_path, cancel_check=cancel_check)
@@ -4950,6 +5219,7 @@ def main(argv: list[str] | None = None) -> int:
     qc_analyze_parser.add_argument("--author", default="")
     qc_analyze_parser.add_argument("--character-category", default="")
     qc_analyze_parser.add_argument("--model-name", default="")
+    qc_analyze_parser.add_argument("--gender", choices=("female", "male"), default="female")
     qc_analyze_parser.add_argument("--gmod-root", default="")
     qc_analyze_parser.add_argument("--studiomdl", default="")
 
@@ -5494,6 +5764,7 @@ def main(argv: list[str] | None = None) -> int:
             gmod_root=args.gmod_root,
             studiomdl_path=args.studiomdl,
             progress=print_progress,
+            gender=args.gender,
         )
         print(
             json.dumps(

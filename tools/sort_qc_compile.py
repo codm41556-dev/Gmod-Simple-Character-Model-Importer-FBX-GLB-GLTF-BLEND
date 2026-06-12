@@ -31,8 +31,8 @@ COMPILED_EXTENSIONS = (".mdl", ".vvd", ".phy", ".dx80.vtx", ".dx90.vtx", ".sw.vt
 OPTIONAL_CANONICAL_MODEL_SMDS = ("Body.smd", "Face.smd")
 OPTIONAL_CANONICAL_SMD_WARNING_PREFIX = "Optional canonical SMD missing:"
 SAFE_RE = re.compile(r"[^A-Za-z0-9_]+")
-INTERNAL_IDENTIFIER_RE = re.compile(r"^[A-Za-z_]+$")
-DISPLAY_IDENTIFIER_RE = re.compile(r"^[A-Za-z_ ]+$")
+INTERNAL_IDENTIFIER_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+DISPLAY_IDENTIFIER_RE = re.compile(r"^[A-Za-z0-9_ ]+$")
 CATEGORY_DISPLAY_RE = re.compile(r"^[\x20-\x7E]+$")
 KNOWN_CATEGORY_READABLE_OVERRIDES = {
     "honkai_star_rail": "Honkai: Star Rail",
@@ -46,32 +46,80 @@ DEFINEBONE_RE = re.compile(
 BAD_OPEN_BRACE_RE = re.compile(r"\((?P<line>\d+)\):\s*-\s*bad command\s+\{", re.IGNORECASE)
 
 ESSENTIAL_EXACT = {"ZArmTwist_L", "ZArmTwist_R", "ZHandTwist_L", "ZHandTwist_R", "Eye_L", "Eye_R"}
-PLAYER_ANIMATION_INCLUDES = [
-    'f_anm.mdl',
-    'f_anm.mdl',
-    'f_gst.mdl',
-    'f_pst.mdl',
-    'f_shd.mdl',
-    'f_ss.mdl',
-    'humans/female_shared.mdl',
-    'humans/female_ss.mdl',
-    'humans/female_gestures.mdl',
-    'humans/female_postures.mdl',
-    'alyx_animations.mdl',
-    'alyx_postures.mdl',
-    'humans/female_shared.mdl',
-    'humans/female_ss.mdl',
-]
-NPC_ANIMATION_INCLUDES = [
-    'humans/female_shared.mdl',
-    'humans/female_ss.mdl',
-    'humans/female_gestures.mdl',
-    'humans/female_postures.mdl',
-    'alyx_animations.mdl',
-    'alyx_postures.mdl',
-    'humans/female_shared.mdl',
-    'humans/female_ss.mdl',
-]
+GENDER_CHOICES = ("female", "male")
+GENDER_ANIMATION_INCLUDES = {
+    "female": {
+        "player": [
+            'f_anm.mdl',
+            'f_gst.mdl',
+            'f_pst.mdl',
+            'f_shd.mdl',
+            'f_ss.mdl',
+            'humans/female_shared.mdl',
+            'humans/female_ss.mdl',
+            'humans/female_gestures.mdl',
+            'humans/female_postures.mdl',
+            'alyx_animations.mdl',
+            'alyx_postures.mdl',
+        ],
+        "npc": [
+            'humans/female_shared.mdl',
+            'humans/female_ss.mdl',
+            'humans/female_gestures.mdl',
+            'humans/female_postures.mdl',
+            'alyx_animations.mdl',
+            'alyx_postures.mdl',
+        ],
+        "reference_smd": "reference_female",
+    },
+    "male": {
+        "player": [
+            'm_anm.mdl',
+            'm_gst.mdl',
+            'm_pst.mdl',
+            'm_shd.mdl',
+            'm_ss.mdl',
+            'humans/male_shared.mdl',
+            'humans/male_ss.mdl',
+            'humans/male_gestures.mdl',
+            'humans/male_postures.mdl',
+        ],
+        "npc": [
+            'humans/male_shared.mdl',
+            'humans/male_ss.mdl',
+            'humans/male_gestures.mdl',
+            'humans/male_postures.mdl',
+        ],
+        "reference_smd": "reference_male",
+    },
+}
+# Back-compat aliases (female remains the default animation set).
+PLAYER_ANIMATION_INCLUDES = GENDER_ANIMATION_INCLUDES["female"]["player"]
+NPC_ANIMATION_INCLUDES = GENDER_ANIMATION_INCLUDES["female"]["npc"]
+
+
+def normalize_gender(value: object) -> str:
+    text = str(value or "").strip().lower()
+    return text if text in GENDER_CHOICES else "female"
+
+
+def gendered_reference_name(plan: dict, anims_dir: Path, warnings: list | None = None) -> str:
+    """Pick the reference SMD for the plan's gender, falling back to female.
+
+    Step 9 exports both reference_female.smd and reference_male.smd, but older
+    workspaces may predate the male export; never emit a QC that cannot compile.
+    """
+
+    gender = normalize_gender(plan.get("gender"))
+    reference = str(GENDER_ANIMATION_INCLUDES[gender]["reference_smd"])
+    if gender != "female" and not (anims_dir / f"{reference}.smd").exists():
+        if warnings is not None:
+            warnings.append(
+                f"anims/{reference}.smd was not found in the Step 9 export; the female reference pose is used instead. "
+                "Re-run Step 9 to regenerate both reference animations."
+            )
+        return "reference_female"
+    return reference
 HBOX_GROUPS = {
     "ValveBiped.Bip01_Pelvis": 3,
     "ValveBiped.Bip01_L_Thigh": 6,
@@ -101,9 +149,13 @@ def emit(message: str) -> None:
     print(f"[Step14 QC] {message}", flush=True)
 
 
-def write_json(path: Path, data: dict[str, Any]) -> None:
+def write_json(path: Path, data: dict[str, Any], compact: bool = False) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    if compact:
+        text = json.dumps(data, ensure_ascii=False, separators=(",", ":"))
+    else:
+        text = json.dumps(data, ensure_ascii=False, indent=2)
+    path.write_text(text, encoding="utf-8")
 
 
 def compact_command_output_excerpt(text: str, max_lines: int = STUDIOMDL_FAILURE_EXCERPT_LINES) -> str:
@@ -175,6 +227,19 @@ def path_is_ascii(path: Path | str) -> bool:
 
 
 def external_tool_root() -> Path:
+    # VTFCmd/gmad use ANSI file APIs, so the staging root itself must be ASCII.
+    # %LOCALAPPDATA%/%TEMP%/home all live under C:\Users\<username> and are
+    # non-ASCII for non-ASCII Windows usernames; fall back to a guaranteed
+    # ASCII location in that case.
+    for raw in (os.environ.get("LOCALAPPDATA"), os.environ.get("TEMP"), str(Path.home())):
+        if raw and path_is_ascii(raw):
+            return Path(raw) / "MMDCharacterImporter" / "external_tool_staging"
+    if os.name == "nt":
+        system_root = Path(os.environ.get("SystemRoot") or r"C:\Windows")
+        candidate = system_root / "Temp"
+        if path_is_ascii(candidate):
+            return candidate / "MMDCharacterImporter" / "external_tool_staging"
+        return Path(system_root.anchor or "C:\\") / "MMDCharacterImporter" / "external_tool_staging"
     base = Path(os.environ.get("LOCALAPPDATA") or os.environ.get("TEMP") or Path.home())
     return base / "MMDCharacterImporter" / "external_tool_staging"
 
@@ -195,8 +260,8 @@ def external_safe_qc_source_dir(qc_dir: Path) -> Path:
 
 def ensure_external_safe_qc_source(plan: dict[str, Any], warnings: list[str]) -> None:
     qc_dir = Path(str(plan.get("qc_dir") or ""))
-    source_dir = Path(str(plan.get("source_dir") or ""))
-    if not source_dir or not path_is_ascii(source_dir):
+    raw_source_dir = str(plan.get("source_dir") or "").strip()
+    if not raw_source_dir or not path_is_ascii(raw_source_dir):
         safe_source_dir = external_safe_qc_source_dir(qc_dir)
         plan["source_dir"] = str(safe_source_dir)
         warnings.append(
@@ -215,13 +280,15 @@ def safe_lower(value: str, fallback: str = "model") -> str:
 
 
 def safe_internal_identifier(value: str, fallback: str = "model") -> str:
-    text = re.sub(r"[^A-Za-z_]+", "_", str(value or "").strip())
+    text = re.sub(r"[^A-Za-z0-9_]+", "_", str(value or "").strip())
     text = re.sub(r"_+", "_", text).strip("_")
+    if text and text[0].isdigit():
+        text = "_" + text
     return text[:80] or fallback
 
 
 def safe_display_identifier(value: str, fallback: str = "Model") -> str:
-    text = re.sub(r"[^A-Za-z_ ]+", "", str(value or "").strip())
+    text = re.sub(r"[^A-Za-z0-9_ ]+", "", str(value or "").strip())
     text = re.sub(r"\s+", " ", text).strip()
     return text[:120] or fallback
 
@@ -1055,12 +1122,13 @@ def build_preview(smds: list[SmdData], texture_map: dict[str, dict[str, Any]]) -
                     "preview_color": color_from_string(uid),
                 }
             if len(all_triangles) < MAX_PREVIEW_TRIANGLES:
+                # texture_path is intentionally omitted per triangle; the preview
+                # resolves it from the material entry's base_color_path via material_uid.
                 all_triangles.append(
                     {
                         "material_uid": uid,
                         "points": [vertex["pos"] for vertex in triangle["vertices"]],
                         "uvs": [vertex["uv"] for vertex in triangle["vertices"]],
-                        "texture_path": texture_path,
                     }
                 )
     return list(material_entries.values()), {"source_triangle_count": source_count, "triangles": all_triangles}
@@ -1165,7 +1233,7 @@ def load_smds(smd_files: list[str]) -> tuple[list[SmdData], dict[int, SmdNode]]:
     return smds, nodes
 
 
-def analyze(input_path: Path, author: str = "", category: str = "", model_name: str = "", gmod_root: str = "", studiomdl_path: str = "") -> dict[str, Any]:
+def analyze(input_path: Path, author: str = "", category: str = "", model_name: str = "", gmod_root: str = "", studiomdl_path: str = "", gender: str = "female") -> dict[str, Any]:
     paths = qc_paths_for_input(input_path)
     qc_dir = paths["qc_dir"]
     qc_dir.mkdir(parents=True, exist_ok=True)
@@ -1181,6 +1249,19 @@ def analyze(input_path: Path, author: str = "", category: str = "", model_name: 
     add_optional_canonical_smd_warnings(warnings, step9_dir)
     if not (step9_dir / "Physics.smd").exists() and Path(discovered["step8_physics_settings"]).exists():
         errors.append("Physics.smd is missing but Step 8 collision settings exist.")
+    if step9_dir.exists():
+        for anim_name in ("reference_female.smd", "proportions.smd"):
+            anim_path = step9_dir / "anims" / anim_name
+            if not anim_path.exists():
+                errors.append(
+                    f"Required animation SMD is missing: {anim_path}. "
+                    "The generated QC references anims/reference_female and anims/proportions and cannot compile without them."
+                )
+        if normalize_gender(gender) == "male" and not (step9_dir / "anims" / "reference_male.smd").exists():
+            warnings.append(
+                "anims/reference_male.smd was not found in the Step 9 export; the compile will fall back to the "
+                "female reference pose. Re-run Step 9 to regenerate both reference animations."
+            )
     texture_manifest = Path(discovered["step12_manifest"])
     if not texture_manifest.exists():
         warnings.append("Step 12 texture manifest was not found; material conversion will be incomplete.")
@@ -1208,7 +1289,12 @@ def analyze(input_path: Path, author: str = "", category: str = "", model_name: 
     workspace_name = Path(discovered["workspace_root"]).name
     workspace_stem = re.sub(r"_[0-9a-f]{8,}$", "", workspace_name, flags=re.IGNORECASE)
     default_model = safe_internal_identifier(model_name or workspace_stem, "mmd_model")
+    # The author namespace is fixed; validate_plan() requires exactly "sheepylord".
     safe_author = "sheepylord"
+    if author and safe_internal_identifier(author, safe_author).lower() != safe_author:
+        warnings.append(
+            f'The --author value "{author}" is ignored; the author namespace is fixed to "{safe_author}".'
+        )
     safe_category = safe_internal_identifier(category or "SheepyLord", "SheepyLord")
     plan = {
         "version": 1,
@@ -1224,6 +1310,7 @@ def analyze(input_path: Path, author: str = "", category: str = "", model_name: 
         "author": safe_author,
         "character_category": safe_category,
         "model_name": default_model,
+        "gender": normalize_gender(gender),
         "display_name": display_from_identifier(default_model, "Mmd Model"),
         "category_readable": category_display_from_identifier(safe_category, "Sheepy Lord"),
         "gmod": gmod,
@@ -1258,7 +1345,7 @@ def analyze(input_path: Path, author: str = "", category: str = "", model_name: 
         "warnings": warnings,
         "validation_errors": errors,
     }
-    write_json(paths["analysis"], analysis)
+    write_json(paths["analysis"], analysis, compact=True)
     write_json(paths["plan"], plan)
     emit(f"Wrote QC analysis: {paths['analysis']}")
     emit(f"Wrote QC plan: {paths['plan']}")
@@ -1308,7 +1395,16 @@ def distribution_compile_source_copy_dir(distribution_output_dir: Path, model: s
 
 
 def prepare_qc_source(plan: dict[str, Any]) -> Path:
-    source_dir = Path(str(plan["source_dir"]))
+    raw_source_dir = str(plan.get("source_dir") or "").strip()
+    if not raw_source_dir:
+        raise RuntimeError("QC plan source_dir is empty; refusing to prepare the QC source folder.")
+    source_dir = Path(raw_source_dir)
+    resolved_source_dir = source_dir.resolve()
+    if resolved_source_dir == Path.cwd().resolve() or resolved_source_dir.parent == resolved_source_dir:
+        raise RuntimeError(
+            f"QC plan source_dir resolves to an unsafe location ({resolved_source_dir}); "
+            "refusing to delete and recreate it."
+        )
     if source_dir.exists():
         shutil.rmtree(source_dir)
     source_dir.mkdir(parents=True, exist_ok=True)
@@ -1430,7 +1526,8 @@ def base_qc_lines(
     lines.append('$ikchain "lfoot" "ValveBiped.Bip01_L_Foot" knee 0.707 -0.707 0 \n\n')
     lines.append('$ikautoplaylock "rfoot" 0.7 0.1 \n')
     lines.append('$ikautoplaylock "lfoot" 0.7 0.1 \n\n')
-    lines.append('$sequence reference "anims/reference_female" fps 1 \n')
+    reference_name = gendered_reference_name(plan, source_dir / "anims")
+    lines.append(f'$sequence reference "anims/{reference_name}" fps 1 \n')
     lines.append('$origin 0 0 -2.40 \n\n')
     lines.append('$animation a_proportions "anims/proportions" subtract reference 0 \n\n')
     lines.append('$sequence proportions a_proportions predelta autoplay \n\n')
@@ -1441,7 +1538,8 @@ def base_qc_lines(
     lines.append('\tfadeout 0.2\n')
     lines.append('\tfps 60\n')
     lines.append('}\n\n')
-    for include in (PLAYER_ANIMATION_INCLUDES if pm else NPC_ANIMATION_INCLUDES):
+    gender_includes = GENDER_ANIMATION_INCLUDES[normalize_gender(plan.get("gender"))]
+    for include in (gender_includes["player"] if pm else gender_includes["npc"]):
         lines.append(f'$includemodel "{include}" \n')
     lines.append("\n")
     if include_collision and (source_dir / "Physics.smd").exists():
@@ -1928,7 +2026,7 @@ def write_lines(path: Path, lines: list[str]) -> None:
 
 def run_command(command: list[str], log_path: Path, cwd: Path | None = None) -> tuple[int, str]:
     emit("Running: " + " ".join(f'"{part}"' if " " in str(part) else str(part) for part in command))
-    completed = subprocess.run(
+    process = subprocess.Popen(
         command,
         cwd=str(cwd) if cwd else None,
         text=True,
@@ -1938,12 +2036,18 @@ def run_command(command: list[str], log_path: Path, cwd: Path | None = None) -> 
         stderr=subprocess.STDOUT,
         **hidden_subprocess_kwargs(),
     )
+    captured: list[str] = []
+    if process.stdout is not None:
+        for raw_line in process.stdout:
+            captured.append(raw_line)
+            line = raw_line.rstrip("\r\n")
+            if "$definebone" in line or "$hbox" in line or "ERROR" in line.upper() or "WARNING" in line.upper():
+                emit(line)
+    returncode = process.wait()
+    output = "".join(captured)
     log_path.parent.mkdir(parents=True, exist_ok=True)
-    log_path.write_text(completed.stdout or "", encoding="utf-8")
-    for line in (completed.stdout or "").splitlines():
-        if "$definebone" in line or "$hbox" in line or "ERROR" in line.upper() or "WARNING" in line.upper():
-            emit(line)
-    return completed.returncode, completed.stdout or ""
+    log_path.write_text(output, encoding="utf-8")
+    return returncode, output
 
 
 def extract_definebones(output: str) -> list[str]:
@@ -2286,13 +2390,16 @@ def validate_plan(plan: dict[str, Any]) -> list[str]:
     for field in ("author", "character_category", "model_name"):
         value = str(plan.get(field) or "")
         if not value or not INTERNAL_IDENTIFIER_RE.fullmatch(value):
-            errors.append(f"{field} must contain only English letters and underscores.")
+            errors.append(f"{field} must contain only English letters, digits, and underscores, and must not start with a digit.")
     category_readable = str(plan.get("category_readable") or "")
     if not category_readable or not CATEGORY_DISPLAY_RE.fullmatch(category_readable):
         errors.append("category_readable must contain only printable ASCII characters.")
+    raw_gender = plan.get("gender")
+    if raw_gender is not None and str(raw_gender).strip().lower() not in GENDER_CHOICES:
+        errors.append('gender must be "female" or "male".')
     display_name = str(plan.get("display_name") or "")
     if not display_name or not DISPLAY_IDENTIFIER_RE.fullmatch(display_name):
-        errors.append("display_name must contain only English letters, spaces, and underscores.")
+        errors.append("display_name must contain only English letters, digits, spaces, and underscores.")
     if str(plan.get("author") or "") != "sheepylord":
         errors.append('author must be exactly "sheepylord".')
     gmod = plan.get("gmod") if isinstance(plan.get("gmod"), dict) else {}
@@ -2388,52 +2495,57 @@ def convert_one_vtf(vtfcmd: Path, image_path: Path, output_dir: Path) -> Path:
     actual_image = image_path
     actual_output_dir = output_dir
     staged_expected: Path | None = None
+    scratch: Path | None = None
     normalize_for_vtf, original_size, target_side = texture_needs_vtf_normalization(image_path)
     needs_staging = normalize_for_vtf or not path_is_ascii(image_path) or not path_is_ascii(output_dir)
-    if needs_staging:
-        scratch_key = output_dir / f"{image_path.name}_{'pot' if normalize_for_vtf else 'ascii'}"
-        scratch = external_safe_dir_for(scratch_key, "vtf")
-        if scratch.exists():
-            shutil.rmtree(scratch)
-        scratch_input = scratch / "input"
-        scratch_output = scratch / "output"
-        scratch_input.mkdir(parents=True, exist_ok=True)
-        scratch_output.mkdir(parents=True, exist_ok=True)
-        safe_stem = safe_name(image_path.stem, "texture")
-        if normalize_for_vtf:
-            actual_image = scratch_input / f"{safe_stem}.png"
-            _before, after_size = write_vtf_safe_texture_copy(image_path, actual_image, target_side)
-            emit(
-                "Normalized texture for VTFCmd power-of-two conversion: "
-                f"{image_path.name} {original_size[0]}x{original_size[1]} -> {after_size[0]}x{after_size[1]}"
-            )
-        else:
-            actual_image = scratch_input / f"{safe_stem}{image_path.suffix.lower()}"
-            shutil.copyfile(image_path, actual_image)
-        actual_output_dir = scratch_output
-        staged_expected = actual_output_dir / f"{actual_image.stem}.vtf"
-        if not path_is_ascii(image_path) or not path_is_ascii(output_dir):
-            emit(f"Staging VTF conversion through ASCII path: {actual_image}")
-    command = [str(vtfcmd), "-file", str(actual_image), "-output", str(actual_output_dir), "-silent"]
-    completed = subprocess.run(
-        command,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        cwd=str(vtfcmd.parent),
-        **hidden_subprocess_kwargs(),
-    )
-    if completed.returncode != 0:
-        raise RuntimeError(f"VTFCmd failed for {image_path.name}: {completed.stdout}")
-    if staged_expected is not None:
-        if not staged_expected.exists():
-            raise RuntimeError(f"VTFCmd finished but did not create {staged_expected.name}")
-        shutil.copyfile(staged_expected, expected)
-    if not expected.exists():
-        raise RuntimeError(f"VTFCmd finished but did not create {expected.name}")
-    return expected
+    try:
+        if needs_staging:
+            scratch_key = output_dir / f"{image_path.name}_{'pot' if normalize_for_vtf else 'ascii'}"
+            scratch = external_safe_dir_for(scratch_key, "vtf")
+            if scratch.exists():
+                shutil.rmtree(scratch)
+            scratch_input = scratch / "input"
+            scratch_output = scratch / "output"
+            scratch_input.mkdir(parents=True, exist_ok=True)
+            scratch_output.mkdir(parents=True, exist_ok=True)
+            safe_stem = safe_name(image_path.stem, "texture")
+            if normalize_for_vtf:
+                actual_image = scratch_input / f"{safe_stem}.png"
+                _before, after_size = write_vtf_safe_texture_copy(image_path, actual_image, target_side)
+                emit(
+                    "Normalized texture for VTFCmd power-of-two conversion: "
+                    f"{image_path.name} {original_size[0]}x{original_size[1]} -> {after_size[0]}x{after_size[1]}"
+                )
+            else:
+                actual_image = scratch_input / f"{safe_stem}{image_path.suffix.lower()}"
+                shutil.copyfile(image_path, actual_image)
+            actual_output_dir = scratch_output
+            staged_expected = actual_output_dir / f"{actual_image.stem}.vtf"
+            if not path_is_ascii(image_path) or not path_is_ascii(output_dir):
+                emit(f"Staging VTF conversion through ASCII path: {actual_image}")
+        command = [str(vtfcmd), "-file", str(actual_image), "-output", str(actual_output_dir), "-silent"]
+        completed = subprocess.run(
+            command,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            cwd=str(vtfcmd.parent),
+            **hidden_subprocess_kwargs(),
+        )
+        if completed.returncode != 0:
+            raise RuntimeError(f"VTFCmd failed for {image_path.name}: {completed.stdout}")
+        if staged_expected is not None:
+            if not staged_expected.exists():
+                raise RuntimeError(f"VTFCmd finished but did not create {staged_expected.name}")
+            shutil.copyfile(staged_expected, expected)
+        if not expected.exists():
+            raise RuntimeError(f"VTFCmd finished but did not create {expected.name}")
+        return expected
+    finally:
+        if scratch is not None and scratch.exists():
+            shutil.rmtree(scratch, ignore_errors=True)
 
 
 def write_vmt(path: Path, author: str, model_name: str, material_name: str, has_normal: bool) -> None:
@@ -3011,30 +3123,35 @@ def package_addon_gma(addon_dir: Path, output_gma: Path, gmod: dict[str, Any], l
     actual_addon_dir = addon_dir
     actual_output_gma = output_gma
     staged_output: Path | None = None
-    if not path_is_ascii(addon_dir) or not path_is_ascii(output_gma):
-        scratch = external_safe_dir_for(output_gma, "gmad")
-        if scratch.exists():
-            shutil.rmtree(scratch)
-        scratch.mkdir(parents=True, exist_ok=True)
-        actual_addon_dir = scratch / safe_name(addon_dir.name, "addon")
-        copytree_clean(addon_dir, actual_addon_dir)
-        actual_output_gma = scratch / f"{safe_name(output_gma.stem, 'addon')}.gma"
-        staged_output = actual_output_gma
-        emit(f"Staging GMA packaging through ASCII path: {actual_addon_dir}")
-    code, output = run_command(
-        [str(gmad), "create", "-folder", str(actual_addon_dir), "-out", str(actual_output_gma)],
-        log_path,
-        cwd=actual_addon_dir.parent,
-    )
-    if code != 0:
-        raise RuntimeError(f"gmad failed with exit code {code}; see {log_path}")
-    if staged_output is not None:
-        if not staged_output.exists():
-            raise RuntimeError(f"gmad completed but did not write staged output {staged_output}. Output:\n{output}")
-        shutil.copyfile(staged_output, output_gma)
-    if not output_gma.exists():
-        raise RuntimeError(f"gmad completed but did not write {output_gma}. Output:\n{output}")
-    return output_gma
+    scratch: Path | None = None
+    try:
+        if not path_is_ascii(addon_dir) or not path_is_ascii(output_gma):
+            scratch = external_safe_dir_for(output_gma, "gmad")
+            if scratch.exists():
+                shutil.rmtree(scratch)
+            scratch.mkdir(parents=True, exist_ok=True)
+            actual_addon_dir = scratch / safe_name(addon_dir.name, "addon")
+            copytree_clean(addon_dir, actual_addon_dir)
+            actual_output_gma = scratch / f"{safe_name(output_gma.stem, 'addon')}.gma"
+            staged_output = actual_output_gma
+            emit(f"Staging GMA packaging through ASCII path: {actual_addon_dir}")
+        code, output = run_command(
+            [str(gmad), "create", "-folder", str(actual_addon_dir), "-out", str(actual_output_gma)],
+            log_path,
+            cwd=actual_addon_dir.parent,
+        )
+        if code != 0:
+            raise RuntimeError(f"gmad failed with exit code {code}; see {log_path}")
+        if staged_output is not None:
+            if not staged_output.exists():
+                raise RuntimeError(f"gmad completed but did not write staged output {staged_output}. Output:\n{output}")
+            shutil.copyfile(staged_output, output_gma)
+        if not output_gma.exists():
+            raise RuntimeError(f"gmad completed but did not write {output_gma}. Output:\n{output}")
+        return output_gma
+    finally:
+        if scratch is not None and scratch.exists():
+            shutil.rmtree(scratch, ignore_errors=True)
 
 
 def build_carms_qc(plan: dict[str, Any], source_dir: Path, definebones: list[str]) -> Path | None:
@@ -3067,7 +3184,8 @@ def build_carms_qc(plan: dict[str, Any], source_dir: Path, definebones: list[str
     lines.append('$ikchain "lfoot" "ValveBiped.Bip01_L_Foot" knee 0.707 -0.707 0 \n\n')
     lines.append('$ikautoplaylock "rfoot" 0.7 0.1 \n')
     lines.append('$ikautoplaylock "lfoot" 0.7 0.1 \n\n')
-    lines.append('$sequence reference "anims/reference_female" fps 1 \n')
+    carms_reference = gendered_reference_name(plan, carms_work / "anims")
+    lines.append(f'$sequence reference "anims/{carms_reference}" fps 1 \n')
     lines.append('$origin 0 0 -2.40 \n\n')
     lines.append('$animation a_proportions "anims/proportions" subtract reference 0 \n\n')
     lines.append('$sequence proportions a_proportions predelta autoplay \n\n')
@@ -3199,9 +3317,19 @@ def compose(plan_path: Path) -> dict[str, Any]:
     )
     hbox_log = qc_dir / "compile_hbox.log"
     emit("Running studiomdl -h for hitbox capture.")
-    _code, hbox_output = run_command([str(studiomdl), "-game", str(game_dir), "-nop4", "-verbose", "-h", str(hbox_probe_qc)], hbox_log, cwd=source_dir)
+    hbox_code, hbox_output = run_command([str(studiomdl), "-game", str(game_dir), "-nop4", "-verbose", "-h", str(hbox_probe_qc)], hbox_log, cwd=source_dir)
     hboxes = extract_hboxes(hbox_output)
     emit(f"Captured {len(hboxes)} hitbox lines.")
+    if hbox_code != 0 or not hboxes:
+        hbox_warning = (
+            f"Hitbox probe {'failed with exit code ' + str(hbox_code) if hbox_code != 0 else 'completed'}"
+            " but produced no usable $hbox lines; the compiled model will use auto-generated hitboxes. "
+            f"See {hbox_log}"
+        ) if not hboxes else (
+            f"Hitbox probe exited with code {hbox_code}; captured $hbox lines may be incomplete. See {hbox_log}"
+        )
+        warnings.append(hbox_warning)
+        emit("WARNING: " + hbox_warning)
 
     main_qc = source_dir / "compile.qc"
     pm_qc = source_dir / "compile_pm.qc"
@@ -3252,6 +3380,18 @@ def compose(plan_path: Path) -> dict[str, Any]:
         inserted_retry = retry_report.get("inserted_bones", [])
         if not inserted_retry:
             missing_text = ", ".join(sorted(missing, key=natural_key))
+            unrecoverable = {str(name) for name in retry_report.get("unrecoverable_missing_parents", []) if str(name)}
+            if unrecoverable and set(missing) <= unrecoverable:
+                # StudioMDL compiled successfully (compile_one raised otherwise) and the
+                # missing parents exist in no source SMD, so demote to a warning instead
+                # of failing a usable compile.
+                warning = (
+                    f"{qc_path.name} compiled with missing parent definebone warning(s) that cannot be repaired "
+                    f"(parent bones exist in no source SMD): {missing_text}. See {log_path}"
+                )
+                warnings.append(warning)
+                emit("WARNING: " + warning)
+                return output, False
             raise RuntimeError(f"Could not repair missing parent definebones for {qc_path.name}: {missing_text}")
         emit("Inserted retry definebones: " + ", ".join(str(name) for name in inserted_retry))
         definebones = repaired_definebones
@@ -3263,6 +3403,20 @@ def compose(plan_path: Path) -> dict[str, Any]:
         retry_missing, retry_warnings = parse_missing_parent_warnings(retry_output)
         if retry_missing:
             missing_text = ", ".join(sorted(retry_missing, key=natural_key))
+            unrecoverable = {
+                str(name)
+                for repair in definebone_repair_reports
+                for name in repair.get("unrecoverable_missing_parents", [])
+                if str(name)
+            }
+            if unrecoverable and set(retry_missing) <= unrecoverable:
+                warning = (
+                    f"{qc_path.name} compiled with missing parent definebone warning(s) that cannot be repaired "
+                    f"(parent bones exist in no source SMD): {missing_text}. See {retry_log}"
+                )
+                warnings.append(warning)
+                emit("WARNING: " + warning)
+                return retry_output, True
             raise RuntimeError(
                 f"StudioMDL still reports missing parent definebones after retry for {qc_path.name}: {missing_text}. "
                 f"See {retry_log}"
@@ -3463,11 +3617,11 @@ def compose(plan_path: Path) -> dict[str, Any]:
     if str(distribution_output_dir).strip() and str(distribution_output_dir) != ".":
         emit(f"Copying final addon package to user-selected folder: {distribution_output_dir}")
         try:
-            distribution_output_dir.mkdir(parents=True, exist_ok=True)
             if path_is_inside(distribution_output_dir, addon_dir):
                 raise RuntimeError("The selected distribution folder cannot be inside the composed addon folder.")
             if compile_source_copy_dir.exists() and path_is_inside(distribution_output_dir, compile_source_copy_dir):
                 raise RuntimeError("The selected distribution folder cannot be inside the QC compile source folder.")
+            distribution_output_dir.mkdir(parents=True, exist_ok=True)
             distribution_addon_dir = distribution_output_dir / addon_dir.name
             if same_resolved_path(distribution_addon_dir, addon_dir):
                 generated_files.append(folder_row(distribution_addon_dir, "distribution_addon_folder", ["Already composed in this folder."]))
@@ -3608,6 +3762,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--author", default="")
     parser.add_argument("--character-category", default="")
     parser.add_argument("--model-name", default="")
+    parser.add_argument("--gender", choices=GENDER_CHOICES, default="female")
     parser.add_argument("--gmod-root", default="")
     parser.add_argument("--studiomdl", default="")
     return parser.parse_args()
@@ -3622,7 +3777,7 @@ def main() -> int:
                 pass
     args = parse_args()
     if args.mode == "analyze":
-        result = analyze(args.input, args.author, args.character_category, args.model_name, args.gmod_root, args.studiomdl)
+        result = analyze(args.input, args.author, args.character_category, args.model_name, args.gmod_root, args.studiomdl, args.gender)
         if args.analysis_json and Path(result["paths"]["analysis"]) != args.analysis_json:
             shutil.copyfile(result["paths"]["analysis"], args.analysis_json)
         if Path(result["paths"]["plan"]) != args.plan_json:

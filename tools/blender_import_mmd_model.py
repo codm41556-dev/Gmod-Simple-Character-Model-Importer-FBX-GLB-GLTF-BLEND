@@ -36,9 +36,12 @@ def operator_keywords(operator, desired: dict[str, object]) -> dict[str, object]
 def call_operator(operator, **desired):
     kwargs = operator_keywords(operator, desired)
     try:
-        return operator(**kwargs)
+        result = operator(**kwargs)
     except Exception as exc:
         raise RuntimeError(f"{operator.idname()} failed with arguments {sorted(kwargs)}: {exc}") from exc
+    if isinstance(result, set) and "CANCELLED" in result:
+        raise RuntimeError(f"{operator.idname()} was cancelled by Blender/CATS")
+    return result
 
 
 def cats_registered() -> bool:
@@ -131,6 +134,18 @@ def import_with_cats(pmx_path: Path) -> None:
     print(f"Imported PMX with CATS: {pmx_path}")
 
 
+def validate_imported_scene(pmx_path: Path) -> None:
+    imported_meshes = [obj for obj in bpy.data.objects if obj.type == "MESH"]
+    imported_armatures = [obj for obj in bpy.data.objects if obj.type == "ARMATURE"]
+    vertex_count = sum(len(obj.data.vertices) for obj in imported_meshes)
+    if not imported_armatures or not imported_meshes or vertex_count == 0:
+        raise RuntimeError(
+            f"CATS import produced no usable model from {pmx_path}: "
+            f"{len(imported_armatures)} armature(s), {len(imported_meshes)} mesh object(s), {vertex_count} vertices. "
+            "The PMX file may be corrupt or unsupported."
+        )
+
+
 def build_report(pmx_path: Path, output_blend: Path, elapsed: float) -> dict[str, object]:
     mesh_objects = [obj for obj in bpy.data.objects if obj.type == "MESH"]
     armatures = [obj for obj in bpy.data.objects if obj.type == "ARMATURE"]
@@ -184,6 +199,7 @@ def main() -> int:
     clear_scene()
     setup_scene()
     import_with_cats(args.pmx)
+    validate_imported_scene(args.pmx)
     print(f"Saving blend file: {args.output_blend}")
     bpy.ops.wm.save_as_mainfile(filepath=str(args.output_blend))
     report = build_report(args.pmx, args.output_blend, time.monotonic() - started)

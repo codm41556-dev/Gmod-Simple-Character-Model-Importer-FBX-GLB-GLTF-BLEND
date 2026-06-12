@@ -1,3 +1,23 @@
+<#
+.SYNOPSIS
+    Builds the MMD Character Importer Windows executable with PyInstaller.
+
+.NOTES
+    Startup-time recommendation for one-file builds:
+    The default build mode is --onefile. When blender-4.5.10-windows-x64.zip
+    is present at the repo root it is bundled into the executable, and
+    PyInstaller one-file builds extract ALL bundled data (including the
+    ~398 MB Blender zip) to a fresh %TEMP%\_MEIxxxx folder on EVERY app
+    launch and delete it on exit. That adds tens of seconds of startup delay
+    and roughly 0.5 GB of disk churn per run, and a crash leaks the temp
+    folder. The app can auto-download the official Blender 4.5 zip on first
+    run when it is not bundled, so consider either:
+      - removing/moving the Blender zip out of the repo root before a
+        one-file build (smaller exe, fast startup, Blender auto-downloaded
+        at first run), or
+      - building with -OneDir when shipping the bundled Blender zip
+        (portable folder, no per-launch re-extraction).
+#>
 param(
     [string]$Python = "python",
     [string]$Name = "GmodSimpleMMDCharacterImporter",
@@ -69,6 +89,47 @@ function Add-DataFileAbsolute([string]$Source, [string]$DestRelative, [string]$S
         source = $SourceLabel
         destination = $DestRelative
         size_mb = [math]::Round((Get-PathSizeBytes $Source) / 1MB, 2)
+    }
+}
+
+function Add-DataDirectoryAbsolute([string]$Source, [string]$DestRelative, [string]$SourceLabel) {
+    if (-not (Test-Path -LiteralPath $Source -PathType Container)) {
+        throw "Required generated package data was not found: $Source"
+    }
+    $script:DataArgs += @("--add-data", "$Source;$DestRelative")
+    $script:DataManifest += [ordered]@{
+        source = $SourceLabel
+        destination = $DestRelative
+        size_mb = [math]::Round((Get-PathSizeBytes $Source) / 1MB, 2)
+    }
+}
+
+# Copies a project directory into a staging folder while excluding Python
+# bytecode caches (__pycache__, *.pyc, *.pyo) and PowerShell build scripts
+# (*.ps1), which must not be embedded in the end-user executable.
+function Copy-FilteredBundleTree([string]$SourceRelative, [string]$StagingDest) {
+    $Source = Resolve-ProjectPath $SourceRelative
+    if (-not (Test-Path -LiteralPath $Source -PathType Container)) {
+        throw "Required package data was not found: $SourceRelative"
+    }
+    $SourceFull = [System.IO.Path]::GetFullPath($Source)
+    New-Item -ItemType Directory -Path $StagingDest -Force | Out-Null
+    $ExcludedExtensions = @(".pyc", ".pyo", ".ps1")
+    Get-ChildItem -LiteralPath $SourceFull -Recurse -File -Force | ForEach-Object {
+        $Relative = $_.FullName.Substring($SourceFull.Length).TrimStart('\', '/')
+        $Parts = $Relative -split '[\\/]+'
+        if ($Parts -contains "__pycache__") {
+            return
+        }
+        if ($ExcludedExtensions -contains $_.Extension.ToLowerInvariant()) {
+            return
+        }
+        $Target = Join-Path $StagingDest $Relative
+        $Parent = Split-Path -Parent $Target
+        if ($Parent -and -not (Test-Path -LiteralPath $Parent)) {
+            New-Item -ItemType Directory -Path $Parent -Force | Out-Null
+        }
+        Copy-Item -LiteralPath $_.FullName -Destination $Target -Force
     }
 }
 
@@ -203,10 +264,41 @@ try {
     Assert-RequiredFile "external_tools\vc_runtime\vc90\msvcm90.dll"
     Assert-RequiredFile "external_tools\vc_runtime\vc90\msvcp90.dll"
     Assert-RequiredFile "external_tools\vc_runtime\vc90\msvcr90.dll"
-    Add-RequiredData "tools" "tools"
+    # Bundle a filtered copy of tools/ so stale __pycache__ bytecode and the
+    # PowerShell build/sync scripts are not embedded in the release exe.
+    $StagedToolsDir = Join-Path $GeneratedBuildInfoDir "staged_tools"
+    Copy-FilteredBundleTree "tools" $StagedToolsDir
+    Add-DataDirectoryAbsolute $StagedToolsDir "tools" "tools (filtered: __pycache__/*.pyc/*.pyo/*.ps1 excluded)"
     Add-RequiredData "plugins_software" "plugins_software"
     Add-RequiredData "external_tools" "external_tools"
-    Add-DataIfExists "blender-4.5.10-windows-x64.zip" "."
+
+    # If the optional Blender zip is present, verify it against
+    # build_assets_manifest.json before baking it into the release exe so a
+    # truncated/corrupted local download cannot ship silently.
+    $BlenderZipName = "blender-4.5.10-windows-x64.zip"
+    $BlenderZipPath = Resolve-ProjectPath $BlenderZipName
+    if (Test-Path -LiteralPath $BlenderZipPath -PathType Leaf) {
+        $AssetManifestPath = Resolve-ProjectPath "build_assets_manifest.json"
+        if (-not (Test-Path -LiteralPath $AssetManifestPath -PathType Leaf)) {
+            throw "Cannot verify $BlenderZipName before bundling: build_assets_manifest.json was not found at the repo root."
+        }
+        $AssetManifest = Get-Content -LiteralPath $AssetManifestPath -Raw | ConvertFrom-Json
+        $BlenderAsset = @($AssetManifest.assets) | Where-Object { $_.file_name -eq $BlenderZipName } | Select-Object -First 1
+        if (-not $BlenderAsset) {
+            throw "Cannot verify $BlenderZipName before bundling: no matching entry in build_assets_manifest.json."
+        }
+        $ActualSize = (Get-Item -LiteralPath $BlenderZipPath).Length
+        if ($ActualSize -ne [int64]$BlenderAsset.size_bytes) {
+            throw "Refusing to bundle ${BlenderZipName}: size mismatch (expected $($BlenderAsset.size_bytes) bytes, found $ActualSize). The local zip is likely truncated or corrupted. Re-download it with: powershell -ExecutionPolicy Bypass -File .\scripts\download_build_assets.ps1 -Force"
+        }
+        Write-Host "Verifying SHA-256 of $BlenderZipName before bundling (this can take a moment)..."
+        $ActualHash = (Get-FileHash -LiteralPath $BlenderZipPath -Algorithm SHA256).Hash
+        if ($ActualHash -ne [string]$BlenderAsset.sha256) {
+            throw "Refusing to bundle ${BlenderZipName}: SHA-256 mismatch (expected $($BlenderAsset.sha256), found $ActualHash). The local zip is corrupted. Re-download it with: powershell -ExecutionPolicy Bypass -File .\scripts\download_build_assets.ps1 -Force"
+        }
+        Write-Host "Verified $BlenderZipName against build_assets_manifest.json."
+    }
+    Add-DataIfExists $BlenderZipName "."
     Add-RequiredData "steps.txt" "."
     Add-RequiredData "Translation Templates Write.txt" "."
     Add-RequiredData "README.md" "."
@@ -486,10 +578,17 @@ try {
         )
     }
     $ManifestPath = if ($OneDir) { Join-Path $PortableDir "dependency_manifest.json" } else { Join-Path $ReleaseRoot "${Name}_dependency_manifest.json" }
-    $Manifest | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $ManifestPath -Encoding UTF8
+    # Write BOM-less UTF-8 explicitly: under Windows PowerShell 5.1,
+    # Set-Content -Encoding UTF8 emits a BOM that breaks strict JSON parsers.
+    $Utf8NoBom = [System.Text.UTF8Encoding]::new($false)
+    [System.IO.File]::WriteAllText(
+        $ManifestPath,
+        ($Manifest | ConvertTo-Json -Depth 8) + [System.Environment]::NewLine,
+        $Utf8NoBom
+    )
 
     $ReadmePath = if ($OneDir) { Join-Path $PortableDir "RUN_ME.txt" } else { Join-Path $ReleaseRoot "${Name}_RUN_ME.txt" }
-    @(
+    $ReadmeLines = @(
         "MMD Character Importer build",
         "",
         "Launch: $ReleaseTarget",
@@ -498,7 +597,12 @@ try {
         "Bundled external tools: Blender 4.5 zip and VTFCmd.",
         "Runtime requirement: Garry's Mod must be installed so StudioMDL and gmad are available.",
         "Dependency manifest: $([System.IO.Path]::GetFileName($ManifestPath))"
-    ) | Set-Content -LiteralPath $ReadmePath -Encoding UTF8
+    )
+    [System.IO.File]::WriteAllText(
+        $ReadmePath,
+        (($ReadmeLines -join [System.Environment]::NewLine) + [System.Environment]::NewLine),
+        $Utf8NoBom
+    )
 
     $ExePath = if ($OneDir) { Join-Path $PortableDir "$Name.exe" } else { $StandaloneExe }
     $SizeMb = [math]::Round((Get-Item -LiteralPath $ExePath).Length / 1MB, 2)

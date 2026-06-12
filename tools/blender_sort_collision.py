@@ -44,6 +44,8 @@ ACTIVE_SOURCE_BODYGROUPS: set[str] | None = None
 ACTIVE_ADDITIONAL_BONE_SELECTION: list[dict[str, object]] = []
 ACTIVE_COACD_QUALITY = "fast_preview"
 ACTIVE_RESULT_CACHE_DIR: Path | None = None
+ACTIVE_PREVIEW_CACHE_DIR: Path | None = None
+MODEL_PREVIEW_CACHE_VERSION = 1
 
 COACD_QUALITY_PRESETS = {
     "fast_preview": {
@@ -343,7 +345,7 @@ def parse_args() -> argparse.Namespace:
     else:
         argv = []
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--mode", choices=("scan-sources", "scan-bones", "analyze", "apply"), required=True)
+    parser.add_argument("--mode", choices=("scan-sources", "scan-bones", "analyze", "apply", "validate-manual"), required=True)
     parser.add_argument("--input-blend", type=Path, required=True)
     parser.add_argument("--analysis-json", type=Path)
     parser.add_argument("--plan-json", type=Path)
@@ -361,8 +363,10 @@ def parse_args() -> argparse.Namespace:
 
 
 def write_json(path: Path, data: dict[str, object]) -> None:
+    # Compact separators: these payloads can embed hundreds of thousands of
+    # preview triangles, and indent=2 puts every float on its own line.
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    path.write_text(json.dumps(data, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
 
 
 def current_quality_preset() -> dict[str, object]:
@@ -573,7 +577,7 @@ def collect_bone_preview(armature: bpy.types.Object | None) -> dict[str, object]
 def scan_collision_bones(input_blend: Path) -> dict[str, object]:
     log_progress(f"Scanning CoACD bones for {input_blend}.")
     armature = main_armature()
-    preview = collect_model_preview()
+    preview = collect_model_preview_cached(input_blend)
     bone_preview = collect_bone_preview(armature)
     bones: list[dict[str, object]] = []
     default_set = set(DEFAULT_TARGET_BONES)
@@ -615,39 +619,49 @@ def scan_collision_bones(input_blend: Path) -> dict[str, object]:
     }
 
 
-def ordered_direct_chain(armature: bpy.types.Object, raw_names: Iterable[str]) -> tuple[list[str], list[str]]:
+def ordered_connected_group(armature: bpy.types.Object, raw_names: Iterable[str]) -> tuple[list[str], list[str]]:
+    """Validate a selection-ordered additional collision group.
+
+    The first bone is the merge target. Every later bone must be the target's
+    parent, a direct child of an already-accepted bone, or share the target's
+    parent (sibling) — mirroring the interactive rule in the GUI. The returned
+    list preserves selection order so callers can use bones[0] as the target.
+    """
+
     names = [str(name) for name in raw_names if str(name)]
-    unique = []
+    unique: list[str] = []
     for name in names:
         if name not in unique:
             unique.append(name)
-    selected = set(unique)
     errors: list[str] = []
     for name in unique:
         if name not in armature.data.bones:
             errors.append(f"Additional collision bone does not exist: {name}")
     if errors or not unique:
         return [], errors
-    roots = []
-    for name in unique:
-        bone = armature.data.bones[name]
-        if bone.parent is None or bone.parent.name not in selected:
-            roots.append(name)
-    if len(roots) != 1:
-        return [], [f"Additional collision group must form one direct parent-child chain; found {len(roots)} chain roots."]
-    ordered = [roots[0]]
-    current = armature.data.bones[roots[0]]
-    while True:
-        selected_children = [child.name for child in current.children if child.name in selected]
-        if not selected_children:
-            break
-        if len(selected_children) > 1:
-            return [], [f"Additional collision group branches at {current.name}; choose one direct chain."]
-        ordered.append(selected_children[0])
-        current = armature.data.bones[selected_children[0]]
-    if set(ordered) != selected:
-        return [], ["Additional collision group must be a continuous direct parent-child chain."]
-    return ordered, []
+
+    def parent_name(bone_name: str) -> str:
+        bone = armature.data.bones[bone_name]
+        return bone.parent.name if bone.parent else ""
+
+    target = unique[0]
+    target_parent = parent_name(target)
+    accepted = [target]
+    for name in unique[1:]:
+        bone_parent = parent_name(name)
+        is_parent_of_target = name == target_parent
+        is_child_of_accepted = bool(bone_parent) and bone_parent in accepted
+        is_sibling_of_target = bool(target_parent) and bone_parent == target_parent
+        if not (is_parent_of_target or is_child_of_accepted or is_sibling_of_target):
+            errors.append(
+                f"{name} must be the parent of target bone {target}, a direct child of a selected bone, "
+                f"or share a parent with {target}."
+            )
+            continue
+        accepted.append(name)
+    if errors:
+        return [], errors
+    return accepted, []
 
 
 def resolve_additional_collision_groups(armature: bpy.types.Object | None) -> tuple[list[dict[str, object]], list[str]]:
@@ -700,17 +714,20 @@ def resolve_additional_collision_groups(armature: bpy.types.Object | None) -> tu
             if bone_name in used_bones:
                 errors.append(f"Additional collision bone {bone_name} is assigned to more than one group.")
             used_bones.add(bone_name)
-        chain, chain_errors = ordered_direct_chain(armature, bones)
-        errors.extend(f"Additional collision group {group_id}: {error}" for error in chain_errors)
-        if not chain:
+        group_bones, group_errors = ordered_connected_group(armature, bones)
+        errors.extend(f"Additional collision group {group_id}: {error}" for error in group_errors)
+        if not group_bones:
             continue
-        owner = chain[0]
+        # Selection order is meaningful: the first selected bone is the merge
+        # target that owns the hull; the rest merge their weight regions into it.
+        owner = group_bones[0]
         groups.append(
             {
                 "group": group_id,
                 "bone": owner,
                 "owner_bone": owner,
-                "bones": chain,
+                "target_bone": owner,
+                "bones": group_bones,
                 "rotation_type": rotation_type,
                 "rotation_label": str(ROTATION_PRESETS.get(rotation_type, {}).get("label") or rotation_type),
                 "uid": f"collision_extra_{group_id:02d}_{safe_fragment(owner)}",
@@ -841,15 +858,15 @@ def collect_model_preview(max_triangles: int = MAX_PREVIEW_TRIANGLES) -> dict[st
                         else:
                             uvs.append([0.0, 0.0])
                     points.extend(coords)
+                    # object_name/bodygroup/texture_path are derivable from
+                    # material_uid via the materials table; repeating them per
+                    # triangle bloats the preview JSON by tens of MB.
                     triangles.append(
                         {
                             "points": coords,
                             "uvs": uvs,
                             "material_uid": material_uid,
-                            "object_name": obj.name,
-                            "bodygroup": obj.name,
                             "polygon_index": int(poly.index),
-                            "texture_path": texture_path if texture_path and not texture_path.startswith("packed:") else "",
                         }
                     )
                 triangle_index += 1
@@ -869,6 +886,49 @@ def collect_model_preview(max_triangles: int = MAX_PREVIEW_TRIANGLES) -> dict[st
     }
 
 
+def model_preview_cache_key(input_blend: Path) -> dict[str, object]:
+    try:
+        stat = input_blend.stat()
+        mtime_ns = int(stat.st_mtime_ns)
+        size = int(stat.st_size)
+    except OSError:
+        mtime_ns = 0
+        size = 0
+    return {
+        "version": MODEL_PREVIEW_CACHE_VERSION,
+        "input_blend": str(input_blend),
+        "mtime_ns": mtime_ns,
+        "size": size,
+        "max_triangles": MAX_PREVIEW_TRIANGLES,
+    }
+
+
+def collect_model_preview_cached(input_blend: Path) -> dict[str, object]:
+    """Reuse one model preview across scan-sources/scan-bones/analyze runs.
+
+    The three modes run in separate Blender processes on the same unmodified
+    input blend, so the preview is keyed by the blend's path+mtime+size and
+    stored as a sidecar file in the collision work directory.
+    """
+    cache_path = ACTIVE_PREVIEW_CACHE_DIR / "collision_model_preview_cache.json" if ACTIVE_PREVIEW_CACHE_DIR is not None else None
+    key = model_preview_cache_key(input_blend)
+    if cache_path is not None and cache_path.exists():
+        try:
+            cached = json.loads(cache_path.read_text(encoding="utf-8"))
+            if isinstance(cached, dict) and cached.get("key") == key and isinstance(cached.get("preview"), dict):
+                log_progress("Reusing cached model preview from a previous scan of the same blend.")
+                return cached["preview"]
+        except Exception as exc:
+            log_progress(f"Model preview cache could not be read; rebuilding preview: {exc}")
+    preview = collect_model_preview()
+    if cache_path is not None:
+        try:
+            write_json(cache_path, {"key": key, "preview": preview})
+        except Exception as exc:
+            log_progress(f"Model preview cache could not be written: {exc}")
+    return preview
+
+
 def collect_collision_source_bodygroups(
     armature: bpy.types.Object | None,
     target_specs: list[dict[str, object]] | None = None,
@@ -884,6 +944,10 @@ def collect_collision_source_bodygroups(
         }
         for names in target_influences.values():
             influence_names.update(names)
+    target_by_group_name: dict[str, list[str]] = {}
+    for target_name, names in target_influences.items():
+        for group_name in names:
+            target_by_group_name.setdefault(group_name, []).append(target_name)
     bodygroups: list[dict[str, object]] = []
     for index, obj in enumerate(sorted(mesh_objects(include_physics=False), key=lambda item: natural_key(item.name)), start=1):
         material_names = []
@@ -894,15 +958,23 @@ def collect_collision_source_bodygroups(
         weighted_vertices = 0
         target_hits: set[str] = set()
         if armature is not None and influence_names:
-            group_by_index = {group.index: group.name for group in obj.vertex_groups}
-            for vertex in obj.data.vertices:
-                has_target_weight = False
-                for target_name, names in target_influences.items():
-                    if vertex_group_weight_any(obj, vertex, names, group_by_index) > 0.0:
-                        has_target_weight = True
-                        target_hits.add(target_name)
-                if has_target_weight:
-                    weighted_vertices += 1
+            # Invert group index -> affected targets once per object so each
+            # vertex is scanned in a single pass over its group references.
+            targets_by_group_index = {
+                group.index: target_by_group_name[group.name]
+                for group in obj.vertex_groups
+                if group.name in target_by_group_name
+            }
+            if targets_by_group_index:
+                for vertex in obj.data.vertices:
+                    has_target_weight = False
+                    for group_ref in vertex.groups:
+                        targets = targets_by_group_index.get(group_ref.group)
+                        if targets and float(group_ref.weight) > 0.0:
+                            has_target_weight = True
+                            target_hits.update(targets)
+                    if has_target_weight:
+                        weighted_vertices += 1
         warning = ""
         if weighted_vertices == 0 and armature is not None:
             warning = "No vertices are weighted to Step 8 target bones."
@@ -926,7 +998,7 @@ def collect_collision_source_bodygroups(
 def scan_source_bodygroups(input_blend: Path) -> dict[str, object]:
     log_progress(f"Scanning CoACD source bodygroups for {input_blend}.")
     armature = main_armature()
-    preview = collect_model_preview()
+    preview = collect_model_preview_cached(input_blend)
     target_specs, selection_errors, additional_groups = target_specs_for_armature(armature)
     sources = collect_collision_source_bodygroups(armature, target_specs)
     log_progress(f"Found {len(sources):,} available collision source bodygroup(s).")
@@ -1099,12 +1171,13 @@ def bone_span_points(armature: bpy.types.Object, bone_name: str, group_bones: It
 
 
 def is_collision_source_object(obj: bpy.types.Object) -> bool:
+    if ACTIVE_SOURCE_BODYGROUPS is not None:
+        # Honor the explicit user selection from the GUI even when the object
+        # name contains an excluded token such as "physics"; the token list
+        # only shapes the default (no-selection) behavior.
+        return obj.name in ACTIVE_SOURCE_BODYGROUPS
     name = safe_fragment(obj.name)
-    if any(token in name for token in EXCLUDED_SOURCE_OBJECT_TOKENS):
-        return False
-    if ACTIVE_SOURCE_BODYGROUPS is None:
-        return True
-    return obj.name in ACTIVE_SOURCE_BODYGROUPS
+    return not any(token in name for token in EXCLUDED_SOURCE_OBJECT_TOKENS)
 
 
 def log_progress(message: str) -> None:
@@ -1185,7 +1258,7 @@ def collect_weighted_vertex_cloud(
     target_specs = target_specs or target_specs_for_armature(armature)[0]
     target_names = [str(spec.get("bone") or "") for spec in target_specs if spec.get("bone")]
     clouds: dict[str, list[Vector]] = {name: [] for name in target_names}
-    influence_by_target = {str(spec.get("bone") or ""): influence_bones_for_spec(armature, spec) for spec in target_specs if spec.get("bone")}
+    influence_by_target = {str(spec.get("bone") or ""): frozenset(influence_bones_for_spec(armature, spec)) for spec in target_specs if spec.get("bone")}
     for obj in mesh_objects(include_physics=False):
         if filtered_sources and not is_collision_source_object(obj):
             continue
@@ -1209,7 +1282,8 @@ def vertex_group_weight(obj: bpy.types.Object, vertex: bpy.types.MeshVertex, bon
 
 
 def vertex_group_weight_any(obj: bpy.types.Object, vertex: bpy.types.MeshVertex, bone_names: Iterable[str], group_by_index: dict[int, str]) -> float:
-    wanted = set(bone_names)
+    # Accept a precomputed set/frozenset so per-vertex callers do not rebuild it.
+    wanted = bone_names if isinstance(bone_names, (set, frozenset)) else set(bone_names)
     total = 0.0
     for group_ref in vertex.groups:
         if group_by_index.get(group_ref.group) in wanted:
@@ -1224,13 +1298,14 @@ def weight_threshold_for_bone(
     influence_bones: list[str] | None = None,
 ) -> dict[str, object]:
     influence_bones = influence_bones or collision_influence_bones(armature, bone_name)
+    influence_set = frozenset(influence_bones)
     weights: list[float] = []
     for obj in mesh_objects(include_physics=False):
         if filtered_sources and not is_collision_source_object(obj):
             continue
         group_by_index = {group.index: group.name for group in obj.vertex_groups}
         for vertex in obj.data.vertices:
-            weight = vertex_group_weight_any(obj, vertex, influence_bones, group_by_index)
+            weight = vertex_group_weight_any(obj, vertex, influence_set, group_by_index)
             if weight > 0.0:
                 weights.append(weight)
     if not weights:
@@ -1977,6 +2052,32 @@ def decimate_region_mesh(vertices: list[Vector], faces: list[tuple[int, int, int
     return [vertices[index] for index in used], [tuple(remap[index] for index in face) for face in selected_faces]
 
 
+def limit_hull_vertices(points: list[Vector], cap: int) -> list[Vector]:
+    """Reduce a convex hull's vertex set to at most ``cap`` points.
+
+    Greedy farthest-point sampling keeps the most extreme points, so the
+    re-hulled result preserves the overall silhouette while meeting the
+    per-preset vertex budget that studiomdl-friendly hulls need.
+    """
+
+    if len(points) <= cap:
+        return points
+    center = sum(points, Vector((0.0, 0.0, 0.0))) / float(len(points))
+    selected = [max(points, key=lambda point: (point - center).length_squared)]
+    remaining = [point for point in points if point is not selected[0]]
+    distances = [(point - selected[0]).length_squared for point in remaining]
+    while len(selected) < cap and remaining:
+        best_index = max(range(len(remaining)), key=lambda index: distances[index])
+        chosen = remaining.pop(best_index)
+        distances.pop(best_index)
+        selected.append(chosen)
+        for index, point in enumerate(remaining):
+            candidate = (point - chosen).length_squared
+            if candidate < distances[index]:
+                distances[index] = candidate
+    return selected
+
+
 def run_coacd_single_hull(
     vertices: list[Vector],
     faces: list[tuple[int, int, int]],
@@ -2010,72 +2111,53 @@ def run_coacd_single_hull(
                 return cached_vertices, cached_faces, cached_status, ["CoACD geometry reused from cache."]
         except Exception as exc:
             warnings.append(f"CoACD cache read failed: {exc}")
-    module, source = ensure_coacd_module()
+    max_ch_vertex = int(preset.get("max_ch_vertex", COACD_MAX_VERTICES) or COACD_MAX_VERTICES)
     status = {
-        "available": module is not None,
-        "source": source,
+        "available": True,
+        "source": "direct convex hull (bmesh)",
+        "method": "convex_hull",
         "quality_preset": preset_key,
         "quality_label": current_quality_label(),
         "threshold": float(preset.get("threshold", COACD_THRESHOLD) or COACD_THRESHOLD),
         "max_convex_hull": 1,
-        "max_ch_vertex": int(preset.get("max_ch_vertex", COACD_MAX_VERTICES) or COACD_MAX_VERTICES),
+        "max_ch_vertex": max_ch_vertex,
         "face_cap": face_cap,
         "cache_hit": False,
     }
-    if module is None:
-        log_progress(f"CoACD unavailable: {source}")
-        return [], [], status, [str(source)]
     try:
-        import numpy as np
-
+        # The pipeline always requests a single convex hull per region
+        # (max_convex_hull=1, apx_mode="ch"), which CoACD only produces after a
+        # full decomposition search costing 10-30s per bone. The convex hull of
+        # the shrunken region is the same result and computes in milliseconds;
+        # CoACD remains below as a fallback for degenerate geometry.
         mesh_vertices, mesh_faces = decimate_region_mesh(vertices, faces, max_faces=face_cap)
         log_progress(
-            f"{bone_name}: running {current_quality_label()} CoACD on {len(vertices):,} vertices/{len(faces):,} faces "
+            f"{bone_name}: computing single convex hull from {len(vertices):,} vertices/{len(faces):,} faces "
             f"({len(mesh_vertices):,}/{len(mesh_faces):,} sampled), shrink={shrink:.3f}."
         )
         center = sum(mesh_vertices, Vector((0.0, 0.0, 0.0))) / float(len(mesh_vertices))
         shrink = max(0.25, min(1.25, float(shrink)))
         shrunken = [center + (vertex - center) * shrink for vertex in mesh_vertices]
-        vert_array = np.array([[vertex.x, vertex.y, vertex.z] for vertex in shrunken], dtype=np.float64)
-        face_array = np.array([[int(a), int(b), int(c)] for a, b, c in mesh_faces], dtype=np.int32)
-        coacd_mesh = module.Mesh(vert_array, face_array)
-        try:
-            module.set_log_level("warn")
-        except Exception:
-            pass
-        result = module.run_coacd(
-            coacd_mesh,
-            threshold=float(preset.get("threshold", COACD_THRESHOLD) or COACD_THRESHOLD),
-            max_convex_hull=1,
-            preprocess_mode="auto",
-            preprocess_resolution=int(preset.get("preprocess_resolution", 50) or 50),
-            resolution=int(preset.get("resolution", 1000) or 1000),
-            mcts_nodes=int(preset.get("mcts_nodes", 8) or 8),
-            mcts_iterations=int(preset.get("mcts_iterations", 40) or 40),
-            mcts_max_depth=int(preset.get("mcts_max_depth", 3) or 3),
-            pca=False,
-            merge=True,
-            decimate=True,
-            max_ch_vertex=int(preset.get("max_ch_vertex", COACD_MAX_VERTICES) or COACD_MAX_VERTICES),
-            apx_mode="ch",
-        )
-        hull_vertices: list[Vector] = []
-        hull_faces: list[tuple[int, int, int]] = []
-        for verts, idx in result:
-            start = len(hull_vertices)
-            hull_vertices.extend(Vector((float(row[0]), float(row[1]), float(row[2]))) for row in verts)
-            hull_faces.extend((int(face[0]) + start, int(face[1]) + start, int(face[2]) + start) for face in idx)
+        hull_vertices, hull_faces = convex_hull_from_points(shrunken)
+        if hull_vertices and len(hull_vertices) > max_ch_vertex:
+            reduced = limit_hull_vertices(hull_vertices, max_ch_vertex)
+            reduced_vertices, reduced_faces = convex_hull_from_points(reduced)
+            if reduced_vertices and reduced_faces:
+                hull_vertices, hull_faces = reduced_vertices, reduced_faces
         if not hull_vertices or not hull_faces:
-            log_progress("CoACD returned no hull geometry.")
-            return [], [], status, ["CoACD returned no hull geometry."]
-        if len(result) > 1:
-            warnings.append(f"CoACD returned {len(result)} hulls despite single-hull mode; merged them into one convex hull.")
-            hull_vertices, hull_faces = convex_hull_from_points(hull_vertices)
+            hull_vertices, hull_faces, coacd_status, coacd_warnings = run_coacd_fallback_hull(
+                shrunken, mesh_faces, preset, bone_name
+            )
+            status.update(coacd_status)
+            warnings.extend(coacd_warnings)
+        if not hull_vertices or not hull_faces:
+            log_progress("Convex hull generation returned no geometry.")
+            return [], [], status, ["Convex hull generation returned no geometry."]
         volume = mesh_volume(hull_vertices, hull_faces) if hull_vertices and hull_faces else 0.0
         if volume <= EPSILON:
-            log_progress("CoACD returned a zero-volume hull.")
-            return [], [], status, ["CoACD returned a zero-volume hull."]
-        status["returned_hulls"] = len(result)
+            log_progress("Convex hull generation returned a zero-volume hull.")
+            return [], [], status, ["Convex hull generation returned a zero-volume hull."]
+        status["returned_hulls"] = 1
         status["input_vertices"] = len(vertices)
         status["input_faces"] = len(faces)
         status["sampled_faces"] = len(mesh_faces)
@@ -2099,14 +2181,69 @@ def run_coacd_single_hull(
             except Exception as exc:
                 warnings.append(f"CoACD cache write failed: {exc}")
         log_progress(
-            f"{bone_name}: CoACD produced one hull with {len(hull_vertices):,} vertices, "
+            f"{bone_name}: produced one hull with {len(hull_vertices):,} vertices, "
             f"{len(hull_faces):,} faces, volume {volume:.4f} in {status['duration_seconds']:.2f}s."
         )
         return hull_vertices, hull_faces, status, warnings
     except Exception as exc:
-        log_progress(f"CoACD execution failed: {exc}")
+        log_progress(f"Collision hull generation failed: {exc}")
         status["duration_seconds"] = timing_entry(started)
-        return [], [], status, [f"CoACD execution failed: {exc}"]
+        return [], [], status, [f"Collision hull generation failed: {exc}"]
+
+
+def run_coacd_fallback_hull(
+    shrunken_vertices: list[Vector],
+    faces: list[tuple[int, int, int]],
+    preset: dict[str, object],
+    bone_name: str,
+) -> tuple[list[Vector], list[tuple[int, int, int]], dict[str, object], list[str]]:
+    """Legacy CoACD path, used only when the direct bmesh hull fails."""
+
+    warnings: list[str] = ["Direct convex hull failed; fell back to CoACD."]
+    module, source = ensure_coacd_module()
+    status: dict[str, object] = {"method": "coacd_fallback", "available": module is not None, "source": source}
+    if module is None:
+        log_progress(f"CoACD unavailable: {source}")
+        return [], [], status, warnings + [str(source)]
+    try:
+        import numpy as np
+
+        vert_array = np.array([[vertex.x, vertex.y, vertex.z] for vertex in shrunken_vertices], dtype=np.float64)
+        face_array = np.array([[int(a), int(b), int(c)] for a, b, c in faces], dtype=np.int32)
+        coacd_mesh = module.Mesh(vert_array, face_array)
+        try:
+            module.set_log_level("warn")
+        except Exception:
+            pass
+        log_progress(f"{bone_name}: running CoACD fallback on {len(shrunken_vertices):,} vertices/{len(faces):,} faces.")
+        result = module.run_coacd(
+            coacd_mesh,
+            threshold=float(preset.get("threshold", COACD_THRESHOLD) or COACD_THRESHOLD),
+            max_convex_hull=1,
+            preprocess_mode="auto",
+            preprocess_resolution=int(preset.get("preprocess_resolution", 50) or 50),
+            resolution=int(preset.get("resolution", 1000) or 1000),
+            mcts_nodes=int(preset.get("mcts_nodes", 8) or 8),
+            mcts_iterations=int(preset.get("mcts_iterations", 40) or 40),
+            mcts_max_depth=int(preset.get("mcts_max_depth", 3) or 3),
+            pca=False,
+            merge=True,
+            decimate=True,
+            max_ch_vertex=int(preset.get("max_ch_vertex", COACD_MAX_VERTICES) or COACD_MAX_VERTICES),
+            apx_mode="ch",
+        )
+        hull_vertices: list[Vector] = []
+        hull_faces: list[tuple[int, int, int]] = []
+        for verts, idx in result:
+            start = len(hull_vertices)
+            hull_vertices.extend(Vector((float(row[0]), float(row[1]), float(row[2]))) for row in verts)
+            hull_faces.extend((int(face[0]) + start, int(face[1]) + start, int(face[2]) + start) for face in idx)
+        if len(result) > 1 and hull_vertices:
+            hull_vertices, hull_faces = convex_hull_from_points(hull_vertices)
+        return hull_vertices, hull_faces, status, warnings
+    except Exception as exc:
+        log_progress(f"CoACD fallback failed: {exc}")
+        return [], [], status, warnings + [f"CoACD fallback failed: {exc}"]
 
 
 def make_coacd_region_geometry(
@@ -2555,7 +2692,6 @@ def build_collision_parts(
     scan_started = time.monotonic()
     log_progress("Building indexed collision source data for target and grouped influence bones.")
     source_index = build_collision_source_index(armature, filtered_sources=True, target_specs=target_specs)
-    unfiltered_index = build_collision_source_index(armature, filtered_sources=False, target_specs=target_specs)
     timing["source_scan_seconds"] = timing_entry(scan_started)
     timing["selected_source_vertex_count"] = source_index.get("vertex_count", 0)
     timing["selected_source_face_count"] = source_index.get("face_count", 0)
@@ -2564,7 +2700,23 @@ def build_collision_parts(
     if not isinstance(scene_mins, Vector) or not isinstance(scene_maxs, Vector):
         scene_mins, scene_maxs = scene_bounds_in_armature(armature)
     clouds = source_index.get("clouds", {}) if isinstance(source_index.get("clouds"), dict) else {}
-    unfiltered_clouds = unfiltered_index.get("clouds", {}) if isinstance(unfiltered_index.get("clouds"), dict) else {}
+    # The unfiltered index is only consulted as a sparse-bone fallback, so it
+    # is built lazily; when filtering excludes nothing it aliases the filtered
+    # index to avoid a fully redundant second scene scan.
+    filtering_excludes_objects = any(not is_collision_source_object(obj) for obj in mesh_objects(include_physics=False))
+    lazy_unfiltered: dict[str, dict[str, object]] = {}
+
+    def get_unfiltered_index() -> dict[str, object]:
+        if not filtering_excludes_objects:
+            return source_index
+        if "index" not in lazy_unfiltered:
+            log_progress("Building unfiltered collision source index for sparse-bone fallback.")
+            lazy_unfiltered["index"] = build_collision_source_index(armature, filtered_sources=False, target_specs=target_specs)
+        return lazy_unfiltered["index"]
+
+    def get_unfiltered_clouds() -> dict[str, list[Vector]]:
+        index = get_unfiltered_index()
+        return index.get("clouds", {}) if isinstance(index.get("clouds"), dict) else {}
     plan_by_bone = {
         str(row.get("bone") or ""): row
         for row in plan_rows or []
@@ -2595,9 +2747,9 @@ def build_collision_parts(
         if len(influence_bones) > 1:
             log_progress(f"{bone_name}: grouped influence bones: {', '.join(influence_bones)}.")
         source_points = clouds.get(bone_name, [])
-        if len(source_points) < MIN_MULTI_HULL_POINTS and len(unfiltered_clouds.get(bone_name, [])) >= MIN_MULTI_HULL_POINTS:
+        if len(source_points) < MIN_MULTI_HULL_POINTS and len(get_unfiltered_clouds().get(bone_name, [])) >= MIN_MULTI_HULL_POINTS:
             log_progress(f"{bone_name}: filtered source was sparse; retrying with unfiltered render sources.")
-            source_points = unfiltered_clouds.get(bone_name, [])
+            source_points = get_unfiltered_clouds().get(bone_name, [])
         fit_started = time.monotonic()
         fit = fit_part(armature, bone_name, source_points, shrink, scene_mins, scene_maxs, group_bones=group_bones)
         bone_timing["fit_seconds"] = timing_entry(fit_started)
@@ -2612,7 +2764,7 @@ def build_collision_parts(
         if len(region.get("vertices", [])) < MIN_MULTI_HULL_POINTS and len(source_points) >= MIN_MULTI_HULL_POINTS:
             log_progress(f"{bone_name}: region mesh was sparse; retrying region selection with unfiltered render sources.")
             region_started = time.monotonic()
-            region = collect_bone_region_mesh_from_index(unfiltered_index, armature, bone_name, fit=fit)
+            region = collect_bone_region_mesh_from_index(get_unfiltered_index(), armature, bone_name, fit=fit)
             bone_timing["unfiltered_region_seconds"] = timing_entry(region_started)
             log_progress(
                 f"{bone_name}: unfiltered region has {int(region.get('selected_vertex_count', 0) or 0):,} vertices, "
@@ -2634,7 +2786,7 @@ def build_collision_parts(
                 source_points,
                 shrink,
                 fit,
-                unfiltered_clouds,
+                get_unfiltered_clouds(),
                 target_bones=target_names,
             )
             bone_timing["connected_loft_seconds"] = timing_entry(fallback_started)
@@ -2757,7 +2909,7 @@ def analyze_scene(input_blend: Path) -> tuple[dict[str, object], dict[str, objec
     coacd_status = coacd_runtime_status()
     log_progress(f"CoACD runtime available={coacd_status.get('available')} source={coacd_status.get('source')}.")
     preview_started = time.monotonic()
-    preview = collect_model_preview()
+    preview = collect_model_preview_cached(input_blend)
     phase_timing["preview_seconds"] = timing_entry(preview_started)
     source_started = time.monotonic()
     source_bodygroups = collect_collision_source_bodygroups(armature, target_specs)
@@ -2844,13 +2996,18 @@ def validate_plan(
     warnings: list[str] = []
     by_bone = {str(part.get("bone") or ""): part for part in parts}
     target_names = [str(name) for name in (target_bones or TARGET_BONES) if str(name)]
+    if parts and not any(bool(part.get("enabled", True)) for part in parts):
+        errors.append("All collision parts are disabled; enable at least one collision part.")
     for bone_name in target_names:
         part = by_bone.get(bone_name)
         if not part:
             errors.append(f"Missing collision part for {bone_name}.")
             continue
         if not bool(part.get("enabled", True)):
-            errors.append(f"Collision part for {bone_name} is disabled.")
+            # Disabled parts are intentionally skipped by create_physics_object,
+            # so they are reported as warnings and exempt from geometry checks.
+            warnings.append(f"Collision part for {bone_name} is disabled and will be skipped.")
+            continue
         try:
             volume = float(part.get("volume", 0.0) or 0.0)
         except Exception:
@@ -3046,7 +3203,10 @@ def validate_physics_object(
         if abs(weight - 1.0) > 1e-6:
             errors.append(f"Physics vertex {vertex.index} weight to {name} is {weight:.6f}; expected 1.0.")
         used_targets.add(name)
+    disabled_bones = {str(part.get("bone") or "") for part in parts if not bool(part.get("enabled", True))}
     for bone_name in target_names:
+        if bone_name in disabled_bones:
+            continue
         if bone_name not in used_targets:
             errors.append(f"No Physics vertices are weighted to {bone_name}.")
     if not obj.modifiers or not any(modifier.type == "ARMATURE" and modifier.object == armature for modifier in obj.modifiers):
@@ -3286,14 +3446,134 @@ def apply_scene(
     return report
 
 
+def validate_manual_scene(input_blend: Path, report_json: Path, physics_smd: Path | None) -> dict[str, object]:
+    """Validate a hand-edited Physics mesh and re-export Physics.smd.
+
+    The user opened the collision-sorted blend in Blender, edited the Physics
+    object's shape in edit mode, saved, and closed. Check the result is still
+    compile-safe (no isolated vertices, every vertex weighted to a real bone,
+    real faces per piece) before regenerating Physics.smd from it.
+    """
+
+    log_progress(f"Validating manually edited collision shape in {input_blend}.")
+    armature = main_armature()
+    physics = bpy.data.objects.get("Physics")
+    errors: list[str] = []
+    warnings: list[str] = []
+    stats: dict[str, object] = {}
+    if armature is None:
+        errors.append("No armature was found in the edited blend.")
+    if physics is None or physics.type != "MESH":
+        errors.append('The "Physics" object was not found. Do not rename or delete the Physics mesh while editing.')
+    else:
+        ensure_object_mode()
+        mesh = physics.data
+        mesh.update(calc_edges=True)
+        used_vertices: set[int] = set()
+        used_edge_keys: set[tuple[int, int]] = set()
+        for poly in mesh.polygons:
+            used_vertices.update(int(index) for index in poly.vertices)
+            for key in poly.edge_keys:
+                used_edge_keys.add(tuple(sorted(int(index) for index in key)))
+        isolated = len(mesh.vertices) - len(used_vertices)
+        if isolated > 0:
+            errors.append(
+                f"The Physics mesh has {isolated} isolated vertice(s) that belong to no face. "
+                "In edit mode use Select > Select All by Trait > Loose Geometry, delete them, save, and validate again."
+            )
+        loose_edges = sum(
+            1
+            for edge in mesh.edges
+            if tuple(sorted(int(index) for index in edge.vertices)) not in used_edge_keys
+        )
+        if loose_edges:
+            warnings.append(f"The Physics mesh has {loose_edges} loose edge(s) without faces; studiomdl ignores them.")
+        if not mesh.polygons:
+            errors.append("The Physics mesh has no faces left.")
+        group_names = {group.index: group.name for group in physics.vertex_groups}
+        bone_names = set(armature.data.bones.keys()) if armature is not None else set()
+        unweighted = 0
+        unknown_groups: set[str] = set()
+        per_bone_counts: dict[str, int] = {}
+        for vertex in mesh.vertices:
+            links = [
+                (group_names.get(ref.group, ""), float(ref.weight))
+                for ref in vertex.groups
+                if abs(float(ref.weight)) > 1e-6 and group_names.get(ref.group, "")
+            ]
+            if not links:
+                unweighted += 1
+                continue
+            name = links[0][0]
+            if bone_names and name not in bone_names:
+                unknown_groups.add(name)
+            per_bone_counts[name] = per_bone_counts.get(name, 0) + 1
+        if unweighted:
+            errors.append(
+                f"{unweighted} vertice(s) of the Physics mesh have no bone weight. New geometry must keep the "
+                "weights of the piece it was extruded/subdivided from, or be assigned to that piece's vertex group."
+            )
+        if unknown_groups:
+            errors.append(
+                "Vertex group(s) on the Physics mesh do not match any armature bone: "
+                + ", ".join(sorted(unknown_groups))
+            )
+        thin_pieces = sorted(name for name, count in per_bone_counts.items() if count < 4)
+        if thin_pieces:
+            warnings.append(
+                "Collision piece(s) with fewer than 4 vertices may produce degenerate hulls: " + ", ".join(thin_pieces)
+            )
+        stats = {
+            "vertex_count": len(mesh.vertices),
+            "face_count": len(mesh.polygons),
+            "piece_vertex_counts": per_bone_counts,
+            "isolated_vertices": isolated,
+            "loose_edges": loose_edges,
+            "unweighted_vertices": unweighted,
+        }
+    smd_info: dict[str, object] = {}
+    smd_import_validation: dict[str, object] = {}
+    if not errors and physics is not None and armature is not None and physics_smd is not None:
+        fallback = DEFAULT_TARGET_BONES[0] if DEFAULT_TARGET_BONES else None
+        try:
+            smd_info = write_physics_smd(physics_smd, armature, physics, fallback_bone=fallback)
+            log_progress(
+                f"Re-exported Physics.smd from the edited mesh with {smd_info.get('bone_count')} bones "
+                f"and {smd_info.get('triangle_count')} triangles."
+            )
+        except Exception as exc:
+            errors.append(f"Physics.smd re-export failed: {exc}")
+        if not errors:
+            smd_import_validation = validate_physics_smd_import(physics_smd)
+            if smd_import_validation and not smd_import_validation.get("ok", False):
+                warnings.append(str(smd_import_validation.get("error") or "Physics.smd import validation did not pass."))
+    validation = {"ok": not errors, "errors": errors, "warnings": warnings}
+    report = {
+        "version": 1,
+        "kind": "collision_manual_validation",
+        "input_blend": str(input_blend),
+        "physics_object": physics.name if physics is not None else "",
+        "stats": stats,
+        "physics_smd": smd_info,
+        "physics_smd_import_validation": smd_import_validation,
+        "validation": validation,
+    }
+    write_json(report_json, report)
+    if errors:
+        raise RuntimeError("Manual collision validation failed: " + "; ".join(errors))
+    return report
+
+
 def main() -> int:
-    global ACTIVE_COACD_QUALITY, ACTIVE_RESULT_CACHE_DIR
+    global ACTIVE_COACD_QUALITY, ACTIVE_RESULT_CACHE_DIR, ACTIVE_PREVIEW_CACHE_DIR
     args = parse_args()
     started = time.monotonic()
     ACTIVE_COACD_QUALITY = str(args.quality_preset or "fast_preview")
     ACTIVE_RESULT_CACHE_DIR = args.coacd_cache_dir
     if ACTIVE_RESULT_CACHE_DIR is not None:
         ACTIVE_RESULT_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    preview_cache_anchor = args.sources_json or args.bones_json or args.analysis_json
+    ACTIVE_PREVIEW_CACHE_DIR = preview_cache_anchor.resolve().parent if preview_cache_anchor is not None else None
     log_progress(f"CoACD quality preset: {current_quality_label()} ({ACTIVE_COACD_QUALITY}).")
     ensure_object_mode()
     bpy.ops.wm.open_mainfile(filepath=str(args.input_blend))
@@ -3324,6 +3604,12 @@ def main() -> int:
         log_progress(f"Wrote collision JSON files in {time.monotonic() - json_started:.2f}s.")
         print(f"Wrote collision analysis to {args.analysis_json}")
         print(f"Wrote collision plan to {args.plan_json}")
+    elif args.mode == "validate-manual":
+        if args.report_json is None:
+            raise SystemExit("--report-json is required for validate-manual mode")
+        report = validate_manual_scene(args.input_blend, args.report_json, args.physics_smd)
+        print(f"Wrote manual collision validation report to {args.report_json}")
+        print(f"Validation ok: {report.get('validation', {}).get('ok')}")
     else:
         if args.plan_json is None or args.output_blend is None or args.report_json is None:
             raise SystemExit("--output-blend and --report-json are required for apply mode")

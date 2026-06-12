@@ -19,6 +19,7 @@ from mathutils import Matrix, Quaternion, Vector
 ROOT = Path(__file__).resolve().parents[1]
 MAX_PREVIEW_TRIANGLES = 500000
 HELPER_MESH_NAMES = {"smd_bone_vis"}
+EXCLUDED_IMPORT_NAMES = {"physics.smd"}
 EXCLUDED_INFERENCE_OBJECTS = {"physics"}
 VRD_FRAMES = [0, 10, 20, 30]
 VRD_WEIGHT_FRAMES = [10, 20, 30]
@@ -83,8 +84,10 @@ def log(message: str) -> None:
 
 
 def write_json(path: Path, data: dict[str, object]) -> None:
+    # Compact separators: preview payloads embed several full-mesh frame
+    # snapshots, and indent=2 puts every float on its own line.
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    path.write_text(json.dumps(data, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
 
 
 def ensure_object_mode() -> None:
@@ -139,7 +142,12 @@ def frame_intensity_multiplier(multipliers: dict[str, float], frame: int) -> flo
 
 
 def input_smd_files(input_dir: Path) -> list[Path]:
-    files = sorted([path for path in input_dir.glob("*.smd") if path.is_file()], key=lambda item: natural_key(item.name))
+    # Physics.smd is excluded from every inference/preview consumer, so do not
+    # import (and armature-deform) the collision mesh at all.
+    files = sorted(
+        [path for path in input_dir.glob("*.smd") if path.is_file() and path.name.lower() not in EXCLUDED_IMPORT_NAMES],
+        key=lambda item: natural_key(item.name),
+    )
     if not files:
         raise RuntimeError(f"No top-level SMD files were found in {input_dir}")
     body = [path for path in files if path.name.lower() == "body.smd"]
@@ -225,14 +233,23 @@ def mesh_objects(include_physics: bool = False) -> list[bpy.types.Object]:
     return sorted(out, key=lambda obj: natural_key(obj.name))
 
 
+_MATERIAL_TEXTURE_MAP_CACHE: dict[str, dict[str, str]] = {}
+
+
 def material_texture_map(input_dir: Path) -> dict[str, str]:
+    cache_key = str(input_dir)
+    cached = _MATERIAL_TEXTURE_MAP_CACHE.get(cache_key)
+    if cached is not None:
+        return cached
     workspace_root = input_dir.parent.parent if input_dir.parent.name == "9_export_proportion_trick" else input_dir.parent
     material_json = workspace_root / "5_sort_materials" / "materials.json"
     if not material_json.exists():
+        _MATERIAL_TEXTURE_MAP_CACHE[cache_key] = {}
         return {}
     try:
         data = json.loads(material_json.read_text(encoding="utf-8"))
     except Exception:
+        _MATERIAL_TEXTURE_MAP_CACHE[cache_key] = {}
         return {}
     out: dict[str, str] = {}
 
@@ -251,6 +268,7 @@ def material_texture_map(input_dir: Path) -> dict[str, str]:
                 visit(child)
 
     visit(data)
+    _MATERIAL_TEXTURE_MAP_CACHE[cache_key] = out
     return out
 
 
@@ -349,13 +367,14 @@ def collect_preview(
                             else:
                                 uvs.append([0.0, 0.0])
                         points.extend(coords)
+                        # texture_path/object_name are derivable from
+                        # material_uid via the materials table; repeating them
+                        # per triangle bloats the preview JSON.
                         triangles.append(
                             {
                                 "points": coords,
                                 "uvs": uvs,
                                 "material_uid": material_uid,
-                                "texture_path": texture_path,
-                                "object_name": obj.name,
                             }
                         )
                     triangle_index += 1
@@ -487,48 +506,119 @@ def weight_for_vertex(vertex: bpy.types.MeshVertex, group_index: int) -> float:
     return 0.0
 
 
-def collect_bone_weight_stats(bone_name: str) -> dict[str, object]:
-    coords: list[Vector] = []
-    objects: set[str] = set()
-    material_uids: set[str] = set()
-    weighted_count = 0
-    source_faces = 0
-    for obj in mesh_objects(include_physics=False):
-        indices = vertex_group_indices(obj)
-        group_index = indices.get(bone_name)
-        if group_index is None:
+_BONE_WEIGHT_STATS_CACHE: dict[str, dict[str, object]] | None = None
+
+
+def collect_all_bone_weight_stats() -> dict[str, dict[str, object]]:
+    """Accumulate weight stats for every vertex group in one pass per mesh.
+
+    Replaces the previous per-bone full-scene rescan (O(bones x vertices))
+    with a single walk over vertices and polygons per object.
+    """
+    accumulators: dict[str, dict[str, object]] = {}
+    objects = mesh_objects(include_physics=False)
+    for object_index, obj in enumerate(objects, start=1):
+        names_by_group = {group.index: group.name for group in obj.vertex_groups}
+        if not names_by_group:
             continue
-        weighted_vertices = {
-            int(vertex.index)
-            for vertex in obj.data.vertices
-            if weight_for_vertex(vertex, group_index) > 0.001
-        }
-        if not weighted_vertices:
+        log(
+            f"Scanning bone weights {object_index}/{len(objects)}: {obj.name} "
+            f"({len(obj.data.vertices):,} vertices, {len(obj.data.polygons):,} polygons)."
+        )
+        world = obj.matrix_world
+        weighted_names: list[tuple[str, ...]] = []
+        object_hit_names: set[str] = set()
+        for vertex in obj.data.vertices:
+            entry: list[str] = []
+            for ref in vertex.groups:
+                if float(ref.weight) > 0.001:
+                    name = names_by_group.get(ref.group)
+                    if name:
+                        entry.append(name)
+            if entry:
+                coord = world @ vertex.co
+                for name in entry:
+                    record = accumulators.get(name)
+                    if record is None:
+                        record = {
+                            "weighted": 0,
+                            "sum": Vector((0.0, 0.0, 0.0)),
+                            "mins": coord.copy(),
+                            "maxs": coord.copy(),
+                            "objects": set(),
+                            "material_uids": set(),
+                            "faces": 0,
+                        }
+                        accumulators[name] = record
+                    record["weighted"] = int(record["weighted"]) + 1
+                    record["sum"] = record["sum"] + coord
+                    mins = record["mins"]
+                    maxs = record["maxs"]
+                    if coord.x < mins.x:
+                        mins.x = coord.x
+                    if coord.y < mins.y:
+                        mins.y = coord.y
+                    if coord.z < mins.z:
+                        mins.z = coord.z
+                    if coord.x > maxs.x:
+                        maxs.x = coord.x
+                    if coord.y > maxs.y:
+                        maxs.y = coord.y
+                    if coord.z > maxs.z:
+                        maxs.z = coord.z
+                object_hit_names.update(entry)
+            weighted_names.append(tuple(entry))
+        for name in object_hit_names:
+            accumulators[name]["objects"].add(obj.name)
+        if not object_hit_names:
             continue
-        objects.add(obj.name)
-        weighted_count += len(weighted_vertices)
-        coords.extend(obj.matrix_world @ obj.data.vertices[index].co for index in weighted_vertices)
+        material_uid_by_index: dict[int, str] = {}
         for poly in obj.data.polygons:
-            if any(int(index) in weighted_vertices for index in poly.vertices):
-                mat = obj.data.materials[int(poly.material_index)] if 0 <= int(poly.material_index) < len(obj.data.materials) else None
+            seen: set[str] = set()
+            for index in poly.vertices:
+                names = weighted_names[int(index)]
+                if names:
+                    seen.update(names)
+            if not seen:
+                continue
+            material_index = int(poly.material_index)
+            material_uid = material_uid_by_index.get(material_index)
+            if material_uid is None:
+                mat = obj.data.materials[material_index] if 0 <= material_index < len(obj.data.materials) else None
                 mat_name = mat.name if mat else "No_Material"
-                material_uids.add(f"{safe_fragment(obj.name)}__{int(poly.material_index):03d}_{safe_fragment(mat_name)}")
-                source_faces += 1
-    if not coords:
+                material_uid = f"{safe_fragment(obj.name)}__{material_index:03d}_{safe_fragment(mat_name)}"
+                material_uid_by_index[material_index] = material_uid
+            for name in seen:
+                record = accumulators[name]
+                record["material_uids"].add(material_uid)
+                record["faces"] = int(record["faces"]) + 1
+    stats: dict[str, dict[str, object]] = {}
+    for name, record in accumulators.items():
+        weighted = int(record["weighted"])
+        stats[name] = {
+            "bone": name,
+            "weighted_vertices": weighted,
+            "source_objects": sorted(record["objects"], key=natural_key),
+            "material_uids": sorted(record["material_uids"], key=natural_key),
+            "source_faces": int(record["faces"]),
+            "centroid": record["sum"] / weighted,
+            "mins": record["mins"],
+            "maxs": record["maxs"],
+        }
+    return stats
+
+
+def collect_bone_weight_stats(bone_name: str) -> dict[str, object]:
+    # Cached for the lifetime of the process: rest-position mesh data never
+    # changes after import here, and row_centroid/row_bounds fallbacks would
+    # otherwise rescan the whole scene per row per frame.
+    global _BONE_WEIGHT_STATS_CACHE
+    if _BONE_WEIGHT_STATS_CACHE is None:
+        _BONE_WEIGHT_STATS_CACHE = collect_all_bone_weight_stats()
+    stats = _BONE_WEIGHT_STATS_CACHE.get(bone_name)
+    if stats is None:
         return {"bone": bone_name, "weighted_vertices": 0, "source_objects": [], "material_uids": [], "source_faces": 0}
-    mins = Vector((min(coord.x for coord in coords), min(coord.y for coord in coords), min(coord.z for coord in coords)))
-    maxs = Vector((max(coord.x for coord in coords), max(coord.y for coord in coords), max(coord.z for coord in coords)))
-    centroid = sum(coords, Vector((0, 0, 0))) / len(coords)
-    return {
-        "bone": bone_name,
-        "weighted_vertices": weighted_count,
-        "source_objects": sorted(objects, key=natural_key),
-        "material_uids": sorted(material_uids, key=natural_key),
-        "source_faces": source_faces,
-        "centroid": centroid,
-        "mins": mins,
-        "maxs": maxs,
-    }
+    return stats
 
 
 def score_bone_candidate(armature: bpy.types.Object, bone: bpy.types.Bone, stats: dict[str, object], axes: dict[str, object]) -> tuple[float, str, list[str]]:
@@ -600,9 +690,11 @@ def score_bone_candidate(armature: bpy.types.Object, bone: bpy.types.Bone, stats
 def infer_vrd_rows(armature: bpy.types.Object) -> tuple[list[dict[str, object]], list[dict[str, object]], dict[str, object]]:
     axes = landmark_axes(armature)
     raw_candidates: list[dict[str, object]] = []
-    for bone in armature.data.bones:
-        if is_essential_bone(bone.name):
-            continue
+    candidate_bones = [bone for bone in armature.data.bones if not is_essential_bone(bone.name)]
+    log(f"Scoring {len(candidate_bones)} non-essential bone(s) for VRD candidates.")
+    for bone_index, bone in enumerate(candidate_bones, start=1):
+        if bone_index % 50 == 0:
+            log(f"Scored {bone_index}/{len(candidate_bones)} VRD candidate bones...")
         stats = collect_bone_weight_stats(bone.name)
         confidence, side, warnings = score_bone_candidate(armature, bone, stats, axes)
         if confidence < 0.50:
@@ -1141,12 +1233,30 @@ def pose_line_triangles(armature: bpy.types.Object, rows: list[dict[str, object]
     return triangles
 
 
-def collect_vrd_frame_previews(input_dir: Path) -> tuple[dict[str, dict[str, object]], dict[str, object], list[dict[str, object]], int]:
+def collect_vrd_frame_previews(
+    input_dir: Path,
+    reuse_frame_zero_from: tuple[dict[str, dict[str, object]], dict[str, object], list[dict[str, object]], int] | None = None,
+) -> tuple[dict[str, dict[str, object]], dict[str, object], list[dict[str, object]], int]:
     frame_previews: dict[str, dict[str, object]] = {}
     base_preview: dict[str, object] | None = None
     materials: list[dict[str, object]] = []
     material_count = 0
     for frame in VRD_FRAMES:
+        if (
+            frame == 0
+            and reuse_frame_zero_from is not None
+            and isinstance(reuse_frame_zero_from[0].get("0"), dict)
+            and isinstance(reuse_frame_zero_from[1], dict)
+        ):
+            # Frame 0 carries no driver or procedural rotation, so the mesh is
+            # identical before and after procedural keys are applied.
+            log("Reusing frame 0 preview mesh from the driver preview pass.")
+            frame_previews["0"] = reuse_frame_zero_from[0]["0"]
+            base_preview = reuse_frame_zero_from[1]
+            materials = list(reuse_frame_zero_from[2]) if isinstance(reuse_frame_zero_from[2], list) else []
+            material_count = int(reuse_frame_zero_from[3] or 0)
+            continue
+        log(f"Collecting VRD preview frame {frame}...")
         frame_preview = collect_preview(input_dir, frame=frame, evaluated=True)
         if base_preview is None:
             base_preview = frame_preview

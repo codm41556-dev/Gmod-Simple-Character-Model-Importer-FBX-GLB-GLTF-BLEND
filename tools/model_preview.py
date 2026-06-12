@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import ctypes
 import colorsys
+import io
 import math
 import os
 import time
@@ -93,46 +94,97 @@ class StaticPreviewModel:
         return int(len(self.indices) // 3)
 
 
-def _read_vertex(reader: core.PmxReader, bone_index_size: int, additional_uvs: int) -> tuple[tuple[float, float, float], tuple[float, float, float], tuple[float, float]]:
-    position = (reader.read_f32(), reader.read_f32(), reader.read_f32())
-    normal = (reader.read_f32(), reader.read_f32(), reader.read_f32())
-    uv = (reader.read_f32(), reader.read_f32())
-    for _ in range(additional_uvs):
-        reader.read_vector_bytes(4)
-    weight_type = reader.read_u8()
-    if weight_type == 0:
-        reader.read_index(bone_index_size)
-    elif weight_type == 1:
-        reader.read_index(bone_index_size)
-        reader.read_index(bone_index_size)
-        reader.read_f32()
-    elif weight_type in (2, 4):
-        for _ in range(4):
-            reader.read_index(bone_index_size)
-        reader.read_vector_bytes(4)
-    elif weight_type == 3:
-        reader.read_index(bone_index_size)
-        reader.read_index(bone_index_size)
-        reader.read_f32()
-        reader.read_vector_bytes(3)
-        reader.read_vector_bytes(3)
-        reader.read_vector_bytes(3)
-    else:
-        raise ValueError(f"unsupported PMX vertex weight type: {weight_type}")
-    reader.read_f32()
-    return position, normal, uv
+class _BytesPmxReader(core.PmxReader):
+    """PmxReader over an in-memory buffer so bulk sections can be parsed with numpy."""
+
+    def __init__(self, path: Path, data: bytes) -> None:  # noqa: D401 - mirrors PmxReader
+        self.path = path
+        self.data = data
+        self.handle = io.BytesIO(data)
 
 
-def _read_vertex_index(reader: core.PmxReader, vertex_index_size: int) -> int:
-    return reader.read_index(vertex_index_size, signed=False)
+def _parse_vertices_bulk(
+    data: bytes, offset: int, vertex_count: int, bone_index_size: int, additional_uvs: int
+) -> tuple[np.ndarray, np.ndarray, np.ndarray, int]:
+    """Parse PMX vertex records from a byte buffer.
+
+    Records are variable-size (skinning type varies per vertex), so a single pass
+    collects record offsets cheaply, then numpy gathers the fixed 32-byte prefix
+    (position, normal, uv) of every record at once.
+    """
+    prefix_size = 32 + 16 * additional_uvs
+    # weight byte + skinning payload + edge-scale float, per weight type
+    record_sizes = {
+        0: prefix_size + 1 + bone_index_size + 4,
+        1: prefix_size + 1 + bone_index_size * 2 + 4 + 4,
+        2: prefix_size + 1 + bone_index_size * 4 + 16 + 4,
+        3: prefix_size + 1 + bone_index_size * 2 + 4 + 36 + 4,
+        4: prefix_size + 1 + bone_index_size * 4 + 16 + 4,
+    }
+    offsets: list[int] = []
+    append = offsets.append
+    pos = offset
+    try:
+        for _ in range(vertex_count):
+            append(pos)
+            weight_type = data[pos + prefix_size]
+            try:
+                pos += record_sizes[weight_type]
+            except KeyError:
+                raise ValueError(f"unsupported PMX vertex weight type: {weight_type}") from None
+    except IndexError:
+        raise EOFError("unexpected end of PMX while reading vertices") from None
+    if pos > len(data):
+        raise EOFError("unexpected end of PMX while reading vertices")
+    if not vertex_count:
+        empty3 = np.zeros((0, 3), dtype=np.float32)
+        return empty3, empty3.copy(), np.zeros((0, 2), dtype=np.float32), pos
+    byte_view = np.frombuffer(data, dtype=np.uint8)
+    gather = np.asarray(offsets, dtype=np.int64)[:, None] + np.arange(32, dtype=np.int64)
+    floats = np.ascontiguousarray(byte_view[gather]).view("<f4").reshape(vertex_count, 8)
+    positions = np.ascontiguousarray(floats[:, 0:3])
+    normals = np.ascontiguousarray(floats[:, 3:6])
+    uvs = np.ascontiguousarray(floats[:, 6:8])
+    return positions, normals, uvs, pos
 
 
-def _texture_files(model_path: Path) -> list[Path]:
+def _parse_indices_bulk(data: bytes, offset: int, index_count: int, vertex_index_size: int) -> tuple[np.ndarray, int]:
+    dtypes = {1: np.uint8, 2: np.uint16, 4: np.uint32}
+    if vertex_index_size not in dtypes:
+        raise ValueError(f"invalid PMX index size: {vertex_index_size}")
+    end = offset + index_count * vertex_index_size
+    if index_count < 0 or end > len(data):
+        raise EOFError("unexpected end of PMX while reading indices")
+    indices = np.frombuffer(data, dtype=dtypes[vertex_index_size], count=index_count, offset=offset)
+    return indices.astype(np.uint32), end
+
+
+def _texture_files(model_path: Path, max_files: int = 4000) -> list[Path]:
+    # Non-recursive scan of the model folder plus one level of subfolders
+    # (textures/, tex/, ...), bounded so a PMX sitting in a huge directory
+    # does not stall the load with thousands of stat calls.
     exts = {".png", ".jpg", ".jpeg", ".bmp", ".tga", ".dds"}
     out: list[Path] = []
-    for base in (model_path.parent, model_path.parent / "textures"):
-        if base.exists():
-            out.extend(path for path in base.rglob("*") if path.is_file() and path.suffix.lower() in exts)
+    subdirs: list[Path] = []
+    try:
+        for path in model_path.parent.iterdir():
+            if path.suffix.lower() in exts and path.is_file():
+                out.append(path)
+            elif path.is_dir():
+                subdirs.append(path)
+    except OSError:
+        return []
+    for base in subdirs:
+        if len(out) >= max_files:
+            break
+        try:
+            for path in base.iterdir():
+                if path.suffix.lower() in exts and path.is_file():
+                    out.append(path)
+                    if len(out) >= max_files:
+                        break
+        except OSError:
+            continue
     return sorted(set(out))
 
 
@@ -233,7 +285,11 @@ def _read_bone(reader: core.PmxReader, encoding: str, bone_index_size: int) -> P
 def load_static_preview_model(model_path: Path) -> StaticPreviewModel:
     model_path = model_path.resolve()
     warnings: list[str] = []
-    reader = core.PmxReader(model_path)
+    # Read the whole file once: bulk sections (vertices, indices) are parsed with
+    # numpy and the remaining sections reuse the buffered PmxReader API without
+    # millions of small file reads.
+    data = model_path.read_bytes()
+    reader = _BytesPmxReader(model_path, data)
     try:
         signature = reader.read_exact(4)
         if signature != b"PMX ":
@@ -264,17 +320,14 @@ def load_static_preview_model(model_path: Path) -> StaticPreviewModel:
                 f"PMX vertex count {vertex_count:,} exceeds the supported limit of "
                 f"{core.MAX_SUPPORTED_PMX_VERTEX_COUNT:,}. This model is too large for the importer."
             )
-        positions = np.zeros((vertex_count, 3), dtype=np.float32)
-        normals = np.zeros((vertex_count, 3), dtype=np.float32)
-        uvs = np.zeros((vertex_count, 2), dtype=np.float32)
-        for index in range(vertex_count):
-            position, normal, uv = _read_vertex(reader, bone_index_size, additional_uvs)
-            positions[index] = position
-            normals[index] = normal
-            uvs[index] = uv
+        positions, normals, uvs, next_offset = _parse_vertices_bulk(
+            data, reader.handle.tell(), vertex_count, bone_index_size, additional_uvs
+        )
+        reader.handle.seek(next_offset)
 
         index_count = reader.read_i32()
-        indices = np.array([_read_vertex_index(reader, vertex_index_size) for _ in range(index_count)], dtype=np.uint32)
+        indices, next_offset = _parse_indices_bulk(data, reader.handle.tell(), index_count, vertex_index_size)
+        reader.handle.seek(next_offset)
 
         texture_names = [reader.read_string(encoding) for _ in range(reader.read_i32())]
         materials = _read_materials(reader, encoding, texture_index_size, model_path, texture_names)
@@ -378,8 +431,11 @@ class StaticModelPreviewWidget(QOpenGLWidget):
         self._show_wireframe = False
         self._hide_missing_texture_materials = False
         self._texture_ids: dict[Path, int] = {}
+        self._texture_images: dict[Path, QtGui.QImage] = {}
         self._gl_ready = False
         self._gl_error = ""
+        self._overlay_error = ""
+        self._last_stats_text: str | None = None
         self._vertex_data: np.ndarray | None = None
         self.setMinimumSize(520, 340)
         self.setMouseTracking(True)
@@ -388,18 +444,61 @@ class StaticModelPreviewWidget(QOpenGLWidget):
         self.model = load_static_preview_model(model_path)
         self._prepare_scene()
         self.reset_front_view()
+        self._release_textures()
+        self._decode_texture_images()
         self._gl_ready = False
         self._gl_error = ""
+        self._overlay_error = ""
         self.update()
         self._emit_stats()
         return self.model
 
     def clear_model(self) -> None:
         self.model = None
+        self._release_textures()
+        self._texture_images = {}
         self._gl_ready = False
         self._gl_error = ""
+        self._overlay_error = ""
         self.update()
         self._emit_stats()
+
+    def _decode_texture_images(self) -> None:
+        # Decode texture images at load time so the first paintGL only does the
+        # (cheap) GL upload instead of decoding every image inside the paint path.
+        self._texture_images = {}
+        if not self.model:
+            return
+        for material in self.model.materials:
+            path = material.texture_path
+            if not path or path in self._texture_images or not path.exists():
+                continue
+            image = QtGui.QImage(str(path))
+            if not image.isNull():
+                self._texture_images[path] = image.convertToFormat(QtGui.QImage.Format.Format_RGBA8888)
+
+    def _delete_gl_textures(self) -> None:
+        """Delete GL texture objects; the GL context must be current."""
+        ids = [texture_id for texture_id in self._texture_ids.values() if texture_id]
+        self._texture_ids = {}
+        if ids and GL:
+            try:
+                GL.glDeleteTextures(ids)
+            except Exception:
+                pass
+
+    def _release_textures(self) -> None:
+        if not self._texture_ids:
+            return
+        context = self.context()
+        if GL and context is not None and context.isValid():
+            try:
+                self.makeCurrent()
+                self._delete_gl_textures()
+            finally:
+                self.doneCurrent()
+        else:
+            self._texture_ids = {}
 
     def set_bones_visible(self, visible: bool) -> None:
         self._show_bones = bool(visible)
@@ -442,10 +541,31 @@ class StaticModelPreviewWidget(QOpenGLWidget):
         self._vertex_data[:, 6:8] = self.model.uvs
 
     def initializeGL(self) -> None:
+        context = self.context()
+        if context is not None:
+            # Free GPU textures when the context goes away (widget teardown or
+            # context recreation while docking/reparenting).
+            context.aboutToBeDestroyed.connect(self._on_context_about_to_be_destroyed, QtCore.Qt.ConnectionType.DirectConnection)
+        # A fresh context invalidates previously created texture names.
+        self._texture_ids = {}
+        self._gl_ready = False
         if GL:
             GL.glClearColor(0.08, 0.09, 0.10, 1.0)
             GL.glEnable(GL.GL_DEPTH_TEST)
             GL.glDisable(GL.GL_CULL_FACE)
+
+    def _on_context_about_to_be_destroyed(self) -> None:
+        try:
+            self.makeCurrent()
+            self._delete_gl_textures()
+        except Exception:
+            self._texture_ids = {}
+        finally:
+            try:
+                self.doneCurrent()
+            except Exception:
+                pass
+        self._gl_ready = False
 
     def paintGL(self) -> None:
         if GL:
@@ -455,6 +575,9 @@ class StaticModelPreviewWidget(QOpenGLWidget):
                 GL.glClear(GL.GL_COLOR_BUFFER_BIT | GL.GL_DEPTH_BUFFER_BIT)
                 if self.model:
                     self._draw_mesh_gl()
+                # Do not latch a transient failure forever: a successful frame
+                # clears any previous draw error.
+                self._gl_error = ""
             except Exception as exc:
                 self._gl_error = str(exc)
 
@@ -477,8 +600,11 @@ class StaticModelPreviewWidget(QOpenGLWidget):
                 if self.model and (self._show_bones or self._show_bone_names):
                     self._draw_skeleton(painter)
                 self._draw_overlay(painter)
+                self._overlay_error = ""
             except Exception as exc:
-                self._gl_error = str(exc)
+                # Keep QPainter overlay failures separate from GL backend errors
+                # so a one-frame overlay glitch does not blank the rendered mesh.
+                self._overlay_error = str(exc)
                 painter.setPen(QtGui.QColor(255, 210, 120))
                 painter.drawText(12, max(64, self.height() - 18), "Preview overlay error; see status text.")
         finally:
@@ -492,19 +618,28 @@ class StaticModelPreviewWidget(QOpenGLWidget):
     def _ensure_textures(self) -> None:
         if self._gl_ready or not GL or not self.model:
             return
-        self._texture_ids = {}
+        # The GL context is current here (called from paintGL), so stale texture
+        # objects can be deleted directly before new ones are generated.
+        self._delete_gl_textures()
         for material in self.model.materials:
-            if material.texture_path and material.texture_path.exists() and material.texture_path not in self._texture_ids:
+            if material.texture_path and material.texture_path not in self._texture_ids:
                 texture_id = self._create_texture(material.texture_path)
                 if texture_id:
                     self._texture_ids[material.texture_path] = texture_id
+        # Uploaded to the GPU; drop the CPU-side decoded copies.
+        self._texture_images = {}
         self._gl_ready = True
 
     def _create_texture(self, path: Path) -> int:
-        image = QtGui.QImage(str(path))
-        if image.isNull() or not GL:
+        image = self._texture_images.get(path)
+        if image is None:
+            # Fallback for textures not decoded at load time (e.g. context rebuilt).
+            image = QtGui.QImage(str(path))
+            if not image.isNull():
+                image = image.convertToFormat(QtGui.QImage.Format.Format_RGBA8888)
+                self._texture_images[path] = image
+        if image is None or image.isNull() or not GL:
             return 0
-        image = image.convertToFormat(QtGui.QImage.Format.Format_RGBA8888)
         try:
             texture_id = GL.glGenTextures(1)
             GL.glBindTexture(GL.GL_TEXTURE_2D, texture_id)
@@ -528,10 +663,25 @@ class StaticModelPreviewWidget(QOpenGLWidget):
         GL.glMatrixMode(GL.GL_PROJECTION)
         GL.glLoadMatrixf(np.ascontiguousarray(projection.T, dtype=np.float32))
         GL.glMatrixMode(GL.GL_MODELVIEW)
+        GL.glLoadIdentity()
+        # Headlight: directional light fixed in eye space (set while the
+        # modelview matrix is identity, before the view matrix is loaded).
+        GL.glLightfv(GL.GL_LIGHT0, GL.GL_POSITION, (0.0, 0.0, 1.0, 0.0))
+        GL.glLightfv(GL.GL_LIGHT0, GL.GL_DIFFUSE, (0.85, 0.85, 0.85, 1.0))
+        GL.glLightfv(GL.GL_LIGHT0, GL.GL_AMBIENT, (0.0, 0.0, 0.0, 1.0))
         GL.glLoadMatrixf(np.ascontiguousarray(view.T, dtype=np.float32))
 
         GL.glEnable(GL.GL_DEPTH_TEST)
         GL.glDisable(GL.GL_CULL_FACE)
+        if not self._show_wireframe:
+            # Simple fixed-function shading using the parsed PMX normals.
+            GL.glEnable(GL.GL_LIGHTING)
+            GL.glEnable(GL.GL_LIGHT0)
+            GL.glEnable(GL.GL_COLOR_MATERIAL)
+            GL.glColorMaterial(GL.GL_FRONT_AND_BACK, GL.GL_AMBIENT_AND_DIFFUSE)
+            GL.glEnable(GL.GL_NORMALIZE)
+            GL.glLightModeli(GL.GL_LIGHT_MODEL_TWO_SIDE, 1)
+            GL.glLightModelfv(GL.GL_LIGHT_MODEL_AMBIENT, (0.38, 0.38, 0.38, 1.0))
         GL.glEnable(GL.GL_TEXTURE_2D)
         GL.glTexEnvi(GL.GL_TEXTURE_ENV, GL.GL_TEXTURE_ENV_MODE, GL.GL_MODULATE)
         GL.glPolygonMode(GL.GL_FRONT_AND_BACK, GL.GL_LINE if self._show_wireframe else GL.GL_FILL)
@@ -559,6 +709,9 @@ class StaticModelPreviewWidget(QOpenGLWidget):
             GL.glDrawElements(GL.GL_TRIANGLES, stop - start, GL.GL_UNSIGNED_INT, self.model.indices[start:stop])
 
         GL.glPolygonMode(GL.GL_FRONT_AND_BACK, GL.GL_FILL)
+        GL.glDisable(GL.GL_LIGHTING)
+        GL.glDisable(GL.GL_COLOR_MATERIAL)
+        GL.glDisable(GL.GL_NORMALIZE)
         GL.glDisableClientState(GL.GL_TEXTURE_COORD_ARRAY)
         GL.glDisableClientState(GL.GL_NORMAL_ARRAY)
         GL.glDisableClientState(GL.GL_VERTEX_ARRAY)
@@ -674,13 +827,19 @@ class StaticModelPreviewWidget(QOpenGLWidget):
 
     def _emit_stats(self) -> None:
         if not self.model:
-            self.statsChanged.emit("Preview idle")
-            return
-        backend = "OpenGL" if GL and not self._gl_error else ("OpenGL error: " + self._gl_error if self._gl_error else "PyOpenGL unavailable")
-        self.statsChanged.emit(
-            f"{backend} | {self.model.vertex_count:,} verts | {self.model.triangle_count:,} tris | "
-            f"{len(self.model.bones):,} bones | {self.model.morph_count:,} morphs | warnings {len(self.model.warnings)}"
-        )
+            text = "Preview idle"
+        else:
+            backend = "OpenGL" if GL and not self._gl_error else ("OpenGL error: " + self._gl_error if self._gl_error else "PyOpenGL unavailable")
+            if self._overlay_error:
+                backend = f"{backend} | overlay error: {self._overlay_error}"
+            text = (
+                f"{backend} | {self.model.vertex_count:,} verts | {self.model.triangle_count:,} tris | "
+                f"{len(self.model.bones):,} bones | {self.model.morph_count:,} morphs | warnings {len(self.model.warnings)}"
+            )
+        # paintGL calls this every frame; only emit when the text actually changes.
+        if text != self._last_stats_text:
+            self._last_stats_text = text
+            self.statsChanged.emit(text)
 
     def mousePressEvent(self, event: QtGui.QMouseEvent) -> None:
         self._last_mouse_pos = event.position().toPoint()
@@ -753,6 +912,8 @@ class SkeletonPlanPreviewWidget(QtWidgets.QWidget):
         self._hover_pos = QtCore.QPointF(0.0, 0.0)
         self._show_model = True
         self._show_bone_names = False
+        self._bones_generation = 0
+        self._projection_cache: tuple[tuple, tuple] | None = None
         self.setMinimumSize(520, 340)
         self.setMouseTracking(True)
 
@@ -760,6 +921,8 @@ class SkeletonPlanPreviewWidget(QtWidgets.QWidget):
         self.analysis = None
         self.plan = None
         self._bones = {}
+        self._bones_generation += 1
+        self._projection_cache = None
         self._default_yaw = self.DEFAULT_FRONT_YAW
         self._default_pitch = self.DEFAULT_FRONT_PITCH
         self._view_yaw = self._default_yaw
@@ -791,6 +954,8 @@ class SkeletonPlanPreviewWidget(QtWidgets.QWidget):
         self.analysis = analysis
         self.plan = plan
         self._bones = {}
+        self._bones_generation += 1
+        self._projection_cache = None
         if analysis:
             for raw in analysis.get("bones", []):
                 if isinstance(raw, dict) and raw.get("name"):
@@ -1018,16 +1183,7 @@ class SkeletonPlanPreviewWidget(QtWidgets.QWidget):
             painter.drawPoint(point)
 
     def _draw_all_bones(self, painter: QtGui.QPainter) -> None:
-        points: dict[str, QtCore.QPointF] = {}
-        names: list[str] = []
-        vectors: list[np.ndarray] = []
-        for name, bone in self._bones.items():
-            head = bone.get("head")
-            if isinstance(head, list) and len(head) >= 3:
-                names.append(name)
-                vectors.append(np.array(head[:3], dtype=np.float64))
-        projected = self._project_np(np.vstack(vectors)) if vectors else []
-        points.update(zip(names, projected))
+        points = self._projected_bone_heads()
         painter.setPen(QtGui.QPen(QtGui.QColor(130, 142, 156, 150), BONE_LINE_WIDTH))
         for name, bone in self._bones.items():
             parent = bone.get("parent")
@@ -1094,7 +1250,28 @@ class SkeletonPlanPreviewWidget(QtWidgets.QWidget):
             painter.setPen(pen)
             painter.drawLine(head, tail)
 
-    def _projected_bone_heads(self) -> dict[str, QtCore.QPointF]:
+    def _projection_view_key(self) -> tuple:
+        return (
+            _scalar_float(self._view_yaw, self._default_yaw),
+            _scalar_float(self._view_pitch, self._default_pitch),
+            _scalar_float(self._view_zoom, 1.0),
+            float(self._view_pan.x()),
+            float(self._view_pan.y()),
+            self.width(),
+            self.height(),
+            self._bones_generation,
+        )
+
+    def _projected_bone_geometry(self) -> tuple[dict[str, QtCore.QPointF], list[str], np.ndarray, np.ndarray, np.ndarray]:
+        """Projected bone heads, cached per view state and bones generation.
+
+        Returns (points by name, names, screen coords (n, 2), child segment
+        indices, parent segment indices) so hover hit-testing can run on numpy
+        arrays instead of re-projecting every bone per mouse move/paint.
+        """
+        key = self._projection_view_key()
+        if self._projection_cache is not None and self._projection_cache[0] == key:
+            return self._projection_cache[1]
         names: list[str] = []
         vectors: list[np.ndarray] = []
         for name, bone in self._bones.items():
@@ -1103,7 +1280,33 @@ class SkeletonPlanPreviewWidget(QtWidgets.QWidget):
                 names.append(name)
                 vectors.append(np.array(head[:3], dtype=np.float64))
         projected = self._project_np(np.vstack(vectors)) if vectors else []
-        return dict(zip(names, projected))
+        points = dict(zip(names, projected))
+        coords = (
+            np.array([[float(point.x()), float(point.y())] for point in projected], dtype=np.float64)
+            if projected
+            else np.zeros((0, 2), dtype=np.float64)
+        )
+        name_to_index = {name: index for index, name in enumerate(names)}
+        seg_child: list[int] = []
+        seg_parent: list[int] = []
+        for index, name in enumerate(names):
+            parent = self._bones[name].get("parent")
+            parent_index = name_to_index.get(str(parent)) if parent else None
+            if parent_index is not None:
+                seg_child.append(index)
+                seg_parent.append(parent_index)
+        geometry = (
+            points,
+            names,
+            coords,
+            np.asarray(seg_child, dtype=np.intp),
+            np.asarray(seg_parent, dtype=np.intp),
+        )
+        self._projection_cache = (key, geometry)
+        return geometry
+
+    def _projected_bone_heads(self) -> dict[str, QtCore.QPointF]:
+        return self._projected_bone_geometry()[0]
 
     def _draw_merge_plan(self, painter: QtGui.QPainter) -> None:
         if not self.plan:
@@ -1208,40 +1411,30 @@ class SkeletonPlanPreviewWidget(QtWidgets.QWidget):
         painter.setPen(QtGui.QColor(245, 245, 245))
         painter.drawText(label_rect.adjusted(6, 2, -6, -2), QtCore.Qt.AlignmentFlag.AlignVCenter, text)
 
-    @staticmethod
-    def _distance_to_segment(point: QtCore.QPointF, start: QtCore.QPointF, end: QtCore.QPointF) -> float:
-        px, py = float(point.x()), float(point.y())
-        ax, ay = float(start.x()), float(start.y())
-        bx, by = float(end.x()), float(end.y())
-        dx = bx - ax
-        dy = by - ay
-        length_sq = dx * dx + dy * dy
-        if length_sq <= 1e-8:
-            return math.hypot(px - ax, py - ay)
-        t = max(0.0, min(1.0, ((px - ax) * dx + (py - ay) * dy) / length_sq))
-        nearest_x = ax + t * dx
-        nearest_y = ay + t * dy
-        return math.hypot(px - nearest_x, py - nearest_y)
-
     def _nearest_bone_at(self, position: QtCore.QPointF) -> str | None:
-        points = self._projected_bone_heads()
+        _points, names, coords, seg_child, seg_parent = self._projected_bone_geometry()
+        if not len(coords):
+            return None
         best_name: str | None = None
         best_distance = 10.0
-        for name, point in points.items():
-            distance = math.hypot(float(position.x() - point.x()), float(position.y() - point.y()))
-            if distance < best_distance:
-                best_distance = distance
-                best_name = name
-        for name, bone in self._bones.items():
-            point = points.get(name)
-            parent = bone.get("parent")
-            parent_point = points.get(str(parent)) if parent else None
-            if point is None or parent_point is None:
-                continue
-            distance = self._distance_to_segment(position, parent_point, point)
-            if distance < best_distance:
-                best_distance = distance
-                best_name = name
+        cursor = np.array([float(position.x()), float(position.y())], dtype=np.float64)
+        deltas = coords - cursor
+        distances = np.hypot(deltas[:, 0], deltas[:, 1])
+        head_index = int(np.argmin(distances))
+        if float(distances[head_index]) < best_distance:
+            best_distance = float(distances[head_index])
+            best_name = names[head_index]
+        if len(seg_child):
+            starts = coords[seg_parent]
+            spans = coords[seg_child] - starts
+            length_sq = np.maximum((spans * spans).sum(axis=1), 1e-8)
+            t = np.clip(((cursor - starts) * spans).sum(axis=1) / length_sq, 0.0, 1.0)
+            nearest = starts + spans * t[:, None]
+            seg_distances = np.hypot(nearest[:, 0] - cursor[0], nearest[:, 1] - cursor[1])
+            seg_index = int(np.argmin(seg_distances))
+            if float(seg_distances[seg_index]) < best_distance:
+                best_distance = float(seg_distances[seg_index])
+                best_name = names[int(seg_child[seg_index])]
         return best_name
 
     def _update_hovered_bone(self, position: QtCore.QPointF) -> None:
@@ -1370,6 +1563,8 @@ class MaterialPreviewWidget(QOpenGLWidget):
 
     statsChanged = QtCore.Signal(str)
 
+    MAX_TEXTURE_UPLOADS_PER_FRAME = 2
+
     VIEW_DIRECTIONS: dict[str, tuple[float, float]] = {
         "Front": (0.0, 0.0),
         "Back": (math.pi, 0.0),
@@ -1401,6 +1596,7 @@ class MaterialPreviewWidget(QOpenGLWidget):
         self._bone_labels: dict[str, str] = {}
         self._hovered_bone_uid = ""
         self._highlighted_bone_uids: set[str] = set()
+        self._bone_group_colors: dict[str, tuple[float, float, float]] = {}
         self._highlighted_uids: set[str] = set()
         self._flex_sources: dict[str, list[tuple[str, float]]] = {}
         self._flex_rest_values: dict[str, float] = {}
@@ -1422,6 +1618,8 @@ class MaterialPreviewWidget(QOpenGLWidget):
         self._gl_error = ""
         self._gl_error_count = 0
         self._hover_update_queued = False
+        self._texture_uploads_this_frame = 0
+        self._texture_uploads_pending = False
         self._textured_preview_disabled = _truthy_env("MCI_DISABLE_TEXTURED_PREVIEW")
         self._preview_debug_enabled = _truthy_env("MCI_MATERIAL_PREVIEW_DEBUG")
         self._preview_debug_log_path = _preview_debug_log_path()
@@ -1448,7 +1646,7 @@ class MaterialPreviewWidget(QOpenGLWidget):
         self._material_vertex_data = {}
         self._material_flex_deltas = {}
         self._material_texture_paths = {}
-        self._material_texture_ids = {}
+        self._release_material_textures()
         self._collision_lines = {}
         self._collision_colors = {}
         self._collision_labels = {}
@@ -1458,6 +1656,7 @@ class MaterialPreviewWidget(QOpenGLWidget):
         self._bone_labels = {}
         self._hovered_bone_uid = ""
         self._highlighted_bone_uids = set()
+        self._bone_group_colors = {}
         self._highlighted_uids = set()
         self._flex_sources = {}
         self._flex_rest_values = {}
@@ -1490,7 +1689,7 @@ class MaterialPreviewWidget(QOpenGLWidget):
         preview = scan.get("model_preview") if isinstance(scan, dict) else None
         triangles = preview.get("triangles") if isinstance(preview, dict) else []
         self._triangles = [entry for entry in triangles if isinstance(entry, dict)] if isinstance(triangles, list) else []
-        self._material_texture_ids = {}
+        self._release_material_textures()
         self._gl_error = ""
         self._gl_error_count = 0
         self._build_material_arrays()
@@ -1640,6 +1839,19 @@ class MaterialPreviewWidget(QOpenGLWidget):
         self._highlighted_bone_uids = next_uids
         self.update()
 
+    def set_bone_group_color_overlay(self, colors: dict[str, tuple[float, float, float]] | None) -> None:
+        """Per-bone highlight colors, e.g. one distinct color per collision group."""
+        next_colors: dict[str, tuple[float, float, float]] = {}
+        for uid, rgb in (colors or {}).items():
+            try:
+                next_colors[str(uid)] = (float(rgb[0]), float(rgb[1]), float(rgb[2]))
+            except Exception:
+                continue
+        if next_colors == self._bone_group_colors:
+            return
+        self._bone_group_colors = next_colors
+        self.update()
+
     def set_flex_plan(self, plan: dict[str, object] | None) -> None:
         self.plan = plan
         self._load_flex_plan(plan)
@@ -1746,6 +1958,9 @@ class MaterialPreviewWidget(QOpenGLWidget):
         grouped_uvs: dict[str, list[list[float]]] = {}
         grouped_flex_deltas: dict[str, dict[str, list[tuple[int, list[list[float]]]]]] = {}
         texture_paths: dict[str, Path] = {}
+        # exists() costs a filesystem stat; cache it per unique texture string so
+        # large triangle previews do not stat the same path hundreds of thousands of times.
+        texture_path_cache: dict[str, Path | None] = {}
         for triangle in self._triangles:
             uid = str(triangle.get("material_uid") or "")
             raw_points = triangle.get("points")
@@ -1785,8 +2000,11 @@ class MaterialPreviewWidget(QOpenGLWidget):
                     grouped_flex_deltas.setdefault(flex_uid, {}).setdefault(uid, []).append((start_count, deltas))
             texture_raw = str(triangle.get("texture_path") or self._materials.get(uid, {}).get("base_color_path") or "")
             if texture_raw:
-                path = Path(texture_raw)
-                if path.exists():
+                if texture_raw not in texture_path_cache:
+                    candidate = Path(texture_raw)
+                    texture_path_cache[texture_raw] = candidate if candidate.exists() else None
+                path = texture_path_cache[texture_raw]
+                if path is not None:
                     texture_paths[uid] = path
         self._material_positions = {
             uid: np.asarray(points, dtype=np.float32).reshape((-1, 3))
@@ -2004,7 +2222,13 @@ class MaterialPreviewWidget(QOpenGLWidget):
             seed = uid + str(entry.get("base_color_key") or entry.get("material_name") or "")
             value = sum((offset + 1) * ord(char) for offset, char in enumerate(seed))
             values[:3] = colorsys.hsv_to_rgb((value % 360) / 360.0, 0.62, 0.86)
-        alpha = float(entry.get("alpha", values[3]) or 1.0)
+        raw_alpha = entry.get("alpha")
+        try:
+            # Explicit None/empty check: alpha of exactly 0.0 is valid (fully
+            # transparent) and must not fall back to opaque.
+            alpha = values[3] if raw_alpha is None or raw_alpha == "" else float(raw_alpha)
+        except (TypeError, ValueError):
+            alpha = values[3]
         if not self._respect_alpha:
             alpha = 1.0
         elif alpha <= 0.02:
@@ -2024,18 +2248,65 @@ class MaterialPreviewWidget(QOpenGLWidget):
         return QtGui.QColor.fromRgbF(red, green, blue, alpha)
 
     def initializeGL(self) -> None:
+        context = self.context()
+        if context is not None:
+            # Free GPU textures when the context goes away (widget teardown or
+            # context recreation while docking/reparenting).
+            context.aboutToBeDestroyed.connect(self._on_context_about_to_be_destroyed, QtCore.Qt.ConnectionType.DirectConnection)
+        # A fresh context invalidates previously created texture names.
+        self._material_texture_ids = {}
         if GL:
             GL.glClearColor(0.08, 0.09, 0.10, 1.0)
             GL.glEnable(GL.GL_DEPTH_TEST)
             GL.glDisable(GL.GL_CULL_FACE)
 
+    def _delete_gl_material_textures(self) -> None:
+        """Delete GL texture objects; the GL context must be current."""
+        ids = [texture_id for texture_id in self._material_texture_ids.values() if texture_id]
+        self._material_texture_ids = {}
+        if ids and GL:
+            try:
+                GL.glDeleteTextures(ids)
+            except Exception:
+                pass
+
+    def _release_material_textures(self) -> None:
+        if not self._material_texture_ids:
+            return
+        context = self.context()
+        if GL and context is not None and context.isValid():
+            try:
+                self.makeCurrent()
+                self._delete_gl_material_textures()
+            finally:
+                self.doneCurrent()
+        else:
+            self._material_texture_ids = {}
+
+    def _on_context_about_to_be_destroyed(self) -> None:
+        try:
+            self.makeCurrent()
+            self._delete_gl_material_textures()
+        except Exception:
+            self._material_texture_ids = {}
+        finally:
+            try:
+                self.doneCurrent()
+            except Exception:
+                pass
+
+    def _has_drawable_content(self) -> bool:
+        return bool(self._material_positions or self._collision_lines or self._bone_lines)
+
     def paintGL(self) -> None:
+        self._texture_uploads_this_frame = 0
+        self._texture_uploads_pending = False
         if GL:
             try:
                 GL.glViewport(0, 0, *self._gl_viewport_size())
                 GL.glClearColor(0.08, 0.09, 0.10, 1.0)
                 GL.glClear(GL.GL_COLOR_BUFFER_BIT | GL.GL_DEPTH_BUFFER_BIT)
-                if self._material_positions:
+                if self._has_drawable_content():
                     self._draw_mesh_gl()
                     self._gl_error = ""
             except Exception as exc:
@@ -2044,7 +2315,7 @@ class MaterialPreviewWidget(QOpenGLWidget):
         painter = QtGui.QPainter(self)
         try:
             painter.setRenderHint(QtGui.QPainter.RenderHint.Antialiasing)
-            if not self._material_positions:
+            if not self._has_drawable_content():
                 painter.fillRect(self.rect(), QtGui.QColor(22, 24, 27))
                 painter.setPen(QtGui.QColor(230, 230, 230))
                 painter.drawText(self.rect(), QtCore.Qt.AlignmentFlag.AlignCenter, self._empty_message)
@@ -2056,6 +2327,9 @@ class MaterialPreviewWidget(QOpenGLWidget):
             self._draw_overlay(painter)
         finally:
             painter.end()
+        if self._texture_uploads_pending:
+            # Stream the remaining texture decodes/uploads over upcoming frames.
+            QtCore.QTimer.singleShot(0, self.update)
 
     def _gl_viewport_size(self) -> tuple[int, int]:
         dpr = max(1.0, float(self.devicePixelRatioF()))
@@ -2082,6 +2356,13 @@ class MaterialPreviewWidget(QOpenGLWidget):
             return self._material_texture_ids[uid]
         if not GL:
             return 0
+        if self._texture_uploads_this_frame >= self.MAX_TEXTURE_UPLOADS_PER_FRAME:
+            # Decode/upload at most a few textures per frame so the first paint
+            # does not freeze on decoding many large images; the uid stays
+            # uncached and is retried on the requeued update().
+            self._texture_uploads_pending = True
+            return 0
+        self._texture_uploads_this_frame += 1
         path = self._material_texture_paths.get(uid)
         if path is None or not path.exists():
             self._material_texture_ids[uid] = 0
@@ -2234,12 +2515,16 @@ class MaterialPreviewWidget(QOpenGLWidget):
         for uid, lines in self._bone_lines.items():
             if len(lines) < 2:
                 continue
-            highlighted = uid == self._hovered_bone_uid or uid in self._highlighted_bone_uids
+            group_color = self._bone_group_colors.get(uid)
+            highlighted = uid == self._hovered_bone_uid or uid in self._highlighted_bone_uids or group_color is not None
             if highlighted:
                 GL.glDisable(GL.GL_DEPTH_TEST)
                 GL.glLineWidth(BONE_HIGHLIGHT_LINE_WIDTH)
                 GL.glPointSize(BONE_HIGHLIGHT_POINT_SIZE)
-                GL.glColor4f(1.0, 0.72, 0.05, 1.0)
+                if group_color is not None and uid != self._hovered_bone_uid:
+                    GL.glColor4f(group_color[0], group_color[1], group_color[2], 1.0)
+                else:
+                    GL.glColor4f(1.0, 0.72, 0.05, 1.0)
             else:
                 GL.glEnable(GL.GL_DEPTH_TEST)
                 GL.glLineWidth(BONE_OVERLAY_LINE_WIDTH)

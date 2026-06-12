@@ -85,6 +85,19 @@ def path_is_ascii(path: Path | str) -> bool:
 
 
 def external_tool_root() -> Path:
+    # VTFCmd uses ANSI file APIs, so the staging root itself must be ASCII.
+    # %LOCALAPPDATA%/%TEMP%/home all live under C:\Users\<username> and are
+    # non-ASCII for non-ASCII Windows usernames; fall back to a guaranteed
+    # ASCII location in that case.
+    for raw in (os.environ.get("LOCALAPPDATA"), os.environ.get("TEMP"), str(Path.home())):
+        if raw and path_is_ascii(raw):
+            return Path(raw) / "MMDCharacterImporter" / "external_tool_staging"
+    if os.name == "nt":
+        system_root = Path(os.environ.get("SystemRoot") or r"C:\Windows")
+        candidate = system_root / "Temp"
+        if path_is_ascii(candidate):
+            return candidate / "MMDCharacterImporter" / "external_tool_staging"
+        return Path(system_root.anchor or "C:\\") / "MMDCharacterImporter" / "external_tool_staging"
     base = Path(os.environ.get("LOCALAPPDATA") or os.environ.get("TEMP") or Path.home())
     return base / "MMDCharacterImporter" / "external_tool_staging"
 
@@ -298,7 +311,6 @@ def find_vtfcmd() -> Path | None:
     if path_hit:
         return Path(path_hit)
     for raw in (
-        r"C:\Users\1peng\Modding\Plugins\vtflib132-bin\bin\x64\VTFCmd.exe",
         r"C:\Program Files\VTFEdit\VTFCmd.exe",
         r"C:\Program Files (x86)\VTFEdit\VTFCmd.exe",
         r"C:\Program Files\Nem's Tools\VTFEdit\VTFCmd.exe",
@@ -454,6 +466,12 @@ def process_icons(
                 vtf = convert_to_vtf(vtfcmd, jpg, output_dir)
                 vtf_conversion["converted"].append(str(vtf))
                 generated.append(file_row(vtf, "vtf"))
+                # F.vmt/E.vmt reference vgui/entities/{basename}_F/_E, so also write a
+                # matching-named VTF copy beside them; the VMT+VTF pair then resolves
+                # when manually copied into materials/vgui/entities.
+                named_vtf = output_dir / f"{basename}_{jpg.stem}.vtf"
+                shutil.copyfile(vtf, named_vtf)
+                generated.append(file_row(named_vtf, "vtf"))
             except Exception as exc:
                 validation_errors.append(str(exc))
                 generated.append(file_row(output_dir / f"{jpg.stem}.vtf", "vtf", [str(exc)]))

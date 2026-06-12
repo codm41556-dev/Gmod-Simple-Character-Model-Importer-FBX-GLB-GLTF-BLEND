@@ -128,7 +128,7 @@ def is_safe_name(name: str) -> bool:
 
 def write_json(path: Path, payload: dict[str, object]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    path.write_text(json.dumps(payload, ensure_ascii=False, separators=(",", ":")), encoding="utf-8")
 
 
 def load_json(path: Path) -> dict[str, object]:
@@ -266,11 +266,23 @@ def image_alpha_stats(image: bpy.types.Image) -> dict[str, object]:
         IMAGE_ALPHA_STATS_CACHE[cache_key] = dict(stats)
         return stats
     try:
-        pixels = array("f", [0.0]) * (total * 4)
-        image.pixels.foreach_get(pixels)
-        zero_pixels = sum(1 for offset in range(3, len(pixels), 4) if pixels[offset] <= TEXTURE_ALPHA_ZERO_THRESHOLD)
+        try:
+            import numpy as np
+
+            buffer = np.empty(total * 4, dtype=np.float32)
+            image.pixels.foreach_get(buffer)
+            zero_pixels = int((buffer[3::4] <= TEXTURE_ALPHA_ZERO_THRESHOLD).sum())
+            del buffer
+        except ImportError:
+            pixels = array("f", [0.0]) * (total * 4)
+            image.pixels.foreach_get(pixels)
+            zero_pixels = sum(1 for offset in range(3, len(pixels), 4) if pixels[offset] <= TEXTURE_ALPHA_ZERO_THRESHOLD)
         stats["base_alpha_zero_pixels"] = int(zero_pixels)
         stats["base_alpha_zero_ratio"] = round(float(zero_pixels) / max(1, total), 8)
+        try:
+            image.buffers_free()
+        except Exception:
+            pass
     except Exception as exc:
         stats["base_alpha_stats_error"] = str(exc)
     IMAGE_ALPHA_STATS_CACHE[cache_key] = dict(stats)
@@ -630,13 +642,16 @@ def collect_material_preview(entries: list[dict[str, object]], max_triangles: in
                         v3(matrix @ obj.data.vertices[verts[offset + 1]].co),
                     ]
                     points.extend(coords)
+                    # texture_path is intentionally omitted per triangle: the
+                    # preview widget falls back to the material entry's
+                    # base_color_path via material_uid, and repeating the path
+                    # per triangle multiplies the JSON size several-fold.
                     triangles.append(
                         {
                             "points": coords,
                             "uvs": uvs,
                             "material_uid": uid,
                             "color": entry.get("preview_color") or entry.get("swatch") or [0.8, 0.8, 0.8, 1.0],
-                            "texture_path": entry.get("base_color_path", ""),
                             "alpha": entry.get("alpha", 1.0),
                         }
                     )
@@ -1091,6 +1106,7 @@ def rename_target_materials(entries: list[dict[str, object]], target_key: str = 
             target_to_name[target_uid] = str(target_entry.get("proposed_name") or target_entry.get("material_name") or target_uid)
     used: set[str] = set()
     renamed: list[dict[str, str]] = []
+    planned: list[tuple[str, bpy.types.Material, str, str]] = []
     for target_uid, name in sorted(target_to_name.items(), key=lambda item: natural_key(item[1])):
         mat = mat_by_uid.get(target_uid)
         if mat is None:
@@ -1099,8 +1115,20 @@ def rename_target_materials(entries: list[dict[str, object]], target_key: str = 
         while candidate in used:
             candidate = f"{candidate}_{len(used) + 1:02d}"
         used.add(candidate)
-        old_name = mat.name
+        planned.append((target_uid, mat, mat.name, candidate))
+    # Two-phase rename: move all targets to temporary names first so a final
+    # name can never collide with another target's pre-rename name (Blender
+    # silently appends '.001' on datablock name collisions).
+    for index, (_uid, mat, _old_name, _candidate) in enumerate(planned):
+        mat.name = f"__mci_rename_tmp_{index:03d}__"
+    for target_uid, mat, old_name, candidate in planned:
+        conflict = bpy.data.materials.get(candidate)
+        if conflict is not None and conflict is not mat:
+            # A merged-away/unused datablock still holds the name; move it aside.
+            conflict.name = candidate + "__mci_displaced"
         mat.name = candidate
+        if mat.name != candidate:
+            raise RuntimeError(f"Material rename collision: wanted {candidate!r} but Blender assigned {mat.name!r}")
         renamed.append({"uid": target_uid, "old_name": old_name, "new_name": mat.name})
     return {"renamed": renamed, "count": len(renamed)}
 
@@ -1477,10 +1505,14 @@ def detect_and_offset_stacked_material_groups(
                         "matched_faces": int(matched),
                         "group_a_faces": len(left_signatures),
                         "group_b_faces": len(right_signatures),
+                        "moved_group": right_name,
                     }
                     object_pairs.append(pair)
                     pairs.append(pair)
-                    faces_to_move.update(int(signature["face_index"]) for signature in left_signatures)
+                    # Offset only one group of the pair: moving both along
+                    # their own normals leaves identically-oriented duplicates
+                    # coincident, while moving just the second group always
+                    # separates the layers regardless of normal orientation.
                     faces_to_move.update(int(signature["face_index"]) for signature in right_signatures)
         if not faces_to_move:
             continue
@@ -1533,11 +1565,14 @@ def build_merge_plan_from_analysis(
     raw_materials = analysis.get("materials", [])
     materials = [entry for entry in raw_materials if isinstance(entry, dict) and bool(entry.get("keep", True))]
     count = len(materials)
-    group_size = max(1, math.ceil(count / max(1, limit))) if count > limit else 1
+    # Distribute into exactly min(count, limit) balanced groups so going
+    # slightly over the limit only merges the necessary few pairs (e.g. 33
+    # materials with limit 32 yields 32 groups, not 17).
+    final_group_count = min(count, max(1, limit))
     merge_entries: list[dict[str, object]] = []
     for index, entry in enumerate(materials, start=1):
-        group = ((index - 1) // group_size) + 1
         single = count <= limit
+        group = index if single else ((index - 1) * final_group_count) // max(1, count) + 1
         final_name = str(entry.get("proposed_name") or entry.get("material_name") or f"mat_{index:03d}") if single else f"mat_group_{group:03d}"
         merge_entries.append(
             {
@@ -1587,7 +1622,11 @@ def save_material_mapping(
             if isinstance(final_materials, list):
                 for entry in final_materials:
                     if isinstance(entry, dict):
-                        items.append((entry.get("final_name", ""), entry.get("base_color_path", "")))
+                        # Entries from the after-analysis carry material_name /
+                        # proposed_name, never final_name; fall back so the npy
+                        # name column is not silently empty.
+                        name = str(entry.get("final_name") or entry.get("proposed_name") or entry.get("material_name") or "")
+                        items.append((name, entry.get("base_color_path", "")))
             np.save(str(path_npy.with_suffix("")), np.array(items, dtype=object))
         except Exception as exc:
             path_npy.with_suffix(".npy.warning.txt").write_text(str(exc), encoding="utf-8")
@@ -1721,6 +1760,11 @@ def consolidate_merge_groups(entries: list[dict[str, object]], final_by_group: d
     # consolidation is deterministic and keeps the workflow usable in background mode.
     uid_to_group = {str(entry.get("uid") or ""): int(entry.get("group", 0) or 0) for entry in entries}
     uid_to_entry = {str(entry.get("uid") or ""): entry for entry in entries}
+    uid_by_current_name: dict[str, str] = {}
+    for entry in entries:
+        current = str(entry.get("current_name") or entry.get("material_name") or "")
+        if current and current not in uid_by_current_name:
+            uid_by_current_name[current] = str(entry.get("uid") or "")
     uid_by_slot = material_slots_by_uid(
         [
             {
@@ -1740,13 +1784,7 @@ def consolidate_merge_groups(entries: list[dict[str, object]], final_by_group: d
         for slot_index, mat in enumerate(obj.data.materials):
             if mat is None:
                 continue
-            uid = uid_by_slot.get((obj.name, slot_index))
-            if not uid:
-                for entry in entries:
-                    current = str(entry.get("current_name") or entry.get("material_name") or "")
-                    if mat.name == current:
-                        uid = str(entry.get("uid") or "")
-                        break
+            uid = uid_by_slot.get((obj.name, slot_index)) or uid_by_current_name.get(mat.name, "")
             group = uid_to_group.get(str(uid or ""), 0)
             if group and group not in target_material_by_group:
                 target_material_by_group[group] = mat
@@ -1762,12 +1800,7 @@ def consolidate_merge_groups(entries: list[dict[str, object]], final_by_group: d
             mat = old_slots[poly.material_index] if 0 <= poly.material_index < len(old_slots) else None
             if mat is None:
                 continue
-            uid = ""
-            for entry in entries:
-                current = str(entry.get("current_name") or entry.get("material_name") or "")
-                if mat.name == current:
-                    uid = str(entry.get("uid") or "")
-                    break
+            uid = uid_by_current_name.get(mat.name, "")
             group = uid_to_group.get(uid, 0)
             if not group:
                 continue
@@ -1792,10 +1825,21 @@ def consolidate_merge_groups(entries: list[dict[str, object]], final_by_group: d
         removed_slots += max(0, len(old_slots) - len(new_mats))
 
     renamed: list[dict[str, object]] = []
-    for group, mat in sorted(target_material_by_group.items()):
-        old = mat.name
-        mat.name = final_by_group[group]
-        renamed.append({"group": group, "old_name": old, "new_name": mat.name})
+    ordered_targets = sorted(target_material_by_group.items())
+    old_names = {group: mat.name for group, mat in ordered_targets}
+    # Two-phase rename to avoid silent '.001' collisions between targets'
+    # final names and other (still-present) material datablocks.
+    for index, (_group, mat) in enumerate(ordered_targets):
+        mat.name = f"__mci_merge_tmp_{index:03d}__"
+    for group, mat in ordered_targets:
+        final = final_by_group[group]
+        conflict = bpy.data.materials.get(final)
+        if conflict is not None and conflict is not mat:
+            conflict.name = final + "__mci_displaced"
+        mat.name = final
+        if mat.name != final:
+            raise RuntimeError(f"Merged material rename collision: wanted {final!r} but Blender assigned {mat.name!r}")
+        renamed.append({"group": group, "old_name": old_names[group], "new_name": mat.name})
     return {
         "method": "internal_group_consolidation",
         "changed_polygons": changed_polygons,
