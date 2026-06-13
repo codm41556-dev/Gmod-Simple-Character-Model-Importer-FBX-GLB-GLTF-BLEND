@@ -1240,6 +1240,30 @@ def add_optional_canonical_smd_warnings(warnings: list[str], step9_dir: Path) ->
         warnings.append(warning)
 
 
+INPUT_AVAILABILITY_WARNINGS = (
+    ("step11_vrd", "Step 11 VRD file was not found; QC will omit $proceduralbones."),
+    ("step12_manifest", "Step 12 texture manifest was not found; material conversion will be incomplete."),
+    ("step13_dir", "Step 13 icons were not found; fallback entity icons will be used if available."),
+)
+
+
+def refresh_input_availability_warnings(plan: dict[str, Any], warnings: list[str]) -> None:
+    """Re-evaluate optional-input warnings against the current filesystem.
+
+    The plan snapshots these warnings at analyze time, but steps 11-13 are
+    often run after Generate QC. Compile actually consumes whatever exists at
+    compile time, so the report must not parrot stale "not found" messages
+    (and must warn when an input vanished after the analyze).
+    """
+    inputs = plan.get("inputs", {}) if isinstance(plan.get("inputs"), dict) else {}
+    messages = {message for _key, message in INPUT_AVAILABILITY_WARNINGS}
+    warnings[:] = [warning for warning in warnings if str(warning) not in messages]
+    for key, message in INPUT_AVAILABILITY_WARNINGS:
+        path_text = str(inputs.get(key) or "")
+        if not path_text or not Path(path_text).exists():
+            warnings.append(message)
+
+
 def load_smds(smd_files: list[str]) -> tuple[list[SmdData], dict[int, SmdNode]]:
     smds = [parse_smd(Path(path), include_triangles=True) for path in smd_files]
     nodes: dict[int, SmdNode] = {}
@@ -1280,12 +1304,9 @@ def analyze(input_path: Path, author: str = "", category: str = "", model_name: 
                 "female reference pose. Re-run Step 9 to regenerate both reference animations."
             )
     texture_manifest = Path(discovered["step12_manifest"])
-    if not texture_manifest.exists():
-        warnings.append("Step 12 texture manifest was not found; material conversion will be incomplete.")
-    if not Path(discovered["step11_vrd"]).exists():
-        warnings.append("Step 11 VRD file was not found; QC will omit $proceduralbones.")
-    if not Path(discovered["step13_dir"]).exists():
-        warnings.append("Step 13 icons were not found; fallback entity icons will be used if available.")
+    for key, message in INPUT_AVAILABILITY_WARNINGS:
+        if not Path(str(discovered.get(key) or "")).exists():
+            warnings.append(message)
 
     smds, nodes = load_smds(smd_files) if smd_files else ([], {})
     stats = weighted_stats_from_smds(smds, nodes) if nodes else {}
@@ -3227,6 +3248,7 @@ def compose(plan_path: Path) -> dict[str, Any]:
         warnings = without_optional_canonical_smd_warnings(warnings)
     else:
         add_optional_canonical_smd_warnings(warnings, Path(str(plan.get("step9_dir") or "")))
+    refresh_input_availability_warnings(plan, warnings)
     ensure_external_safe_qc_source(plan, warnings)
     plan["warnings"] = warnings
     write_json(plan_path, plan)

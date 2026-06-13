@@ -93,6 +93,27 @@ WINDOWS_STATUS_DLL_INIT_FAILED_CODES = {0xC0000142, -1073741502}
 MISSING_OUTPUT_RE = re.compile(r"Blender(?: render)? completed but did not write (?P<path>[^\r\n]+)")
 
 
+def resolve_icon_vmd_path(raw: object) -> Path:
+    """Resolve a body-VMD path, healing stale bundled-resource locations.
+
+    PyInstaller onefile builds expose DEFAULT_ICON_VMD under a per-process
+    %TEMP%\\_MEIxxxxxx folder, and icon plans/settings written by an earlier
+    run may have captured that absolute path. When the stored path no longer
+    exists but clearly pointed at the bundled reference motion, fall back to
+    the current default instead of failing.
+    """
+    text = str(raw or "").strip()
+    if not text:
+        return DEFAULT_ICON_VMD
+    path = Path(text)
+    if path.exists():
+        return path
+    lower = text.lower()
+    if path.name.lower() == DEFAULT_ICON_VMD.name.lower() or "\\_mei" in lower or "/_mei" in lower:
+        return DEFAULT_ICON_VMD
+    return path
+
+
 TEXTURE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tga", ".dds", ".spa", ".sph"}
 
 HUMANOID_SKELETON_GROUPS: dict[str, tuple[str, ...]] = {
@@ -4927,7 +4948,7 @@ def run_icons(
             raise FileNotFoundError(BLENDER_ICON_SCRIPT)
         setup = ensure_portable_blender(progress, cancel_check=cancel_check)
         pmx_path = Path(str(plan.get("pmx_path") or ""))
-        vmd_path = Path(str(plan.get("body_vmd_path") or plan.get("vmd_path") or DEFAULT_ICON_VMD))
+        vmd_path = resolve_icon_vmd_path(plan.get("body_vmd_path") or plan.get("vmd_path"))
         face_vmds = [Path(str(path)) for path in plan.get("face_vmd_paths", []) if str(path).strip()] if isinstance(plan.get("face_vmd_paths"), list) else []
         selected_frame = int(plan.get("frame", 334) if frame is None else frame)
         if not pmx_path.exists():

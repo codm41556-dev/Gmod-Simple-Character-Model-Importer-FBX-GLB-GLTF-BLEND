@@ -1200,6 +1200,15 @@ def side_matches(candidate: str, side: str) -> bool:
     return f"_{side}_" in lower or lower.endswith(f"_{side}") or f".bip01_{side}_" in lower
 
 
+def is_descendant_of(bone: bpy.types.Bone, ancestor_name: str) -> bool:
+    parent = bone.parent
+    while parent is not None:
+        if parent.name == ancestor_name:
+            return True
+        parent = parent.parent
+    return False
+
+
 def collision_influence_bones(armature: bpy.types.Object, bone_name: str) -> list[str]:
     names: list[str] = []
 
@@ -1224,14 +1233,24 @@ def collision_influence_bones(armature: bpy.types.Object, bone_name: str) -> lis
     elif side and "forearm" in lower_bone:
         add(f"ZHandTwist_{side.upper()}")
     elif side and "hand" in lower_bone:
+        # Only descend into the hand's own subtree: name tokens alone can match
+        # unrelated bones (e.g. toe bones containing "finger") on the same side.
         for bone in armature.data.bones:
             lower = bone.name.lower()
-            if side_matches(lower, side) and any(token in lower for token in ("finger", "thumb")):
+            if (
+                side_matches(lower, side)
+                and any(token in lower for token in ("finger", "thumb"))
+                and is_descendant_of(bone, bone_name)
+            ):
                 add(bone.name)
     elif side and "foot" in lower_bone:
         for bone in armature.data.bones:
             lower = bone.name.lower()
-            if side_matches(lower, side) and ("toe" in lower or "ball" in lower):
+            if (
+                side_matches(lower, side)
+                and ("toe" in lower or "ball" in lower)
+                and is_descendant_of(bone, bone_name)
+            ):
                 add(bone.name)
     return names
 

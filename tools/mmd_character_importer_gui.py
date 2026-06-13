@@ -7966,8 +7966,10 @@ class ImporterWindow(QtWidgets.QMainWindow):
             "Body motion VMD",
             "file",
             "VMD motion (*.vmd);;All files (*.*)",
-            default=str(core.DEFAULT_ICON_VMD) if hasattr(core, "DEFAULT_ICON_VMD") else "",
-            hint="Default is reference/ref_motion/bad_bad_water.vmd.",
+            # Leave empty to use the bundled default: its absolute path is
+            # volatile in onefile builds (per-process _MEI temp folder), so it
+            # must never be materialized into the row or the saved settings.
+            hint="Leave empty to use the bundled reference/ref_motion/bad_bad_water.vmd.",
         )
         tab_layout.addWidget(self.icon_body_vmd_row)
 
@@ -8954,7 +8956,10 @@ class ImporterWindow(QtWidgets.QMainWindow):
             self.icon_custom_image_row.set_value(icon_custom)
         icon_body_vmd = str(self.settings_store.value("icon_body_vmd", "", str) or "")
         if icon_body_vmd and hasattr(self, "icon_body_vmd_row"):
-            self.icon_body_vmd_row.set_value(icon_body_vmd)
+            # Heal stale bundled-resource paths (e.g. a dead PyInstaller
+            # _MEIxxxx temp dir from the run that saved the setting).
+            healed_vmd = core.resolve_icon_vmd_path(icon_body_vmd)
+            self.icon_body_vmd_row.set_value("" if healed_vmd == core.DEFAULT_ICON_VMD else str(healed_vmd))
         icon_face_vmds = str(self.settings_store.value("icon_face_vmds", "", str) or "")
         if icon_face_vmds and hasattr(self, "icon_face_vmd_row"):
             self.icon_face_vmd_row.set_value(icon_face_vmds)
@@ -9218,7 +9223,12 @@ class ImporterWindow(QtWidgets.QMainWindow):
         if hasattr(self, "icon_custom_image_row"):
             self.settings_store.setValue("icon_custom_image", self.icon_custom_image_row.value())
         if hasattr(self, "icon_body_vmd_row"):
-            self.settings_store.setValue("icon_body_vmd", self.icon_body_vmd_row.value())
+            icon_body_vmd_value = self.icon_body_vmd_row.value()
+            if icon_body_vmd_value and Path(icon_body_vmd_value) == core.DEFAULT_ICON_VMD:
+                # Keep "use the bundled default" symbolic; the absolute path is
+                # volatile in onefile builds (per-process _MEI temp folder).
+                icon_body_vmd_value = ""
+            self.settings_store.setValue("icon_body_vmd", icon_body_vmd_value)
         if hasattr(self, "icon_face_vmd_row"):
             self.settings_store.setValue("icon_face_vmds", self.icon_face_vmd_row.value())
         if hasattr(self, "icon_frame_spin"):
@@ -11377,6 +11387,38 @@ class ImporterWindow(QtWidgets.QMainWindow):
                 if current and str(Path(current)).casefold().startswith(root_key) and Path(current).exists():
                     continue
                 row.set_value(str(export_dir))
+        # Step 12 takes the workspace's Step 5 material mapping; Step 13 takes
+        # the Step 1 import blend (or the workspace root).
+        texture_row = getattr(self, "texture_input_row", None)
+        if hasattr(texture_row, "set_value"):
+            current = clean_path_text(texture_row.value() if hasattr(texture_row, "value") else "")
+            if not (current and str(Path(current)).casefold().startswith(root_key) and Path(current).exists()):
+                mapping = next(
+                    (
+                        path
+                        for path in (root / "5_sort_materials" / "materials.npy", root / "5_sort_materials" / "materials.json")
+                        if path.is_file()
+                    ),
+                    None,
+                )
+                if mapping is not None:
+                    texture_row.set_value(str(mapping))
+                elif current:
+                    texture_row.set_value("")
+        icon_row = getattr(self, "icon_input_row", None)
+        if hasattr(icon_row, "set_value"):
+            current = clean_path_text(icon_row.value() if hasattr(icon_row, "value") else "")
+            if not (current and str(Path(current)).casefold().startswith(root_key) and Path(current).exists()):
+                import_dir = root / "1_import_mmd_model"
+                blends = [path for path in import_dir.glob("*.blend") if path.is_file()] if import_dir.is_dir() else []
+                preferred = [path for path in blends if path.name.lower().endswith("_import.blend")]
+                pool = preferred or blends
+                if pool:
+                    icon_row.set_value(str(max(pool, key=lambda path: path.stat().st_mtime)))
+                elif (root / "0_source_mmd_assets").is_dir():
+                    icon_row.set_value(str(root))
+                elif current:
+                    icon_row.set_value("")
         self.refresh_workflow_statuses()
 
     def detect_step1_output(self) -> None:
@@ -16703,9 +16745,13 @@ class ImporterWindow(QtWidgets.QMainWindow):
                 return
             candidates.extend(matches)
 
+        step1_root = self.step1_workspace_root()
         for raw in (
             self.carms_input_row.value() if hasattr(self, "carms_input_row") else "",
             self.vrd_input_row.value() if hasattr(self, "vrd_input_row") else "",
+            # The Step 1 tab's workspace outranks in-session leftovers, stored
+            # settings, and the newest-workspace fallback during manual porting.
+            step1_root / "9_export_proportion_trick" / "2_proportion_export" if step1_root else None,
             self.proportion_final_label.text() if hasattr(self, "proportion_final_label") else "",
             self.proportion_export_dir,
             self.proportion_output_edit.text() if hasattr(self, "proportion_output_edit") else "",
@@ -16713,10 +16759,6 @@ class ImporterWindow(QtWidgets.QMainWindow):
             self.settings_store.value("vrd_input_dir", "", str),
         ):
             add_candidate(raw)
-
-        workspace_text = self.workspace_edit.text().strip() if hasattr(self, "workspace_edit") else ""
-        if workspace_text:
-            add_sorted_glob(Path(workspace_text), "9_export_proportion_trick/2_proportion_export")
 
         add_sorted_glob(core.workspaces_root(), "*/9_export_proportion_trick/2_proportion_export")
 
@@ -17878,6 +17920,9 @@ class ImporterWindow(QtWidgets.QMainWindow):
             self.texture_input_row.value() if hasattr(self, "texture_input_row") else "",
             self.material_mapping_label.text() if hasattr(self, "material_mapping_label") else "",
             self.material_output_edit.text() if hasattr(self, "material_output_edit") else "",
+            # The Step 1 tab's workspace outranks stale stored values and the
+            # newest-workspace fallback during manual porting.
+            self.step1_workspace_root(),
             self.settings_store.value("texture_input_mapping", "", str),
         ):
             add_candidate(raw)
@@ -18523,7 +18568,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
         if not pmx_path or not pmx_path.exists():
             self.show_error("Animation Preview", "Select or detect a Step 1 PMX workspace first.")
             return
-        body_vmd = Path(self.icon_body_vmd_row.value().strip()) if hasattr(self, "icon_body_vmd_row") and self.icon_body_vmd_row.value().strip() else core.DEFAULT_ICON_VMD
+        body_vmd = core.resolve_icon_vmd_path(self.icon_body_vmd_row.value() if hasattr(self, "icon_body_vmd_row") else "")
         if not body_vmd.exists():
             self.show_error("Animation Preview", f"Body VMD not found:\n{body_vmd}")
             return
@@ -18568,7 +18613,10 @@ class ImporterWindow(QtWidgets.QMainWindow):
                     if not self.icon_basename_edit.text().strip():
                         self.icon_basename_edit.setText(str(self.current_icon_plan.get("icon_basename") or ""))
                     if hasattr(self, "icon_body_vmd_row") and self.current_icon_plan.get("body_vmd_path"):
-                        self.icon_body_vmd_row.set_value(str(self.current_icon_plan.get("body_vmd_path") or ""))
+                        # Heal stale bundled paths from old plans; keep the
+                        # default symbolic (empty row) so it is never persisted.
+                        healed_vmd = core.resolve_icon_vmd_path(self.current_icon_plan.get("body_vmd_path"))
+                        self.icon_body_vmd_row.set_value("" if healed_vmd == core.DEFAULT_ICON_VMD else str(healed_vmd))
                     if hasattr(self, "icon_face_vmd_row") and isinstance(self.current_icon_plan.get("face_vmd_paths"), list):
                         self.icon_face_vmd_row.set_value("; ".join(str(path) for path in self.current_icon_plan.get("face_vmd_paths", []) if path))
                     if hasattr(self, "icon_frame_spin") and self.current_icon_plan.get("frame") is not None:
@@ -18658,9 +18706,9 @@ class ImporterWindow(QtWidgets.QMainWindow):
                 return
         body_vmd_raw = self.icon_body_vmd_row.value().strip() if hasattr(self, "icon_body_vmd_row") else ""
         if not use_custom:
-            if not body_vmd_raw:
-                body_vmd_raw = str(core.DEFAULT_ICON_VMD)
-            if not Path(body_vmd_raw).exists():
+            body_vmd_path = core.resolve_icon_vmd_path(body_vmd_raw)
+            body_vmd_raw = str(body_vmd_path)
+            if not body_vmd_path.exists():
                 self.show_error("Generate Icons failed", f"Body VMD not found:\n{body_vmd_raw}")
                 return
             for face_vmd in self.icon_face_vmd_paths():
@@ -19332,17 +19380,18 @@ class ImporterWindow(QtWidgets.QMainWindow):
                 return
             candidates.extend(matches)
 
+        step1_root = self.step1_workspace_root()
         for raw in (
             self.qc_input_row.value() if hasattr(self, "qc_input_row") else "",
+            # The Step 1 tab's workspace outranks in-session leftovers, stored
+            # settings, and the newest-workspace fallback during manual porting.
+            step1_root / "9_export_proportion_trick" / "2_proportion_export" if step1_root else None,
             self.proportion_export_dir,
             self.proportion_final_label.text() if hasattr(self, "proportion_final_label") else "",
             self.settings_store.value("proportion_input_blend", "", str),
             self.settings_store.value("qc_input_dir", "", str),
         ):
             add_candidate(raw)
-        workspace_text = self.workspace_edit.text().strip() if hasattr(self, "workspace_edit") else ""
-        if workspace_text:
-            add_sorted_glob(Path(workspace_text), "9_export_proportion_trick/2_proportion_export")
         add_sorted_glob(core.workspaces_root(), "*/9_export_proportion_trick/2_proportion_export")
         seen: set[Path] = set()
         for candidate in candidates:
@@ -19353,7 +19402,10 @@ class ImporterWindow(QtWidgets.QMainWindow):
             if candidate in seen:
                 continue
             seen.add(candidate)
-            if candidate.exists() and (candidate / "Body.smd").exists():
+            # Step 9 prefixes bodygroup SMDs with the model name, so a literal
+            # Body.smd only exists for models whose bodygroup is named "Body";
+            # the QC processor itself accepts any *.smd in the export folder.
+            if candidate.is_dir() and any(candidate.glob("*.smd")):
                 self.qc_input_row.set_value(str(candidate))
                 self.tabs.setCurrentWidget(self.qc_tab)
                 return
@@ -20060,10 +20112,13 @@ class ImporterWindow(QtWidgets.QMainWindow):
                 candidates.append(Path(text))
 
         add(self.release_input_row.value())
+        # The Step 1 tab's workspace outranks in-session leftovers and the
+        # newest-workspace fallback during manual porting.
+        step1_root = self.step1_workspace_root()
+        if step1_root is not None:
+            add(step1_root)
         add(self.qc_output_dir)
         add(self.qc_input_row.value() if hasattr(self, "qc_input_row") else "")
-        workspace_text = self.workspace_edit.text().strip() if hasattr(self, "workspace_edit") else ""
-        add(workspace_text)
         try:
             candidates.extend(sorted(core.workspaces_root().glob("*/14_sort_qc_compile"), key=lambda item: item.stat().st_mtime, reverse=True))
         except Exception:
