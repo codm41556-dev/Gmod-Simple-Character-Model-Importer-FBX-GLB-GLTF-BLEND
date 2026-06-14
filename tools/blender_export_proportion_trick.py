@@ -22,6 +22,10 @@ PROPORTION_TEMPLATE = PROPORTION_ROOT / "proportion_trick_4.5.10.blend"
 PROPORTION_TEXT_BLOCK = "Proportion Trick Full"
 HELPER_MESH_NAMES = {"smd_bone_vis"}
 PROTECTED_EXTRA_BONES = {"ZArmTwist_L", "ZArmTwist_R", "ZHandTwist_L", "ZHandTwist_R", "Eye_L", "Eye_R"}
+# Source's studiomdl aborts above 256 bones. Target a lower count so the Step 14
+# $definebone parent-repair (which can add a few bones) still fits under 256.
+SOURCE_MAX_BONES = 256
+SOURCE_BONE_LIMIT_TARGET = 248
 PHYSICS_MERGE_DISTANCE = 1.0
 NONESSENTIAL_EXPORT_ROLL_OFFSET_RADIANS = math.pi
 EXPECTED_PROPORTION_ANIMS = {
@@ -391,6 +395,120 @@ def remove_zero_weight_nonessential_bones(armature: bpy.types.Object, threshold:
         "removed_bones": to_remove[:1000],
         "reparented_children": reparented[:1000],
         "protected_essential_bone_count": sum(1 for name in bone_names if is_essential_bone(name)),
+    }
+
+
+def bone_weight_totals(meshes: list[bpy.types.Object]) -> dict[str, float]:
+    totals: dict[str, float] = {}
+    for obj in meshes:
+        names_by_index = {vertex_group.index: vertex_group.name for vertex_group in obj.vertex_groups}
+        for vertex in obj.data.vertices:
+            for group in vertex.groups:
+                if group.weight > 0.0:
+                    name = names_by_index.get(group.group)
+                    if name is not None:
+                        totals[name] = totals.get(name, 0.0) + float(group.weight)
+    return totals
+
+
+def transfer_vertex_group_weights(meshes: list[bpy.types.Object], source_name: str, target_name: str) -> None:
+    """Additively fold source group weights into target, then drop the source group."""
+    for obj in meshes:
+        source = obj.vertex_groups.get(source_name)
+        if source is None:
+            continue
+        target = obj.vertex_groups.get(target_name)
+        if target is None:
+            target = obj.vertex_groups.new(name=target_name)
+        source_index = source.index
+        for vertex in obj.data.vertices:
+            for group in vertex.groups:
+                if group.group == source_index and group.weight > 0.0:
+                    target.add([vertex.index], float(group.weight), "ADD")
+                    break
+        obj.vertex_groups.remove(source)
+
+
+def enforce_source_bone_limit(armature: bpy.types.Object, target: int = SOURCE_BONE_LIMIT_TARGET) -> dict[str, object]:
+    """Merge the lowest-impact leaf bones into their parents until the skeleton
+    fits Source's 256-bone limit.
+
+    Only non-essential leaf bones (cloth/hair/accessory chain tips) are merged,
+    lowest total vertex-weight first, with their weights folded into the parent
+    so deformation is preserved. ValveBiped and protected helper bones are never
+    touched. Iterates because removing a chain tip exposes the next segment.
+    """
+    bone_count_before = len(armature.data.bones)
+    if bone_count_before <= target:
+        return {
+            "enabled": True,
+            "needed": False,
+            "source_max_bones": SOURCE_MAX_BONES,
+            "target": target,
+            "bone_count_before": bone_count_before,
+            "bone_count_after": bone_count_before,
+            "merged_bone_count": 0,
+            "merged_bones": [],
+        }
+
+    meshes = visible_export_meshes()
+    merged: list[dict[str, object]] = []
+    log(f"Skeleton has {bone_count_before} bones (> target {target}); merging lowest-impact leaf bones to fit Source's {SOURCE_MAX_BONES}-bone limit.")
+    guard = 0
+    while len(armature.data.bones) > target and guard < bone_count_before:
+        guard += 1
+        bones = armature.data.bones
+        has_children = {bone.parent.name for bone in bones if bone.parent}
+        parent_of = {bone.name: (bone.parent.name if bone.parent else None) for bone in bones}
+        weights = bone_weight_totals(meshes)
+        candidates = [
+            bone.name
+            for bone in bones
+            if not is_essential_bone(bone.name) and bone.name not in has_children
+        ]
+        if not candidates:
+            log("WARNING: no further non-essential leaf bones available to merge; stopping bone-limit reduction.")
+            break
+        candidates.sort(key=lambda name: (weights.get(name, 0.0), name))
+        need = len(bones) - target
+        batch = candidates[:max(1, need)]
+
+        # Fold weights into each leaf's nearest surviving parent (essential or a
+        # non-removed bone), then delete the leaf bone and its vertex group.
+        batch_set = set(batch)
+        targets: dict[str, str] = {}
+        for name in batch:
+            parent = parent_of.get(name)
+            while parent and parent in batch_set:
+                parent = parent_of.get(parent)
+            if parent:
+                targets[name] = parent
+        for name, parent in targets.items():
+            transfer_vertex_group_weights(meshes, name, parent)
+
+        set_active_only(armature)
+        bpy.ops.object.mode_set(mode="EDIT")
+        edit_bones = armature.data.edit_bones
+        for name in batch:
+            bone = edit_bones.get(name)
+            if bone is None:
+                continue
+            edit_bones.remove(bone)
+        bpy.ops.object.mode_set(mode="OBJECT")
+        for name in batch:
+            merged.append({"bone": name, "merged_into": targets.get(name, "")})
+
+    bone_count_after = len(armature.data.bones)
+    log(f"Bone-limit reduction merged {len(merged)} bone(s): {bone_count_before} -> {bone_count_after} bones.")
+    return {
+        "enabled": True,
+        "needed": True,
+        "source_max_bones": SOURCE_MAX_BONES,
+        "target": target,
+        "bone_count_before": bone_count_before,
+        "bone_count_after": bone_count_after,
+        "merged_bone_count": len(merged),
+        "merged_bones": merged[:1000],
     }
 
 
@@ -971,6 +1089,10 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     else:
         log("Zero-weight non-essential bone cleanup is disabled for this Step 9 run.")
         zero_weight_bone_report = {"enabled": False, "removed_bone_count": 0, "removed_bones": []}
+    # Always keep the skeleton under Source's 256-bone hard limit (issue #80):
+    # high-bone-count MMD models (dense cloth/hair chains) otherwise abort
+    # studiomdl in Step 14 with "Too many bones used in model".
+    bone_limit_report = enforce_source_bone_limit(armature)
     armature_report = prepare_armature_for_raw_export(armature)
     physics_simplification_report = simplify_physics_for_source_compile()
 
@@ -1025,6 +1147,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         "final_dir": str(final_dir),
         "face_basis_stacking": face_report,
         "zero_weight_bone_cleanup": zero_weight_bone_report,
+        "source_bone_limit": bone_limit_report,
         "armature_preparation": armature_report,
         "physics_simplification": physics_simplification_report,
         "raw_export": {

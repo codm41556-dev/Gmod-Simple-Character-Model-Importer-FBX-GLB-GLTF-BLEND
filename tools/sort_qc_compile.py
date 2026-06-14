@@ -49,18 +49,15 @@ ESSENTIAL_EXACT = {"ZArmTwist_L", "ZArmTwist_R", "ZHandTwist_L", "ZHandTwist_R",
 GENDER_CHOICES = ("female", "male")
 GENDER_ANIMATION_INCLUDES = {
     "female": {
+        # Playermodel QC needs ONLY the standard GMod player animation packs.
+        # Pulling in the humans/* NPC sets and alyx_* packs (issue #83) breaks
+        # player animations such as jump transitions.
         "player": [
             'f_anm.mdl',
             'f_gst.mdl',
             'f_pst.mdl',
             'f_shd.mdl',
             'f_ss.mdl',
-            'humans/female_shared.mdl',
-            'humans/female_ss.mdl',
-            'humans/female_gestures.mdl',
-            'humans/female_postures.mdl',
-            'alyx_animations.mdl',
-            'alyx_postures.mdl',
         ],
         "npc": [
             'humans/female_shared.mdl',
@@ -79,10 +76,6 @@ GENDER_ANIMATION_INCLUDES = {
             'm_pst.mdl',
             'm_shd.mdl',
             'm_ss.mdl',
-            'humans/male_shared.mdl',
-            'humans/male_ss.mdl',
-            'humans/male_gestures.mdl',
-            'humans/male_postures.mdl',
         ],
         "npc": [
             'humans/male_shared.mdl',
@@ -1577,7 +1570,7 @@ def base_qc_lines(
     lines.append('$ikautoplaylock "lfoot" 0.7 0.1 \n\n')
     reference_name = gendered_reference_name(plan, source_dir / "anims")
     lines.append(f'$sequence reference "anims/{reference_name}" fps 1 \n')
-    lines.append('$origin 0 0 -2.40 \n\n')
+    lines.append('$origin 0 0 -1.80 \n\n')
     lines.append('$animation a_proportions "anims/proportions" subtract reference 0 \n\n')
     lines.append('$sequence proportions a_proportions predelta autoplay \n\n')
     lines.append('$Sequence "ragdoll" {\n')
