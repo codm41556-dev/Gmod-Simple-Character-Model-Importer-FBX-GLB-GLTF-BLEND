@@ -1416,6 +1416,11 @@ def material_plan_rows(manifest_path: Path) -> list[dict[str, Any]]:
                 "base_png": str(row.get("base_output_path") or ""),
                 "normal_png": str(row.get("normal_output_path") or ""),
                 "normal_status": str(row.get("normal_status") or row.get("normal_action") or ""),
+                # Optional Step 12 PBR outputs (manual scheme only; empty for
+                # the legacy/auto-port path, which keeps the VMT unchanged).
+                "phongexp_png": str(row.get("phongexp_output_path") or ""),
+                "selfillum_png": str(row.get("selfillum_output_path") or ""),
+                "pbr_enabled": row.get("pbr_enabled", []) if isinstance(row.get("pbr_enabled"), list) else [],
                 "warnings": row.get("warnings", []) if isinstance(row.get("warnings"), list) else [],
             }
         )
@@ -2592,11 +2597,23 @@ def convert_one_vtf(vtfcmd: Path, image_path: Path, output_dir: Path) -> Path:
             shutil.rmtree(scratch, ignore_errors=True)
 
 
-def write_vmt(path: Path, author: str, model_name: str, material_name: str, has_normal: bool) -> None:
+def write_vmt(
+    path: Path,
+    author: str,
+    model_name: str,
+    material_name: str,
+    has_normal: bool,
+    phongexp_texture: str | None = None,
+    selfillum_mask: str | None = None,
+) -> None:
     bump = f"models/{author}/{model_name}/{material_name}_n" if has_normal else f"models/{author}/shared/normal"
-    phong = f"models/{author}/shared/phong_exp"
+    # A per-material phong-exponent map (Step 12 PBR scheme) carries gloss in
+    # red and metallic in alpha, replacing the shared static exponent. When
+    # absent (legacy/auto-port), fall back to the shared texture so the VMT is
+    # byte-identical to before.
+    phong = phongexp_texture or f"models/{author}/shared/phong_exp"
     phong_fresnel = "[0.0 1.5 2]" if has_normal else "[0.0 0.5 1]"
-    path.write_text(
+    body = (
         "VertexLitGeneric\n"
         "{\n"
         f'\t$basetexture "models/{author}/{model_name}/{material_name}"\n'
@@ -2614,9 +2631,14 @@ def write_vmt(path: Path, author: str, model_name: str, material_name: str, has_
         '\t$rimlight "1"\n'
         '\t$rimlightexponent "2"\n'
         '\t$rimlightboost "2"\n'
-        "}\n",
-        encoding="utf-8",
     )
+    if selfillum_mask:
+        body += (
+            '\t$selfillum "1"\n'
+            f'\t$selfillummask "{selfillum_mask}"\n'
+        )
+    body += "}\n"
+    path.write_text(body, encoding="utf-8")
 
 
 def compose_materials(plan: dict[str, Any], addon_dir: Path) -> tuple[list[dict[str, Any]], list[str], list[str]]:
@@ -2636,11 +2658,19 @@ def compose_materials(plan: dict[str, Any], addon_dir: Path) -> tuple[list[dict[
         material_name = safe_name(str(row.get("output_name") or row.get("material_name") or "material"), "material")
         base_png_raw = str(row.get("base_png") or "").strip()
         normal_png_raw = str(row.get("normal_png") or "").strip()
+        phongexp_png_raw = str(row.get("phongexp_png") or "").strip()
+        selfillum_png_raw = str(row.get("selfillum_png") or "").strip()
         base_png = Path(base_png_raw)
         normal_png = Path(normal_png_raw)
+        phongexp_png = Path(phongexp_png_raw)
+        selfillum_png = Path(selfillum_png_raw)
         base_vtf = out_dir / f"{material_name}.vtf"
         normal_vtf = out_dir / f"{material_name}_n.vtf"
+        phongexp_vtf = out_dir / f"{material_name}_exp.vtf"
+        selfillum_vtf = out_dir / f"{material_name}_selfillum.vtf"
         has_normal = False
+        phongexp_texture: str | None = None
+        selfillum_mask: str | None = None
         try:
             if vtfcmd and base_png_raw and base_png.is_file():
                 converted = convert_one_vtf(vtfcmd, base_png, out_dir)
@@ -2660,8 +2690,28 @@ def compose_materials(plan: dict[str, Any], addon_dir: Path) -> tuple[list[dict[
                 files.append(file_row(normal_vtf, "normal_vtf"))
         except Exception as exc:
             warnings.append(str(exc))
+        try:
+            if vtfcmd and phongexp_png_raw and phongexp_png.is_file() and phongexp_png.stat().st_size > 0:
+                converted = convert_one_vtf(vtfcmd, phongexp_png, out_dir)
+                if converted != phongexp_vtf and converted.exists():
+                    converted.replace(phongexp_vtf)
+                if phongexp_vtf.exists():
+                    phongexp_texture = f"models/{author}/{model}/{material_name}_exp"
+                    files.append(file_row(phongexp_vtf, "phongexp_vtf"))
+        except Exception as exc:
+            warnings.append(str(exc))
+        try:
+            if vtfcmd and selfillum_png_raw and selfillum_png.is_file() and selfillum_png.stat().st_size > 0:
+                converted = convert_one_vtf(vtfcmd, selfillum_png, out_dir)
+                if converted != selfillum_vtf and converted.exists():
+                    converted.replace(selfillum_vtf)
+                if selfillum_vtf.exists():
+                    selfillum_mask = f"models/{author}/{model}/{material_name}_selfillum"
+                    files.append(file_row(selfillum_vtf, "selfillum_vtf"))
+        except Exception as exc:
+            warnings.append(str(exc))
         vmt = out_dir / f"{material_name}.vmt"
-        write_vmt(vmt, author, model, material_name, has_normal)
+        write_vmt(vmt, author, model, material_name, has_normal, phongexp_texture, selfillum_mask)
         files.append(file_row(vmt, "material_vmt"))
     shared_src = ROOT / "reference" / "li_zhiyan_npc" / "a_pack" / "materials" / "models" / "sheepylord" / "shared"
     shared_dst = addon_dir / "materials" / "models" / author / "shared"

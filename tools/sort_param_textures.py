@@ -43,6 +43,219 @@ SMARTNORMAL_BIAS = 85
 NORMAL_REFERENCE_INTENSITY = 85.0
 NORMAL_REFERENCE_STRENGTH = 3.0
 
+# --- PBR scheme support (manual Step 12 only; auto-porting always uses
+# "legacy", which leaves every code path below byte-identical to before). ---
+PBR_SCHEME_LEGACY = "legacy"
+# Roles that the GUI exposes as per-material enable/disable toggles. Order is
+# the display order. "normal" reuses the existing normal pipeline.
+PBR_MAP_ROLES = ("normal", "roughness", "metallic", "ao", "emission")
+PBR_SCHEMES: dict[str, dict[str, Any]] = {
+    "unreal_wuwa": {
+        "label": "Unreal (Wuthering Waves-like)",
+        "base_suffixes": ("_d",),
+        # role -> sibling filename suffixes (the base "_D" suffix is replaced).
+        "sibling_suffixes": {
+            "normal": ("_n", "_hn"),
+            "emission": ("_fx",),
+        },
+        # role -> (sibling role that holds it, channel, invert). Wuthering Waves
+        # packs roughness in the _N alpha (slot "Normal_Roughness_Metallic").
+        "packed_channels": {
+            "roughness": ("normal", "a", False),
+        },
+    },
+    "unity_endfield": {
+        "label": "Unity (Arknights Endfield-like)",
+        "base_suffixes": ("_d",),
+        "sibling_suffixes": {
+            "normal": ("_n", "_nro", "_hn"),
+            "mask": ("_p",),
+            "emission": ("_e",),
+        },
+        # Unity HDRP-style mask map (_P): R=metallic, G=AO, A=smoothness.
+        "packed_channels": {
+            "roughness": ("mask", "a", True),  # smoothness -> roughness
+            "metallic": ("mask", "r", False),
+            "ao": ("mask", "g", False),
+        },
+    },
+}
+
+
+def normalize_scheme(value: str | None) -> str:
+    text = str(value or "").strip().lower()
+    return text if text in PBR_SCHEMES else PBR_SCHEME_LEGACY
+
+
+def channel_index(channel: str) -> int:
+    return {"r": 0, "g": 1, "b": 2, "a": 3}.get(str(channel or "").lower(), 0)
+
+
+def load_rgba_array(path: Path) -> np.ndarray:
+    image = open_image(path).convert("RGBA")
+    image, _ = resize_to_limit(image)
+    return np.asarray(image).astype(np.float32) / 255.0
+
+
+def resize_channel_to(channel: np.ndarray, height: int, width: int) -> np.ndarray:
+    if channel.shape[:2] == (height, width):
+        return channel
+    img = Image.fromarray(np.clip(channel * 255.0, 0, 255).astype(np.uint8), mode="L")
+    img = img.resize((width, height), Image.Resampling.LANCZOS)
+    return np.asarray(img).astype(np.float32) / 255.0
+
+
+def base_stem_root(stem: str, base_suffixes: tuple[str, ...]) -> str:
+    low = stem.lower()
+    for suffix in base_suffixes:
+        if low.endswith(suffix):
+            return stem[: -len(suffix)]
+    return stem
+
+
+def find_sibling_texture(
+    base_path: Path,
+    base_suffixes: tuple[str, ...],
+    target_suffixes: tuple[str, ...],
+    workspace_root: Path,
+) -> Path | None:
+    """Find a sibling texture sharing the base stem but with a role suffix.
+
+    e.g. base ``T_..Cloth_D`` + target ``_n`` -> ``T_..Cloth_N`` in the same
+    asset folders. Exact stem match only, so ``Toe_Finger``-style coincidences
+    cannot leak across materials.
+    """
+    root = base_stem_root(base_path.stem, base_suffixes).lower()
+    if not root:
+        return None
+    search_dirs = collect_search_dirs(base_path, workspace_root) + source_texture_search_dirs(base_path, workspace_root)
+    files = collect_image_files(search_dirs)
+    by_stem: dict[str, Path] = {}
+    for path in files:
+        by_stem.setdefault(path.stem.lower(), path)
+    for suffix in target_suffixes:
+        candidate = by_stem.get(root + suffix)
+        if candidate is not None and candidate.resolve() != base_path.resolve():
+            return candidate
+    return None
+
+
+def detect_pbr_maps(base_path: Path | None, workspace_root: Path, scheme: str) -> dict[str, Any]:
+    """Detect scheme-specific PBR sibling/packed maps for one material.
+
+    Returns ``{}`` for the legacy scheme or when no base texture exists, so the
+    auto-port path never grows a ``pbr`` block. Every detected map defaults to
+    ``enabled: False`` to match current auto-port output exactly.
+    """
+    scheme = normalize_scheme(scheme)
+    spec = PBR_SCHEMES.get(scheme)
+    if not spec or base_path is None:
+        return {}
+    base_suffixes = tuple(spec.get("base_suffixes", ("_d",)))
+    sibling_paths: dict[str, Path] = {}
+    for role, suffixes in spec.get("sibling_suffixes", {}).items():
+        found = find_sibling_texture(base_path, base_suffixes, tuple(suffixes), workspace_root)
+        if found is not None:
+            sibling_paths[role] = found
+
+    maps: dict[str, dict[str, Any]] = {}
+    if "normal" in sibling_paths:
+        npath = sibling_paths["normal"]
+        try:
+            ntype, _stats, _w = classify_normal_map(npath)
+        except Exception:
+            ntype = "ambiguous"
+        kind = "convert_ue_rg" if ntype == "ue_rg" else ("copy_blue" if ntype == "blue" else "ambiguous_copy")
+        maps["normal"] = {"available": True, "source": str(npath), "kind": kind, "enabled": False}
+
+    for role, packed in spec.get("packed_channels", {}).items():
+        try:
+            src_role, channel, invert = packed
+        except Exception:
+            continue
+        src = sibling_paths.get(src_role)
+        if src is not None and src.exists():
+            maps[role] = {
+                "available": True,
+                "source": str(src),
+                "channel": channel,
+                "invert": bool(invert),
+                "enabled": False,
+            }
+
+    if "emission" in sibling_paths:
+        maps["emission"] = {"available": True, "source": str(sibling_paths["emission"]), "enabled": False}
+
+    return {"scheme": scheme, "maps": maps}
+
+
+def build_phong_exponent_png(
+    output_path: Path,
+    roughness_source: Path | None,
+    roughness_channel: str,
+    roughness_invert: bool,
+    metallic_source: Path | None,
+    metallic_channel: str,
+) -> dict[str, Any]:
+    """Write a Source $phongexponenttexture from PBR inputs.
+
+    Red channel = per-texel gloss (specular exponent map) derived from
+    roughness/smoothness; alpha channel = metallic, which drives
+    $phongalbedotint so metallic areas tint specular toward the albedo. This is
+    the phong-only metallic approximation (no $envmap).
+    """
+    gloss: np.ndarray | None = None
+    if roughness_source is not None and roughness_source.exists():
+        arr = load_rgba_array(roughness_source)
+        channel = arr[..., channel_index(roughness_channel)]
+        gloss = channel if roughness_invert else (1.0 - channel)
+    metallic: np.ndarray | None = None
+    if metallic_source is not None and metallic_source.exists():
+        arr = load_rgba_array(metallic_source)
+        metallic = arr[..., channel_index(metallic_channel)]
+    if gloss is None and metallic is None:
+        return {}
+    if gloss is None:
+        gloss = np.full(metallic.shape[:2], 0.5, dtype=np.float32)
+    if metallic is None:
+        metallic = np.zeros(gloss.shape[:2], dtype=np.float32)
+    metallic = resize_channel_to(metallic, gloss.shape[0], gloss.shape[1])
+    red = np.clip(gloss, 0.0, 1.0)
+    alpha = np.clip(metallic, 0.0, 1.0)
+    out = np.stack([red, red, red, alpha], axis=-1)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    Image.fromarray(np.clip(out * 255.0, 0, 255).astype(np.uint8), mode="RGBA").save(output_path)
+    return {"gloss_mean": round(float(gloss.mean()), 4), "metallic_mean": round(float(metallic.mean()), 4)}
+
+
+def bake_ao_into_base(base_output_path: Path, ao_source: Path, ao_channel: str) -> float:
+    """Multiply an ambient-occlusion channel into an already-written base PNG."""
+    base_image = open_image(base_output_path).convert("RGBA")
+    base = np.asarray(base_image).astype(np.float32) / 255.0
+    ao_arr = load_rgba_array(ao_source)
+    ao = resize_channel_to(ao_arr[..., channel_index(ao_channel)], base.shape[0], base.shape[1])
+    base[..., 0] *= ao
+    base[..., 1] *= ao
+    base[..., 2] *= ao
+    Image.fromarray(np.clip(base * 255.0, 0, 255).astype(np.uint8), mode="RGBA").save(base_output_path)
+    return round(float(ao.mean()), 4)
+
+
+def build_selfillum_png(emission_source: Path, output_path: Path) -> tuple[float, bool]:
+    """Write a self-illumination mask PNG from an emission texture.
+
+    Returns (mean_luminance, is_emissive). Black emission maps produce
+    is_emissive=False so callers can skip writing a pointless VTF/VMT flag.
+    """
+    arr = load_rgba_array(emission_source)
+    rgb = arr[..., :3]
+    luminance = rgb.max(axis=-1)
+    mean_luminance = float(luminance.mean())
+    out = np.stack([rgb[..., 0], rgb[..., 1], rgb[..., 2], luminance], axis=-1)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    Image.fromarray(np.clip(out * 255.0, 0, 255).astype(np.uint8), mode="RGBA").save(output_path)
+    return round(mean_luminance, 4), mean_luminance >= 0.02
+
 
 @dataclass
 class MaterialTexture:
@@ -588,13 +801,16 @@ def save_normal_png(input_path: Path, output_path: Path) -> tuple[tuple[int, int
     return original_size, image.size, resized
 
 
-def analyze_textures(input_path: Path, analysis_json: Path, plan_json: Path) -> dict[str, Any]:
+def analyze_textures(input_path: Path, analysis_json: Path, plan_json: Path, scheme: str = PBR_SCHEME_LEGACY) -> dict[str, Any]:
+    scheme = normalize_scheme(scheme)
     materials, workspace_root, material_dir, materials_json = load_material_entries(input_path)
     output_dir = workspace_root / "12_param_texture_render_materials"
     png_dir = output_dir / "png"
     normal_dir = output_dir / "png_normals"
+    phongexp_dir = output_dir / "png_phongexp"
+    selfillum_dir = output_dir / "png_selfillum"
     rows: list[dict[str, Any]] = []
-    emit(f"[Step12 Textures] Loaded {len(materials)} material mappings.")
+    emit(f"[Step12 Textures] Loaded {len(materials)} material mappings (scheme={scheme}).")
     for index, material in enumerate(materials, start=1):
         warnings = list(material.warnings)
         base_path, resolved_warnings = resolve_base_texture_path(material.base_source_path, workspace_root, material.base_color_file)
@@ -687,6 +903,13 @@ def analyze_textures(input_path: Path, analysis_json: Path, plan_json: Path) -> 
             "face_count": material.face_count,
             "warnings": warnings,
         }
+        if scheme != PBR_SCHEME_LEGACY:
+            pbr = detect_pbr_maps(base_path if base_exists else None, workspace_root, scheme)
+            if pbr:
+                row["pbr"] = pbr
+                detected = sorted(role for role, info in pbr.get("maps", {}).items() if info.get("available"))
+                if detected:
+                    emit(f"[Step12 Textures]   PBR maps detected for {material.output_name}: {', '.join(detected)} (disabled by default).")
         rows.append(row)
         emit(
             f"[Step12 Textures] [{index}/{len(materials)}] {material.output_name}: "
@@ -699,9 +922,12 @@ def analyze_textures(input_path: Path, analysis_json: Path, plan_json: Path) -> 
         "workspace_root": str(workspace_root),
         "material_dir": str(material_dir),
         "materials_json": str(materials_json) if materials_json else "",
+        "scheme": scheme,
         "output_dir": str(output_dir),
         "png_dir": str(png_dir),
         "normal_dir": str(normal_dir),
+        "phongexp_dir": str(phongexp_dir),
+        "selfillum_dir": str(selfillum_dir),
         "material_count": len(rows),
         "rows": rows,
     }
@@ -709,9 +935,12 @@ def analyze_textures(input_path: Path, analysis_json: Path, plan_json: Path) -> 
         "version": 1,
         "input": str(input_path.resolve()),
         "workspace_root": str(workspace_root),
+        "scheme": scheme,
         "output_dir": str(output_dir),
         "png_dir": str(png_dir),
         "normal_dir": str(normal_dir),
+        "phongexp_dir": str(phongexp_dir),
+        "selfillum_dir": str(selfillum_dir),
         "rows": rows,
     }
     analysis_json.parent.mkdir(parents=True, exist_ok=True)
@@ -722,12 +951,15 @@ def analyze_textures(input_path: Path, analysis_json: Path, plan_json: Path) -> 
     return analysis
 
 
-def process_textures(input_path: Path, plan_json: Path, report_json: Path, manifest_json: Path) -> dict[str, Any]:
+def process_textures(input_path: Path, plan_json: Path, report_json: Path, manifest_json: Path, scheme: str | None = None) -> dict[str, Any]:
     plan = json.loads(plan_json.read_text(encoding="utf-8"))
     rows = [row for row in plan.get("rows", []) if isinstance(row, dict)]
     output_dir = Path(str(plan.get("output_dir") or report_json.parent))
     png_dir = Path(str(plan.get("png_dir") or output_dir / "png"))
     normal_dir = Path(str(plan.get("normal_dir") or output_dir / "png_normals"))
+    phongexp_dir = Path(str(plan.get("phongexp_dir") or output_dir / "png_phongexp"))
+    selfillum_dir = Path(str(plan.get("selfillum_dir") or output_dir / "png_selfillum"))
+    active_scheme = normalize_scheme(scheme if scheme is not None else plan.get("scheme"))
     png_dir.mkdir(parents=True, exist_ok=True)
     normal_dir.mkdir(parents=True, exist_ok=True)
     manifest_rows: list[dict[str, Any]] = []
@@ -755,6 +987,11 @@ def process_textures(input_path: Path, plan_json: Path, report_json: Path, manif
             "normal_source_path": str(normal_source) if normal_source else "",
             "normal_output_path": "",
             "normal_status": row.get("normal_action", "disabled"),
+            "scheme": active_scheme,
+            "phongexp_output_path": "",
+            "selfillum_output_path": "",
+            "ao_baked": False,
+            "pbr_enabled": [],
             "warnings": list(row.get("warnings", [])) if isinstance(row.get("warnings"), list) else [],
         }
         if base_source and base_source.exists() and base_resolve_warnings:
@@ -762,6 +999,13 @@ def process_textures(input_path: Path, plan_json: Path, report_json: Path, manif
                 warning for warning in row_report["warnings"] if warning != "Base texture source file is missing."
             ]
         row_report["warnings"].extend(base_resolve_warnings)
+        pbr_block = row.get("pbr") if isinstance(row.get("pbr"), dict) else {}
+        pbr_maps = pbr_block.get("maps", {}) if isinstance(pbr_block.get("maps"), dict) else {}
+        enabled_pbr = {
+            role: info
+            for role, info in pbr_maps.items()
+            if isinstance(info, dict) and info.get("available") and info.get("enabled")
+        }
         try:
             if not base_source or not base_source.exists():
                 raise FileNotFoundError(f"Base texture not found for {material_name}: {base_source}")
@@ -769,6 +1013,15 @@ def process_textures(input_path: Path, plan_json: Path, report_json: Path, manif
             row_report["base_original_size"] = list(original_size)
             row_report["base_output_size"] = list(final_size)
             row_report["base_resized"] = resized
+            if "ao" in enabled_pbr:
+                ao_source = as_path(enabled_pbr["ao"].get("source"))
+                if ao_source and ao_source.exists():
+                    try:
+                        row_report["ao_mean"] = bake_ao_into_base(base_output, ao_source, str(enabled_pbr["ao"].get("channel") or "g"))
+                        row_report["ao_baked"] = True
+                        row_report["pbr_enabled"].append("ao")
+                    except Exception as ao_exc:
+                        row_report["warnings"].append(f"AO bake failed: {ao_exc}")
         except Exception as exc:
             errors.append(str(exc))
             row_report["error"] = str(exc)
@@ -824,10 +1077,52 @@ def process_textures(input_path: Path, plan_json: Path, report_json: Path, manif
         except Exception as exc:
             row_report["warnings"].append(f"Normal processing failed: {exc}")
             row_report["normal_status"] = "failed"
+        if "normal" in enabled_pbr and row_report.get("normal_output_path"):
+            row_report["pbr_enabled"].append("normal")
+        if active_scheme != PBR_SCHEME_LEGACY and enabled_pbr:
+            roughness_info = enabled_pbr.get("roughness")
+            metallic_info = enabled_pbr.get("metallic")
+            if roughness_info or metallic_info:
+                try:
+                    exp_output = phongexp_dir / f"{row.get('output_name', material_name)}_exp.png"
+                    stats = build_phong_exponent_png(
+                        exp_output,
+                        as_path(roughness_info.get("source")) if roughness_info else None,
+                        str(roughness_info.get("channel") or "a") if roughness_info else "a",
+                        bool(roughness_info.get("invert")) if roughness_info else False,
+                        as_path(metallic_info.get("source")) if metallic_info else None,
+                        str(metallic_info.get("channel") or "r") if metallic_info else "r",
+                    )
+                    if stats:
+                        row_report["phongexp_output_path"] = str(exp_output)
+                        row_report["phongexp_stats"] = stats
+                        if roughness_info:
+                            row_report["pbr_enabled"].append("roughness")
+                        if metallic_info:
+                            row_report["pbr_enabled"].append("metallic")
+                except Exception as exc:
+                    row_report["warnings"].append(f"Phong exponent build failed: {exc}")
+            emission_info = enabled_pbr.get("emission")
+            if emission_info:
+                emission_source = as_path(emission_info.get("source"))
+                if emission_source and emission_source.exists():
+                    try:
+                        selfillum_output = selfillum_dir / f"{row.get('output_name', material_name)}_selfillum.png"
+                        mean_luminance, is_emissive = build_selfillum_png(emission_source, selfillum_output)
+                        row_report["selfillum_mean"] = mean_luminance
+                        if is_emissive:
+                            row_report["selfillum_output_path"] = str(selfillum_output)
+                            row_report["pbr_enabled"].append("emission")
+                        else:
+                            row_report["warnings"].append("Emission map is effectively black; self-illumination was skipped.")
+                    except Exception as exc:
+                        row_report["warnings"].append(f"Self-illumination build failed: {exc}")
         manifest_rows.append(row_report)
         emit(
             f"[Step12 Textures] [{index}/{len(rows)}] {material_name}: "
-            f"base -> {base_output.name}, normal={row_report['normal_status']}."
+            f"base -> {base_output.name}, normal={row_report['normal_status']}"
+            + (f", pbr={'+'.join(row_report['pbr_enabled'])}" if row_report["pbr_enabled"] else "")
+            + "."
         )
 
     manifest = {
@@ -866,15 +1161,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--plan-json", type=Path, required=True)
     parser.add_argument("--report-json", type=Path)
     parser.add_argument("--manifest-json", type=Path)
+    parser.add_argument("--scheme", default=None, help="PBR texture scheme (legacy, unreal_wuwa, unity_endfield). Process mode falls back to the plan's stored scheme when omitted.")
     args = parser.parse_args(argv)
     if args.mode == "analyze":
         if not args.analysis_json:
             parser.error("--analysis-json is required for analyze mode")
-        analyze_textures(args.input, args.analysis_json, args.plan_json)
+        analyze_textures(args.input, args.analysis_json, args.plan_json, scheme=args.scheme or PBR_SCHEME_LEGACY)
         return 0
     if not args.report_json or not args.manifest_json:
         parser.error("--report-json and --manifest-json are required for process mode")
-    process_textures(args.input, args.plan_json, args.report_json, args.manifest_json)
+    process_textures(args.input, args.plan_json, args.report_json, args.manifest_json, scheme=args.scheme)
     return 0
 
 

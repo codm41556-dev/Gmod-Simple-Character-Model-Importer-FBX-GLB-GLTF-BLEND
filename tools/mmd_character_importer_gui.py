@@ -2178,9 +2178,10 @@ class TextureAnalyzeWorker(QtCore.QThread):
     done = QtCore.Signal(dict)
     failed = QtCore.Signal(str)
 
-    def __init__(self, input_path: str) -> None:
+    def __init__(self, input_path: str, scheme: str = "legacy") -> None:
         super().__init__()
         self.input_path = input_path
+        self.scheme = scheme or "legacy"
         self.cancel_requested = False
 
     def cancel(self) -> None:
@@ -2194,7 +2195,7 @@ class TextureAnalyzeWorker(QtCore.QThread):
 
     def run(self) -> None:
         try:
-            result = core.analyze_textures(Path(self.input_path), progress=self._log, cancel_check=self._cancelled)
+            result = core.analyze_textures(Path(self.input_path), progress=self._log, cancel_check=self._cancelled, scheme=self.scheme)
             self.done.emit(
                 {
                     "input": str(result.input_path),
@@ -7777,6 +7778,29 @@ class ImporterWindow(QtWidgets.QMainWindow):
         self.texture_output_edit = QtWidgets.QLineEdit()
         self.texture_output_edit.setReadOnly(True)
         settings.addRow("Output folder", self._output_folder_row(self.texture_output_edit))
+        self.texture_scheme_combo = QtWidgets.QComboBox()
+        for scheme_label, scheme_data in (
+            ("Legacy — base color only (same as auto-port)", "legacy"),
+            ("Unreal — Wuthering Waves-like PBR", "unreal_wuwa"),
+            ("Unity — Arknights Endfield-like PBR", "unity_endfield"),
+        ):
+            self.texture_scheme_combo.addItem(scheme_label, scheme_data)
+        self.texture_scheme_combo.setToolTip(
+            "How Step 12 reads the source textures.\n"
+            "• Legacy: base color only, identical to the one-click auto-port.\n"
+            "• Unreal (Wuthering Waves): _D base, _N/_HN normal (roughness packed in _N alpha).\n"
+            "• Unity (Arknights Endfield): _D base, _N/_NRO normal, _P mask (R=metallic, G=AO, A=smoothness), _E emission.\n"
+            "Pick a PBR scheme, then Analyze to scan each material for maps; toggle the ones to bake per material.\n"
+            "Metallic/roughness are approximated through Source's phong shader; no $envmap is used."
+        )
+        settings.addRow("Texture scheme", self.texture_scheme_combo)
+        self.texture_scheme_hint = QtWidgets.QLabel(
+            "Pick a scheme and click Analyze Textures to scan for PBR maps. Every extra map is "
+            "off by default (matching auto-port); enable the ones you want per material, then Process."
+        )
+        self.texture_scheme_hint.setObjectName("fieldHint")
+        self.texture_scheme_hint.setWordWrap(True)
+        settings.addRow("", self.texture_scheme_hint)
         self.detect_texture_mapping_button = QtWidgets.QPushButton("Detect Material Mapping")
         self.detect_texture_mapping_button.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_FileDialogContentsView))
         settings.addRow("", self.detect_texture_mapping_button)
@@ -7826,7 +7850,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
 
         table_group = QtWidgets.QGroupBox("Texture Plan")
         table_layout = QtWidgets.QVBoxLayout(table_group)
-        self.texture_table = QtWidgets.QTableWidget(0, 12)
+        self.texture_table = QtWidgets.QTableWidget(0, 16)
         self.texture_table.setHorizontalHeaderLabels(
             [
                 "Material",
@@ -7841,6 +7865,10 @@ class ImporterWindow(QtWidgets.QMainWindow):
                 "Normal Source / Generated",
                 "Size",
                 "Warnings",
+                "Roughness",
+                "Metallic",
+                "Emission",
+                "AO",
             ]
         )
         self.texture_table.horizontalHeader().setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
@@ -7851,7 +7879,11 @@ class ImporterWindow(QtWidgets.QMainWindow):
         self.texture_table.horizontalHeader().setSectionResizeMode(7, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
         self.texture_table.horizontalHeader().setSectionResizeMode(8, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
         self.texture_table.horizontalHeader().setSectionResizeMode(10, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
-        self.texture_table.horizontalHeader().setStretchLastSection(True)
+        # Warnings (11) stretches; the four PBR toggle columns (12-15) stay compact.
+        self.texture_table.horizontalHeader().setStretchLastSection(False)
+        self.texture_table.horizontalHeader().setSectionResizeMode(11, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        for _pbr_col in (12, 13, 14, 15):
+            self.texture_table.horizontalHeader().setSectionResizeMode(_pbr_col, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
         self.texture_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
         self.texture_table.setMouseTracking(True)
         self.texture_table.viewport().setMouseTracking(True)
@@ -7928,6 +7960,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
         tab_layout.addWidget(self.texture_log_group)
 
         self.texture_input_row.changed.connect(self.on_texture_input_changed)
+        self.texture_scheme_combo.currentIndexChanged.connect(self.on_texture_scheme_changed)
         self.detect_texture_mapping_button.clicked.connect(self.detect_material_mapping)
         self.texture_analyze_button.clicked.connect(self.start_texture_analyze)
         self.texture_process_button.clicked.connect(self.start_texture_process)
@@ -8948,6 +8981,11 @@ class ImporterWindow(QtWidgets.QMainWindow):
         texture_input = str(self.settings_store.value("texture_input_mapping", "", str) or "")
         if texture_input and hasattr(self, "texture_input_row"):
             self.texture_input_row.set_value(texture_input)
+        if hasattr(self, "texture_scheme_combo"):
+            texture_scheme = str(self.settings_store.value("texture_scheme", "legacy", str) or "legacy")
+            scheme_index = self.texture_scheme_combo.findData(texture_scheme)
+            if scheme_index >= 0:
+                self.texture_scheme_combo.setCurrentIndex(scheme_index)
         icon_input = str(self.settings_store.value("icon_step1_input", "", str) or "")
         if icon_input and hasattr(self, "icon_input_row"):
             self.icon_input_row.set_value(icon_input)
@@ -9218,6 +9256,8 @@ class ImporterWindow(QtWidgets.QMainWindow):
             self.settings_store.setValue("vrd_input_dir", self.vrd_input_row.value())
         if hasattr(self, "texture_input_row"):
             self.settings_store.setValue("texture_input_mapping", self.texture_input_row.value())
+        if hasattr(self, "texture_scheme_combo"):
+            self.settings_store.setValue("texture_scheme", self.current_texture_scheme())
         if hasattr(self, "icon_input_row"):
             self.settings_store.setValue("icon_step1_input", self.icon_input_row.value())
         if hasattr(self, "icon_custom_image_row"):
@@ -17969,7 +18009,8 @@ class ImporterWindow(QtWidgets.QMainWindow):
         self.texture_process_button.setEnabled(False)
         self.detect_texture_mapping_button.setEnabled(False)
         self.texture_cancel_button.setEnabled(True)
-        self.worker = TextureAnalyzeWorker(str(input_path))
+        scheme = self.current_texture_scheme()
+        self.worker = TextureAnalyzeWorker(str(input_path), scheme=scheme)
         self.worker.log.connect(self.append_texture_log)
         self.worker.done.connect(self.texture_analyze_done)
         self.worker.failed.connect(self.texture_failed)
@@ -18003,9 +18044,26 @@ class ImporterWindow(QtWidgets.QMainWindow):
         )
         enabled_normals = sum(1 for row in rows if row.get("use_normal") or row.get("generate_normal"))
         found = sum(1 for row in rows if row.get("normal_source_path"))
-        self.texture_summary_label.setText(
-            f"Texture analysis complete. Materials: {len(rows):,}; found normals: {found:,}; normals enabled: {enabled_normals:,}; generated normals enabled: {generated:,}."
+        summary = (
+            f"Texture analysis complete. Materials: {len(rows):,}; found normals: {found:,}; "
+            f"normals enabled: {enabled_normals:,}; generated normals enabled: {generated:,}."
         )
+        scheme = self.current_texture_scheme()
+        if scheme != "legacy":
+            role_counts: dict[str, int] = {}
+            for row in rows:
+                pbr_block = row.get("pbr")
+                maps = pbr_block.get("maps", {}) if isinstance(pbr_block, dict) else {}
+                if isinstance(maps, dict):
+                    for role, info in maps.items():
+                        if isinstance(info, dict) and info.get("available"):
+                            role_counts[role] = role_counts.get(role, 0) + 1
+            if role_counts:
+                detail = ", ".join(f"{role}: {count}" for role, count in sorted(role_counts.items()))
+                summary += f" PBR maps detected ({scheme}) — {detail}. Toggle per material, then Process."
+            else:
+                summary += f" No {scheme} PBR maps were detected for these materials."
+        self.texture_summary_label.setText(summary)
         self.set_texture_progress(100, "Analysis Complete", self.texture_output_dir, "#2ea043")
         self.clear_step_state(12, "Step 12 analysis complete")
 
@@ -18095,6 +18153,29 @@ class ImporterWindow(QtWidgets.QMainWindow):
         if self.worker and self.worker.isRunning() and hasattr(self.worker, "cancel"):
             self.worker.cancel()  # type: ignore[attr-defined]
             self.append_texture_log("Cancel requested.")
+
+    def current_texture_scheme(self) -> str:
+        combo = getattr(self, "texture_scheme_combo", None)
+        if combo is None:
+            return "legacy"
+        data = combo.currentData()
+        return str(data) if data else "legacy"
+
+    def on_texture_scheme_changed(self, _index: int = 0) -> None:
+        scheme = self.current_texture_scheme()
+        hint = getattr(self, "texture_scheme_hint", None)
+        if hint is not None:
+            if scheme == "legacy":
+                hint.setText(
+                    "Legacy scheme: base color only, identical to one-click auto-port. "
+                    "Pick an engine scheme to scan for PBR maps."
+                )
+            else:
+                hint.setText(
+                    "Click Analyze Textures to scan each material for PBR maps. Every extra map is off by "
+                    "default (matching auto-port); tick Roughness/Metallic/Emission/AO per material, then Process."
+                )
+        self.save_settings()
 
     def texture_entries(self) -> list[dict[str, object]]:
         if not self.current_texture_plan:
@@ -18284,6 +18365,34 @@ class ImporterWindow(QtWidgets.QMainWindow):
                 item = QtWidgets.QTableWidgetItem(value)
                 item.setFlags(item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable)
                 self.texture_table.setItem(row_index, col, item)
+            pbr_maps: dict[str, object] = {}
+            pbr_block = entry.get("pbr")
+            if isinstance(pbr_block, dict) and isinstance(pbr_block.get("maps"), dict):
+                pbr_maps = pbr_block["maps"]
+            for pbr_col, role in ((12, "roughness"), (13, "metallic"), (14, "emission"), (15, "ao")):
+                cell = QtWidgets.QTableWidgetItem("")
+                info = pbr_maps.get(role) if isinstance(pbr_maps.get(role), dict) else None
+                if info and info.get("available"):
+                    cell.setFlags(
+                        QtCore.Qt.ItemFlag.ItemIsUserCheckable
+                        | QtCore.Qt.ItemFlag.ItemIsEnabled
+                        | QtCore.Qt.ItemFlag.ItemIsSelectable
+                    )
+                    cell.setCheckState(
+                        QtCore.Qt.CheckState.Checked if info.get("enabled") else QtCore.Qt.CheckState.Unchecked
+                    )
+                    source_name = Path(str(info.get("source") or "")).name
+                    if role in ("roughness", "metallic"):
+                        cell.setToolTip(f"Bake {role} from {source_name} into the phong specular (no $envmap).")
+                    elif role == "emission":
+                        cell.setToolTip(f"Emit $selfillum from {source_name} (skipped automatically if the map is black).")
+                    else:
+                        cell.setToolTip(f"Multiply ambient occlusion from {source_name} into the base color.")
+                else:
+                    cell.setText("—")
+                    cell.setFlags(QtCore.Qt.ItemFlag.ItemIsSelectable)
+                    cell.setToolTip("Not detected for this material (or Legacy scheme selected).")
+                self.texture_table.setItem(row_index, pbr_col, cell)
         self.texture_table.resizeRowsToContents()
         self._updating_texture_table = False
         if rows:
@@ -18368,6 +18477,21 @@ class ImporterWindow(QtWidgets.QMainWindow):
             if item.text() != str(value):
                 self._updating_texture_table = True
                 item.setText(str(value))
+                self._updating_texture_table = False
+        elif col in (12, 13, 14, 15):
+            role = {12: "roughness", 13: "metallic", 14: "emission", 15: "ao"}[col]
+            pbr_block = entry.get("pbr")
+            info = None
+            if isinstance(pbr_block, dict) and isinstance(pbr_block.get("maps"), dict):
+                candidate = pbr_block["maps"].get(role)
+                if isinstance(candidate, dict) and candidate.get("available"):
+                    info = candidate
+            if info is not None:
+                info["enabled"] = item.checkState() == QtCore.Qt.CheckState.Checked
+            elif item.checkState() == QtCore.Qt.CheckState.Checked:
+                # Map not available for this material: never let it stay checked.
+                self._updating_texture_table = True
+                item.setCheckState(QtCore.Qt.CheckState.Unchecked)
                 self._updating_texture_table = False
         else:
             return

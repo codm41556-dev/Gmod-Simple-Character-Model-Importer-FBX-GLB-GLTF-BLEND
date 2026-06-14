@@ -4750,6 +4750,7 @@ def analyze_textures(
     input_path: Path,
     progress: ProgressCallback | None = None,
     cancel_check: CancelCheck | None = None,
+    scheme: str = "legacy",
 ) -> TextureAnalysisResult:
     input_path = input_path.resolve()
     texture_dir, analysis_path, plan_path, report_path, manifest_path, log_path = texture_paths_for_material_input(input_path)
@@ -4768,6 +4769,10 @@ def analyze_textures(
         "--plan-json",
         str(plan_path),
     ]
+    # Only the manual Step 12 UI passes a non-legacy scheme; auto-porting omits
+    # it entirely so the subprocess command stays byte-identical to before.
+    if str(scheme or "legacy").strip().lower() != "legacy":
+        command += ["--scheme", str(scheme).strip().lower()]
     emit(progress, f"Starting Step 12 texture analysis: {input_path}")
     started = time.monotonic()
     run_process_streamed(command, progress=progress, log_path=log_path, cancel_check=cancel_check)
