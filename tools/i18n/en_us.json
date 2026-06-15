@@ -53,7 +53,14 @@
     "raise_issue_github": "Raise Issue on GitHub",
     "report_instruction": "If this error is reproducible, please raise an issue on GitHub and include the error log, a screenshot, and the model file when possible.",
     "report_channel_warning": "Please do not report issues on the Steam Workshop addon page or video comment sections; they are not monitored for support.",
-    "log_copied": "Error log copied to clipboard."
+    "log_copied": "Error log copied to clipboard.",
+    "problematic_model_heading": "This model triggered preflight warnings that the import was likely to fail.",
+    "problematic_model_explain": "The failure above is most likely caused by problems in the model itself, not by this program. Please check or fix the model before reporting this as an issue.",
+    "problematic_model_reasons": "Detected model issues:",
+    "problematic_model_support": "This model was flagged before import as likely to fail. The failure above is most likely caused by the model itself, not by this program. Please check or fix the model first; reporting it as a bug may not help.",
+    "problem_reason_skeleton": "The model is missing the required humanoid skeleton bones, so the import was expected to fail.",
+    "problem_reason_koikatsu": "The model uses Koikatsu-style bone names; imports are likely to fail unless it is simplified to Very Simple level in the KKBP Blender plugin.",
+    "problem_reason_parenting": "The model has bones parented far away or to the opposite side, which can break the conversion."
   },
   "external_logs": {
     "blender.warning.collection_bones_edit": "Warning: `Collection.bones` is not available in armature edit mode",

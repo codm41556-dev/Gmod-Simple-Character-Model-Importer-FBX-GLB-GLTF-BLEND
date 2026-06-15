@@ -3298,6 +3298,12 @@ class ImporterWindow(QtWidgets.QMainWindow):
         self.current_release_files: dict[str, object] | None = None
         self.current_main_analysis: core.PmxAnalysis | None = None
         self.current_main_workspace: core.Workspace | None = None
+        # Reasons (human-readable) the import currently running was flagged as
+        # likely-to-fail during preflight. Snapshotted when an import that the
+        # user chose to run anyway is launched; consumed by the failure handlers
+        # so the error log can tell the user the failure is probably the model's
+        # fault, not this program's. Empty list = model was not flagged.
+        self._active_import_problem_reasons: list[str] = []
         self.main_pmx_paths: list[Path] = []
         self.main_output_files: dict[str, object] | None = None
         self._loading_main_source_from_settings = False
@@ -10406,6 +10412,13 @@ class ImporterWindow(QtWidgets.QMainWindow):
             return
         if (analysis.warnings or self.analysis_has_content_warning(analysis)) and not self.confirm_main_warnings(analysis):
             return
+        # Remember whether the user chose to proceed past a likely-to-fail warning
+        # so full_import_failed() can flag the failure as the model's fault.
+        self._active_import_problem_reasons = (
+            self.import_problem_reasons(analysis)
+            if self.analysis_predicts_import_failure(analysis)
+            else []
+        )
         previous_output = str(self.settings_store.value("qc_gma_output_dir", "", str) or "")
         start_dir = previous_output if previous_output and Path(previous_output).exists() else str(Path.home() / "Desktop")
         selected_output = QtWidgets.QFileDialog.getExistingDirectory(
@@ -10487,6 +10500,93 @@ class ImporterWindow(QtWidgets.QMainWindow):
             return False
         entries = getattr(analysis, "parenting_warning_bones", None)
         return bool(isinstance(entries, list) and entries)
+
+    def analysis_predicts_import_failure(self, analysis: core.PmxAnalysis | None) -> bool:
+        """True when preflight raised a warning that the import is likely to fail.
+
+        These are the structural model defects that the preflight dialog flags as
+        "expected/likely to fail" (missing humanoid skeleton bones, Koikatsu-style
+        bones) or that point at a broken rig (suspicious parenting). They are
+        genuine problems in the source model, so when porting then fails we tell
+        the user to fix the model rather than report a bug. NSFW content warnings
+        are deliberately excluded: they do not predict a porting failure.
+        """
+        if analysis is None:
+            return False
+        return (
+            self.analysis_has_required_skeleton_failure(analysis)
+            or self.analysis_has_koikatsu_bone_warning(analysis)
+            or self.analysis_has_parenting_warning(analysis)
+        )
+
+    def import_problem_reasons(self, analysis: core.PmxAnalysis | None) -> list[str]:
+        """Human-readable reasons the model was flagged as likely-to-fail."""
+        reasons: list[str] = []
+        if analysis is None:
+            return reasons
+        if self.analysis_has_required_skeleton_failure(analysis):
+            reasons.append(
+                self._t(
+                    "error.problem_reason_skeleton",
+                    "The model is missing the required humanoid skeleton bones, "
+                    "so the import was expected to fail.",
+                )
+            )
+        if self.analysis_has_koikatsu_bone_warning(analysis):
+            reasons.append(
+                self._t(
+                    "error.problem_reason_koikatsu",
+                    "The model uses Koikatsu-style bone names; imports are likely "
+                    "to fail unless it is simplified to Very Simple level in the "
+                    "KKBP Blender plugin.",
+                )
+            )
+        if self.analysis_has_parenting_warning(analysis):
+            reasons.append(
+                self._t(
+                    "error.problem_reason_parenting",
+                    "The model has bones parented far away or to the opposite side, "
+                    "which can break the conversion.",
+                )
+            )
+        return reasons
+
+    # Distinct accent colour for the "your model is at fault" notice so it stands
+    # apart from ordinary log output and the normal amber report banner.
+    PROBLEMATIC_MODEL_COLOR = "#f0883e"
+
+    def problematic_model_notice_lines(self, reasons: list[str]) -> list[str]:
+        """Explanatory lines shown when a flagged model's import fails."""
+        lines = [
+            self._t(
+                "error.problematic_model_heading",
+                "This model triggered preflight warnings that the import was likely to fail.",
+            ),
+            self._t(
+                "error.problematic_model_explain",
+                "The failure above is most likely caused by problems in the model itself, "
+                "not by this program. Please check or fix the model before reporting this as an issue.",
+            ),
+        ]
+        if reasons:
+            lines.append(self._t("error.problematic_model_reasons", "Detected model issues:"))
+            lines.extend(f"  - {reason}" for reason in reasons)
+        return lines
+
+    def append_problematic_model_log(self, widget: QtWidgets.QPlainTextEdit, reasons: list[str]) -> None:
+        """Append the distinctly coloured 'model is at fault' notice to a log widget."""
+        lines = self.problematic_model_notice_lines(reasons)
+        if not lines:
+            return
+        heading = html.escape(lines[0])
+        body = "<br>".join(html.escape(line) for line in lines[1:])
+        block = (
+            f'<span style="color:{self.PROBLEMATIC_MODEL_COLOR};">'
+            f'<b>&#9888; {heading}</b>'
+            + (f"<br>{body}" if body else "")
+            + "</span>"
+        )
+        widget.appendHtml(block)
 
     def parenting_warning_lines(self, analysis: core.PmxAnalysis) -> list[str]:
         entries = getattr(analysis, "parenting_warning_bones", []) if analysis else []
@@ -10913,6 +11013,8 @@ class ImporterWindow(QtWidgets.QMainWindow):
         self.main_preflight_button.setEnabled(True)
         self.main_detect_gmod_button.setEnabled(True)
         self.main_cancel_button.setEnabled(False)
+        problem_reasons = list(self._active_import_problem_reasons)
+        self._active_import_problem_reasons = []
         self.set_main_progress(self.main_progress_bar.value(), "Import Failed", "See the log for details.", "#f85149")
         failed_step, partial_steps = self.full_import_failure_context(message)
         if partial_steps:
@@ -10924,7 +11026,9 @@ class ImporterWindow(QtWidgets.QMainWindow):
         if failed_step:
             self.switch_to_step(failed_step)
         self.refresh_workspace_cache_size()
-        self.show_error("Import to GMod failed", message)
+        if problem_reasons:
+            self.append_problematic_model_log(self.main_log, problem_reasons)
+        self.show_error("Import to GMod failed", message, problematic_reasons=problem_reasons)
 
     def full_import_failure_context(self, message: str) -> tuple[int, dict[object, object]]:
         failed_step = 0
@@ -11427,6 +11531,13 @@ class ImporterWindow(QtWidgets.QMainWindow):
             self.statusBar().showMessage(self._t("preflight.import_cancelled_before_blender", "Import cancelled before Blender launch."))
             self.clear_step_state(1)
             return
+        # Remember whether the user chose to proceed past a likely-to-fail warning
+        # so import_failed() can flag the failure as the model's fault.
+        self._active_import_problem_reasons = (
+            self.import_problem_reasons(analysis)
+            if self.analysis_predicts_import_failure(analysis)
+            else []
+        )
 
         self.log.clear()
         self.set_progress(0, "Queued", "Preparing import", "#58a6ff")
@@ -11477,10 +11588,14 @@ class ImporterWindow(QtWidgets.QMainWindow):
         self.import_button.setEnabled(True)
         self.analyze_button.setEnabled(True)
         self.cancel_button.setEnabled(False)
+        problem_reasons = list(self._active_import_problem_reasons)
+        self._active_import_problem_reasons = []
         self.set_progress(self.progress_bar.value(), "Import Failed", "See the log for details.", "#f85149")
         self.set_step_failed(1, "Step 1 import failed")
         self.refresh_workspace_cache_size()
-        self.show_error("Import failed", message)
+        if problem_reasons:
+            self.append_problematic_model_log(self.log, problem_reasons)
+        self.show_error("Import failed", message, problematic_reasons=problem_reasons)
 
     def on_fix_input_changed(self, value: str) -> None:
         if value.strip():
@@ -21311,7 +21426,9 @@ class ImporterWindow(QtWidgets.QMainWindow):
             path.mkdir(parents=True, exist_ok=True)
         QtGui.QDesktopServices.openUrl(QtCore.QUrl.fromLocalFile(str(path)))
 
-    def show_error(self, title: str, message: str) -> None:
+    def show_error(self, title: str, message: str, problematic_reasons: list[str] | None = None) -> None:
+        reasons = list(problematic_reasons or [])
+        is_problematic = bool(reasons)
         dialog = QtWidgets.QDialog(self)
         dialog.setWindowTitle(self.translate_static_text(str(title)))
         dialog.resize(820, 540)
@@ -21319,24 +21436,50 @@ class ImporterWindow(QtWidgets.QMainWindow):
         text = QtWidgets.QPlainTextEdit()
         text.setReadOnly(True)
         enriched_message = core.enrich_missing_output_message(str(message))
-        error_log_text = self.translate_multiline_runtime_text(enriched_message)
-        text.setPlainText(error_log_text)
-        support_label = QtWidgets.QLabel(
-            self._t(
-                "error.report_instruction",
-                "If this error is reproducible, please raise an issue on GitHub and include the error log, a screenshot, and the model file when possible.",
+        body_text = self.translate_multiline_runtime_text(enriched_message)
+        if is_problematic:
+            # Colour the "your model is at fault" notice at the top of the error
+            # output and include it (as plain text) in what Copy Log produces.
+            notice_lines = self.problematic_model_notice_lines(reasons)
+            notice_plain = "\n".join(notice_lines)
+            error_log_text = notice_plain + "\n\n" + body_text
+            self.append_problematic_model_log(text, reasons)
+            text.appendPlainText("")
+            text.appendPlainText(body_text)
+            text.moveCursor(QtGui.QTextCursor.MoveOperation.Start)
+        else:
+            error_log_text = body_text
+            text.setPlainText(error_log_text)
+        if is_problematic:
+            support_label = QtWidgets.QLabel(
+                self._t(
+                    "error.problematic_model_support",
+                    "This model was flagged before import as likely to fail. The failure "
+                    "above is most likely caused by the model itself, not by this program. "
+                    "Please check or fix the model first; reporting it as a bug may not help.",
+                )
             )
-            + "\n"
-            + self._t(
-                "error.report_channel_warning",
-                "Please do not report issues on the Steam Workshop addon page or video comment sections; they are not monitored for support.",
+            support_label.setStyleSheet(
+                f"QLabel {{ color: {self.PROBLEMATIC_MODEL_COLOR}; border: 1px solid #8a4b1f; "
+                "border-radius: 4px; padding: 8px; }"
             )
-        )
+        else:
+            support_label = QtWidgets.QLabel(
+                self._t(
+                    "error.report_instruction",
+                    "If this error is reproducible, please raise an issue on GitHub and include the error log, a screenshot, and the model file when possible.",
+                )
+                + "\n"
+                + self._t(
+                    "error.report_channel_warning",
+                    "Please do not report issues on the Steam Workshop addon page or video comment sections; they are not monitored for support.",
+                )
+            )
+            support_label.setStyleSheet(
+                "QLabel { color: #d29922; border: 1px solid #8a6d1f; border-radius: 4px; padding: 8px; }"
+            )
         support_label.setWordWrap(True)
         support_label.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
-        support_label.setStyleSheet(
-            "QLabel { color: #d29922; border: 1px solid #8a6d1f; border-radius: 4px; padding: 8px; }"
-        )
         report_button = QtWidgets.QPushButton(self._t("error.raise_issue_github", "Raise Issue on GitHub"))
         report_button.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_MessageBoxWarning))
         report_button.setMinimumHeight(42)
