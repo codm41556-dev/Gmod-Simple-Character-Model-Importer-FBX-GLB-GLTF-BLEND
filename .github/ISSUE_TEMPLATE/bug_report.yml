@@ -47,3 +47,14 @@ body:
         - x86-64 beta
     validations:
       required: true
+
+      type: dropdown
+    id: OS
+    attributes:
+      label: OS
+      description: What OS are you using?
+      options:
+        - Windows 10
+        - Windows 11
+    validations:
+      required: true
