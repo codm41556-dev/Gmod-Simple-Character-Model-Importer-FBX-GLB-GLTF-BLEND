@@ -4243,7 +4243,8 @@
     "term_116_texture_group_hint": "Define skins (alternate texture sets) for the model. Each column is a material 'slot' and the Default row lists the model's existing materials. Each Skin row picks, per slot, the material to show in-game — an existing material or a texture you import from your computer. Imported textures are processed in Step 12 and compiled into the model in Step 14. Run the material scan first so the dropdowns list the model's materials.",
     "term_117_tg_preview_empty": "No skins defined yet. Add at least one slot and one skin to emit a $texturegroup.",
     "term_118_tg_imports_some": "Imported textures:",
-    "term_119_tg_imports_none": "No imported textures yet. Use 'Import Texture…' to add one."
+    "term_119_tg_imports_none": "No imported textures yet. Use 'Import Texture…' to add one.",
+    "term_120_select_essential_bodygroups": "Select essential bodygroup only"
   },
   "validation": {
     "missing_armature": "No armature was found.",

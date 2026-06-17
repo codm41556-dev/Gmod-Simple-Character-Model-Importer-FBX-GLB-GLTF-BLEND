@@ -4162,7 +4162,8 @@
     "term_116_texture_group_hint": "为模型定义皮肤（替换用的纹理组）。每一列是一个材质“槽位”，“默认”行列出模型现有的材质。每个皮肤行为每个槽位选择在游戏中显示的材质——可以是现有材质，也可以是从你电脑导入的纹理。导入的纹理会在步骤 12 中处理，并在步骤 14 中编译进模型。请先运行材质扫描，下拉菜单才会列出模型的材质。",
     "term_117_tg_preview_empty": "尚未定义皮肤。至少添加一个槽位和一个皮肤才能生成 $texturegroup。",
     "term_118_tg_imports_some": "已导入纹理：",
-    "term_119_tg_imports_none": "尚无导入的纹理。使用“导入纹理…”添加。"
+    "term_119_tg_imports_none": "尚无导入的纹理。使用“导入纹理…”添加。",
+    "term_120_select_essential_bodygroups": "仅选择必要身体组"
   },
   "validation": {
     "missing_input": "找不到输入：{path}",

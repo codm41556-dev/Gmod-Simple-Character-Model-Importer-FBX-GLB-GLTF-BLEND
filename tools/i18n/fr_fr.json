@@ -4263,7 +4263,8 @@
     "term_116_texture_group_hint": "Définissez des skins (jeux de textures alternatifs) pour le modèle. Chaque colonne est un « emplacement » de matériau et la ligne Par défaut liste les matériaux existants du modèle. Chaque ligne de skin choisit, par emplacement, le matériau à afficher en jeu — un matériau existant ou une texture importée depuis votre ordinateur. Les textures importées sont traitées à l'étape 12 et compilées dans le modèle à l'étape 14. Lancez d'abord l'analyse des matériaux pour que les listes déroulantes affichent les matériaux du modèle.",
     "term_117_tg_preview_empty": "Aucun skin défini pour l'instant. Ajoutez au moins un emplacement et un skin pour générer un $texturegroup.",
     "term_118_tg_imports_some": "Textures importées :",
-    "term_119_tg_imports_none": "Aucune texture importée pour l'instant. Utilisez « Importer une texture… » pour en ajouter une."
+    "term_119_tg_imports_none": "Aucune texture importée pour l'instant. Utilisez « Importer une texture… » pour en ajouter une.",
+    "term_120_select_essential_bodygroups": "Sélectionner uniquement les groupes corporels essentiels"
   },
   "preflight": {
     "title": "Avertissements de pré-vérification",

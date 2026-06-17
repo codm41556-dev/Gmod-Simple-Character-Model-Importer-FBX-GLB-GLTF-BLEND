@@ -53,15 +53,24 @@ PBR_SCHEMES: dict[str, dict[str, Any]] = {
     "unreal_wuwa": {
         "label": "Unreal (Wuthering Waves-like)",
         "base_suffixes": ("_d",),
-        # role -> sibling filename suffixes (the base "_D" suffix is replaced).
+        # role -> sibling filename suffixes (the base "_D"/"_D1" suffix is replaced).
+        # Hair uses "_hn" for the normal; body/cloth carry an "_FTM" packed mask.
         "sibling_suffixes": {
             "normal": ("_n", "_hn"),
-            "emission": ("_fx",),
+            "mask": ("_ftm",),
         },
-        # role -> (sibling role that holds it, channel, invert). Wuthering Waves
-        # packs roughness in the _N alpha (slot "Normal_Roughness_Metallic").
+        # role -> (sibling role that holds it, channel, invert). Channel mapping
+        # verified against the HoyoToon Wuthering Waves shader + the live texture
+        # set (see scmi memory): the _N alpha is the roughness/spec scalar (bright
+        # = rough, no invert because the baker emits gloss = 1 - roughness); the
+        # _FTM mask is R = ambient occlusion, A = a sparse emission/glow mask
+        # (B ~0.5 filler and G are ignored). Wuthering Waves does NOT author a
+        # metallic texture (it is shader/region-driven), so no metallic is mapped.
+        # "_RGID" is a region/material-ID map (near-black, discrete) — never PBR.
         "packed_channels": {
             "roughness": ("normal", "a", False),
+            "ao": ("mask", "r", False),
+            "emission": ("mask", "a", False),
         },
     },
     "unity_endfield": {
@@ -108,8 +117,13 @@ def resize_channel_to(channel: np.ndarray, height: int, width: int) -> np.ndarra
 def base_stem_root(stem: str, base_suffixes: tuple[str, ...]) -> str:
     low = stem.lower()
     for suffix in base_suffixes:
-        if low.endswith(suffix):
-            return stem[: -len(suffix)]
+        # Match the base suffix optionally followed by a numeric variant, e.g.
+        # "_D", "_D1", "_D2". Wuthering Waves ships both "_D" and "_D1" diffuse
+        # variants and the model usually samples "_D1"; sibling maps (_N, _FTM,
+        # …) drop the digit, so the shared stem root must strip it too.
+        match = re.search(re.escape(suffix) + r"\d*$", low)
+        if match:
+            return stem[: match.start()]
     return stem
 
 
@@ -255,6 +269,20 @@ def build_selfillum_png(emission_source: Path, output_path: Path) -> tuple[float
     output_path.parent.mkdir(parents=True, exist_ok=True)
     Image.fromarray(np.clip(out * 255.0, 0, 255).astype(np.uint8), mode="RGBA").save(output_path)
     return round(mean_luminance, 4), mean_luminance >= 0.02
+
+
+def build_selfillum_mask_from_channel(source: Path, channel: str, output_path: Path) -> tuple[float, bool]:
+    """Write a $selfillummask from one packed channel (e.g. the Wuthering Waves
+    _FTM alpha glow mask). White = emissive; the glow colour comes from the base
+    texture in-game. Returns (mean, is_emissive); a near-black mask reports
+    is_emissive=False so callers skip a pointless self-illum flag."""
+    arr = load_rgba_array(source)
+    mask = arr[..., channel_index(channel)]
+    mean_value = float(mask.mean())
+    out = np.stack([mask, mask, mask, mask], axis=-1)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    Image.fromarray(np.clip(out * 255.0, 0, 255).astype(np.uint8), mode="RGBA").save(output_path)
+    return round(mean_value, 4), mean_value >= 0.004
 
 
 @dataclass
@@ -1150,7 +1178,15 @@ def process_textures(input_path: Path, plan_json: Path, report_json: Path, manif
                 if emission_source and emission_source.exists():
                     try:
                         selfillum_output = selfillum_dir / f"{row.get('output_name', material_name)}_selfillum.png"
-                        mean_luminance, is_emissive = build_selfillum_png(emission_source, selfillum_output)
+                        emission_channel = str(emission_info.get("channel") or "").strip()
+                        if emission_channel:
+                            # Packed glow mask (e.g. Wuthering Waves _FTM alpha): the
+                            # mask is one channel; the emissive colour is the base texture.
+                            mean_luminance, is_emissive = build_selfillum_mask_from_channel(
+                                emission_source, emission_channel, selfillum_output
+                            )
+                        else:
+                            mean_luminance, is_emissive = build_selfillum_png(emission_source, selfillum_output)
                         row_report["selfillum_mean"] = mean_luminance
                         if is_emissive:
                             row_report["selfillum_output_path"] = str(selfillum_output)

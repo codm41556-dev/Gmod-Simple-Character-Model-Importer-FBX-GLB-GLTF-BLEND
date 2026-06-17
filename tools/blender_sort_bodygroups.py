@@ -2547,6 +2547,55 @@ def remove_zero_vertex_bodygroups() -> list[str]:
     return sorted(removed, key=natural_key)
 
 
+def rename_bodygroup_objects_by_material() -> list[dict[str, str]]:
+    """QoL for the "Proceed Manually" flow: give every material-separated
+    bodygroup object a recognizable name based on its dominant material before
+    the user opens the manual-edit blend.
+
+    Blender's material separation leaves the objects auto-suffixed (Body, Body.001,
+    …) which is useless when hand-editing bodygroups. This mirrors the automatic
+    naming (`material_based_bodygroup_base`): a safe, capitalized material name when
+    the dominant material has one, otherwise the category fallback (Body/Face/Hair/
+    …). Only ever called on the manual-edit blend, so the analysis/plan JSON and the
+    automatic apply path (which re-separates the original Step-5 blend) are
+    untouched. Names are resolved up-front, then applied in two passes (temp names
+    first) so reusing a name another object currently holds cannot auto-suffix it.
+    """
+    ensure_object_mode()
+    targets = sorted(
+        [
+            obj
+            for obj in mesh_objects()
+            if not is_helper_mesh_object(obj) and len(obj.data.vertices) > 0 and len(obj.data.polygons) > 0
+        ],
+        key=lambda item: natural_key(item.name),
+    )
+    used: set[str] = set()
+    planned: list[tuple[bpy.types.Object, str, str]] = []
+    for index, obj in enumerate(targets, start=1):
+        dominant_name, _count = dominant_material_from_counts(material_vertex_counts(obj))
+        base = material_bodygroup_name(dominant_name)
+        if not base:
+            materials = [mat.name for mat in used_materials(obj)]
+            category, _confidence, _warnings = classify_source(obj, materials, tracking_vertex_groups(obj))
+            base = capitalized_bodygroup_name(default_bodygroup_name(category, obj.name))
+        final_name = unique_name(base, used, f"Bodygroup_{index:03d}")
+        planned.append((obj, obj.name, final_name))
+    for index, (obj, _old, _final) in enumerate(planned):
+        temp_name = f"__mci_bg_rename_{index:03d}"
+        obj.name = temp_name
+        if obj.data is not None:
+            obj.data.name = temp_name
+    renames: list[dict[str, str]] = []
+    for obj, old_name, final_name in planned:
+        obj.name = final_name
+        if obj.data is not None:
+            obj.data.name = final_name
+        if old_name != final_name:
+            renames.append({"old": old_name, "new": final_name})
+    return renames
+
+
 def split_object_by_vertex_group(obj: bpy.types.Object, group_name: str, new_name: str) -> list[bpy.types.Object]:
     selected = vertex_indices_for_group(obj, group_name)
     if not selected:
@@ -3262,13 +3311,16 @@ def main() -> int:
         analysis["elapsed_seconds"] = round(time.monotonic() - started, 3)
         if args.manual_edit_blend:
             removed_zero_vertex_bodygroups = remove_zero_vertex_bodygroups()
+            manual_edit_renames = rename_bodygroup_objects_by_material()
             args.manual_edit_blend.parent.mkdir(parents=True, exist_ok=True)
             analysis["removed_zero_vertex_bodygroups"] = removed_zero_vertex_bodygroups
             analysis["manual_edit_blend"] = str(args.manual_edit_blend)
+            analysis["manual_edit_renames"] = manual_edit_renames
             plan["removed_zero_vertex_bodygroups"] = removed_zero_vertex_bodygroups
             plan["manual_edit_blend"] = str(args.manual_edit_blend)
+            plan["manual_edit_renames"] = manual_edit_renames
             bpy.ops.wm.save_as_mainfile(filepath=str(args.manual_edit_blend))
-            print(f"Wrote manual bodygroup edit blend: {args.manual_edit_blend}")
+            print(f"Wrote manual bodygroup edit blend: {args.manual_edit_blend} ({len(manual_edit_renames)} object(s) renamed by material)")
         write_json(args.analysis_json, analysis)
         write_json(args.plan_json, plan)
         print(f"Wrote bodygroup analysis: {args.analysis_json}")

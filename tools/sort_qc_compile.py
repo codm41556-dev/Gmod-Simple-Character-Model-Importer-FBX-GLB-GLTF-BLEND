@@ -1847,7 +1847,7 @@ def base_qc_lines(
     lines.append('$ikautoplaylock "lfoot" 0.7 0.1 \n\n')
     reference_name = gendered_reference_name(plan, source_dir / "anims")
     lines.append(f'$sequence reference "anims/{reference_name}" fps 1 \n')
-    lines.append('$origin 0 0 -1.50 \n\n')
+    lines.append('$origin 0 0 -2.50 \n\n')
     lines.append('$animation a_proportions "anims/proportions" subtract reference 0 \n\n')
     lines.append('$sequence proportions a_proportions predelta autoplay \n\n')
     lines.append('$Sequence "ragdoll" {\n')

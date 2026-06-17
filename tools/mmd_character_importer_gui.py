@@ -7658,15 +7658,14 @@ class ImporterWindow(QtWidgets.QMainWindow):
         source_buttons = QtWidgets.QHBoxLayout()
         self.collision_source_select_all_button = QtWidgets.QPushButton("Select All")
         self.collision_source_deselect_all_button = QtWidgets.QPushButton("Deselect All")
-        self.collision_source_face_button = QtWidgets.QPushButton("Face only")
-        self.collision_source_body_button = QtWidgets.QPushButton("Body only")
-        self.collision_source_hair_button = QtWidgets.QPushButton("Hair only")
+        self.collision_source_essential_button = QtWidgets.QPushButton("Select essential bodygroup only")
+        self.collision_source_essential_button.setToolTip(
+            "Enable only the essential Face, Body, and Hair bodygroups for CoACD collision; disable clothes, accessories, and others."
+        )
         for _src_button in (
             self.collision_source_select_all_button,
             self.collision_source_deselect_all_button,
-            self.collision_source_face_button,
-            self.collision_source_body_button,
-            self.collision_source_hair_button,
+            self.collision_source_essential_button,
         ):
             source_buttons.addWidget(_src_button)
         source_buttons.addStretch(1)
@@ -7844,9 +7843,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
         self.collision_source_table.itemSelectionChanged.connect(self.on_collision_source_table_selection_changed)
         self.collision_source_select_all_button.clicked.connect(lambda: self.set_all_collision_sources(True))
         self.collision_source_deselect_all_button.clicked.connect(lambda: self.set_all_collision_sources(False))
-        self.collision_source_face_button.clicked.connect(lambda: self.select_collision_source_category("face"))
-        self.collision_source_body_button.clicked.connect(lambda: self.select_collision_source_category("body"))
-        self.collision_source_hair_button.clicked.connect(lambda: self.select_collision_source_category("hair"))
+        self.collision_source_essential_button.clicked.connect(self.select_essential_collision_sources)
         self.collision_table.itemChanged.connect(self.on_collision_table_item_changed)
         self.collision_table.itemSelectionChanged.connect(self.on_collision_table_selection_changed)
         self.collision_outputs_toggle.toggled.connect(self.set_collision_outputs_visible)
@@ -14860,6 +14857,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
         vertex_limit = self.bodygroup_vertex_limit()
         message.setInformativeText(
             "Edit the bodygroups directly in Blender, then close Blender to continue.\n\n"
+            "Each bodygroup object is pre-named after its dominant material for convenience; rename as needed.\n\n"
             "Rules:\n"
             "- Use only English letters, numbers, and underscore in bodygroup object names.\n"
             "- Keep names capitalized; every model must include Face and Body.\n"
@@ -16687,19 +16685,23 @@ class ImporterWindow(QtWidgets.QMainWindow):
         names = {str(entry.get("name") or ""): bool(enabled) for entry in self.collision_source_entries() if str(entry.get("name") or "")}
         self._apply_collision_source_enabled(names)
 
-    def select_collision_source_category(self, kind: str) -> None:
-        kind = str(kind or "").lower()
+    def select_essential_collision_sources(self) -> None:
+        """Enable only the essential Face/Body/Hair bodygroups for CoACD collision
+        and disable everything else (clothes, accessories, …)."""
+        essential = {"face", "body", "hair"}
         names: dict[str, bool] = {}
         matched = 0
         for entry in self.collision_source_entries():
             name = str(entry.get("name") or "")
             if not name:
                 continue
-            on = self._classify_collision_source_bodygroup(name) == kind
+            on = self._classify_collision_source_bodygroup(name) in essential
             names[name] = on
             matched += 1 if on else 0
         self._apply_collision_source_enabled(names)
-        self.statusBar().showMessage(f"Enabled {matched} '{kind}' bodygroup(s) for CoACD collision; others disabled.", 6000)
+        self.statusBar().showMessage(
+            f"Enabled {matched} essential (Face/Body/Hair) bodygroup(s) for CoACD collision; others disabled.", 6000
+        )
 
     def _classify_collision_source_bodygroup(self, name: str) -> str:
         """Heuristically bucket a bodygroup name as face / hair / body / other.
@@ -19249,17 +19251,24 @@ class ImporterWindow(QtWidgets.QMainWindow):
     def on_texture_scheme_changed(self, _index: int = 0) -> None:
         scheme = self.current_texture_scheme()
         hint = getattr(self, "texture_scheme_hint", None)
+        plan_scheme = str(self.current_texture_plan.get("scheme") or "") if isinstance(self.current_texture_plan, dict) else ""
+        stale = bool(plan_scheme) and plan_scheme != scheme
         if hint is not None:
             if scheme == "legacy":
-                hint.setText(
+                text = (
                     "Legacy scheme: base color only, identical to one-click auto-port. "
                     "Pick an engine scheme to scan for PBR maps."
                 )
             else:
-                hint.setText(
+                text = (
                     "Click Analyze Textures to scan each material for PBR maps. Every extra map is off by "
                     "default (matching auto-port); tick Roughness/Metallic/Emission/AO per material, then Process."
                 )
+            if stale:
+                # The PBR columns come from the last scan; a scheme switch alone
+                # does not rescan, so warn instead of showing stale "—" cells.
+                text += "  ⚠ Scheme changed since the last scan — click Analyze Textures again to refresh PBR detection."
+            hint.setText(text)
         self.save_settings()
 
     def texture_entries(self) -> list[dict[str, object]]:

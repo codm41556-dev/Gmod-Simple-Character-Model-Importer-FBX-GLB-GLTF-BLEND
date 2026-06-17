@@ -4263,7 +4263,8 @@
     "term_116_texture_group_hint": "Define skins (conjuntos de texturas alternativos) para el modelo. Cada columna es una 'ranura' de material y la fila Predeterminado enumera los materiales existentes del modelo. Cada fila de skin elige, por ranura, el material que se mostrará en el juego: un material existente o una textura que importes desde tu ordenador. Las texturas importadas se procesan en el Paso 12 y se compilan en el modelo en el Paso 14. Ejecuta primero el escaneo de materiales para que los desplegables muestren los materiales del modelo.",
     "term_117_tg_preview_empty": "Aún no hay skins definidos. Añade al menos una ranura y un skin para generar un $texturegroup.",
     "term_118_tg_imports_some": "Texturas importadas:",
-    "term_119_tg_imports_none": "Aún no hay texturas importadas. Usa 'Importar textura…' para añadir una."
+    "term_119_tg_imports_none": "Aún no hay texturas importadas. Usa 'Importar textura…' para añadir una.",
+    "term_120_select_essential_bodygroups": "Seleccionar solo grupos corporales esenciales"
   },
   "preflight": {
     "title": "Advertencias de precomprobación",

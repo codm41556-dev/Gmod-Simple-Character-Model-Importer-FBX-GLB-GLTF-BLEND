@@ -4162,7 +4162,8 @@
     "term_116_texture_group_hint": "為模型定義皮膚（替換用的紋理組）。每一欄是一個材質「槽位」，「預設」列出模型現有的材質。每個皮膚列為每個槽位選擇在遊戲中顯示的材質——可以是現有材質，也可以是從你電腦匯入的紋理。匯入的紋理會在步驟 12 中處理，並在步驟 14 中編譯進模型。請先執行材質掃描，下拉選單才會列出模型的材質。",
     "term_117_tg_preview_empty": "尚未定義皮膚。至少新增一個槽位和一個皮膚才能產生 $texturegroup。",
     "term_118_tg_imports_some": "已匯入紋理：",
-    "term_119_tg_imports_none": "尚無匯入的紋理。使用「匯入紋理…」新增。"
+    "term_119_tg_imports_none": "尚無匯入的紋理。使用「匯入紋理…」新增。",
+    "term_120_select_essential_bodygroups": "僅選擇必要身體組"
   },
   "validation": {
     "missing_input": "找不到輸入：{path}",

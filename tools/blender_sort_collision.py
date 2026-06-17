@@ -3419,6 +3419,87 @@ def validate_physics_smd_import(path: Path) -> dict[str, object]:
     }
 
 
+def transfer_vertex_weights_to_bone(
+    mesh_obj: bpy.types.Object,
+    source_bones: Iterable[str],
+    target_bone: str,
+) -> int:
+    """Move the weights of `source_bones` vertex groups onto `target_bone` on one
+    mesh, then delete the now-empty source groups. Returns the vertex count moved.
+
+    Weights are accumulated up front and applied with ADD so a vertex shared by
+    several source bones (or already partly on the target) lands fully on the
+    target; sources summing to ~1.0 on a rigid skirt vertex therefore become 1.0
+    on the target.
+    """
+    vertex_groups = mesh_obj.vertex_groups
+    source_groups = [
+        group
+        for name in source_bones
+        if str(name) != target_bone and (group := vertex_groups.get(str(name))) is not None
+    ]
+    if not source_groups:
+        return 0
+    source_indices = {group.index for group in source_groups}
+    target_group = vertex_groups.get(target_bone) or vertex_groups.new(name=target_bone)
+    accumulated: dict[int, float] = {}
+    for vertex in mesh_obj.data.vertices:
+        weight = 0.0
+        for membership in vertex.groups:
+            if membership.group in source_indices:
+                weight += membership.weight
+        if weight > 0.0:
+            accumulated[vertex.index] = weight
+    for vertex_index, weight in accumulated.items():
+        target_group.add([vertex_index], weight, "ADD")
+    for group in source_groups:
+        vertex_groups.remove(group)
+    return len(accumulated)
+
+
+def merge_additional_group_weights(
+    armature: bpy.types.Object,
+    additional_groups: list[dict[str, object]],
+) -> dict[str, object]:
+    """Reweight each additional collision group's non-target bones onto its target.
+
+    A collision group becomes ONE rigid physics body owned by the target bone —
+    only the target gets a hull in Physics.smd. Without moving the render weights,
+    vertices weighted to the group's other bones (a sibling like Skirt001_R, or a
+    deeper chain bone such as Skirt002_L) keep following their own hull-less bones
+    and are NOT driven by the target's physics in game, so that side of the skirt
+    stays rigid. Transferring those weights to the target makes the whole group
+    move as one body. Render meshes only (the Physics object is excluded).
+    """
+    render_meshes = mesh_objects(include_physics=False)
+    moved_groups: list[dict[str, object]] = []
+    moved_total = 0
+    for group in additional_groups:
+        if not isinstance(group, dict):
+            continue
+        target = str(group.get("target_bone") or group.get("owner_bone") or group.get("bone") or "")
+        bones = [str(name) for name in group.get("bones", []) if str(name)] if isinstance(group.get("bones"), list) else []
+        sources = [name for name in bones if name and name != target]
+        if not target or not sources or target not in armature.data.bones:
+            continue
+        group_moved = sum(transfer_vertex_weights_to_bone(mesh_obj, sources, target) for mesh_obj in render_meshes)
+        if group_moved:
+            moved_total += group_moved
+            moved_groups.append(
+                {
+                    "group": group.get("group"),
+                    "target_bone": target,
+                    "merged_bones": sources,
+                    "moved_vertices": group_moved,
+                }
+            )
+            log_progress(
+                f"Group {group.get('group')}: merged {len(sources)} bone weight region(s) into {target} "
+                f"({group_moved} render vertices)."
+            )
+    return {"moved_total": moved_total, "groups": moved_groups}
+
+
 def apply_scene(
     input_blend: Path,
     plan_path: Path,
@@ -3470,6 +3551,20 @@ def apply_scene(
     armature = main_armature()
     physics = create_physics_object(armature, parts) if armature is not None else None
     log_progress("Created Physics object and assigned rigid 1.0 target-bone weights.")
+    # A grouped collision part owns a single hull on its target bone; move the
+    # render-mesh weights of the group's other bones onto that target so the whole
+    # group is driven by one physics body in game (otherwise siblings/chain bones
+    # such as Skirt001_R keep their own hull-less bones and stay rigid).
+    group_weight_merge = (
+        merge_additional_group_weights(armature, additional_groups)
+        if armature is not None
+        else {"moved_total": 0, "groups": []}
+    )
+    if group_weight_merge.get("moved_total"):
+        log_progress(
+            f"Merged grouped collision bone weights into targets "
+            f"({group_weight_merge['moved_total']} render vertices across {len(group_weight_merge['groups'])} group(s))."
+        )
     final_validation = validate_physics_object(physics, armature, parts, target_bones=target_bones)
     smd_info: dict[str, object] = {}
     if physics_smd is not None and armature is not None and physics is not None:
@@ -3523,6 +3618,7 @@ def apply_scene(
         "physics_smd_import_validation": smd_import_validation,
         "requires_concaveperjoint": True,
         "qc_options": ["$concaveperjoint"],
+        "group_weight_merge": group_weight_merge,
         "validation": final_validation,
     }
     write_json(report_json, report)
