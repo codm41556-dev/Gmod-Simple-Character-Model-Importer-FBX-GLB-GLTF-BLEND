@@ -3301,6 +3301,8 @@ class ImporterWindow(QtWidgets.QMainWindow):
         self.current_material_scan: dict[str, object] | None = None
         self.current_material_plan: dict[str, object] | None = None
         self.current_material_merge_plan: dict[str, object] | None = None
+        self.texture_groups_config: dict[str, object] = {"version": 1, "slots": [], "skins": [], "imports": []}
+        self._updating_texture_group_table = False
         self.current_bodygroup_analysis: dict[str, object] | None = None
         self.current_bodygroup_plan: dict[str, object] | None = None
         self.current_flex_analysis: dict[str, object] | None = None
@@ -4118,6 +4120,17 @@ class ImporterWindow(QtWidgets.QMainWindow):
                             item.setData(QtCore.Qt.ItemDataRole.UserRole + 50, source)
                     if isinstance(source, str) and source:
                         item.setText(self.translate_static_text(source))
+            if isinstance(widget, QtWidgets.QTreeWidget):
+                header_item = widget.headerItem()
+                if header_item is not None:
+                    for column in range(header_item.columnCount()):
+                        source = header_item.data(column, QtCore.Qt.ItemDataRole.UserRole + 50)
+                        if not isinstance(source, str) or not source:
+                            source = header_item.text(column)
+                            if self._is_static_i18n_source(source):
+                                header_item.setData(column, QtCore.Qt.ItemDataRole.UserRole + 50, source)
+                        if isinstance(source, str) and source:
+                            header_item.setText(column, self.translate_static_text(source))
 
     def apply_workflow_i18n(self) -> None:
         step_keys = {
@@ -6616,6 +6629,8 @@ class ImporterWindow(QtWidgets.QMainWindow):
         merge_layout.addWidget(merge_splitter, 1)
         self.material_subtabs.addTab(merge_tab, "Merging Material")
 
+        self._build_texture_groups_subtab()
+
         tab_layout.addWidget(self.material_progress_group)
         self.material_details_toggle_row = QtWidgets.QWidget()
         details_layout = QtWidgets.QHBoxLayout(self.material_details_toggle_row)
@@ -6656,6 +6671,413 @@ class ImporterWindow(QtWidgets.QMainWindow):
         self.material_merge_validate_button.clicked.connect(self.validate_material_merge_plan)
 
         self.tabs.addTab(tab, "5 Sort Materials")
+
+    def _build_texture_groups_subtab(self) -> None:
+        tab = QtWidgets.QWidget()
+        layout = QtWidgets.QVBoxLayout(tab)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(8)
+
+        hint = QtWidgets.QLabel(
+            "Define skins (alternate texture sets) for the model. Each column is a material 'slot' and the "
+            "Default row lists the model's existing materials. Each Skin row picks, per slot, the material to "
+            "show in-game — an existing material or a texture you import from your computer. Imported textures "
+            "are processed in Step 12 and compiled into the model in Step 14. Run the material scan first so the "
+            "dropdowns list the model's materials."
+        )
+        hint.setObjectName("fieldHint")
+        hint.setWordWrap(True)
+        hint.setProperty("_mci_i18n_text", hint.text())
+        layout.addWidget(hint)
+
+        actions = QtWidgets.QHBoxLayout()
+        self.texture_group_add_slot_button = QtWidgets.QPushButton("Add Slot")
+        self.texture_group_add_slot_button.setToolTip("Add a material column that skins can swap.")
+        self.texture_group_remove_slot_button = QtWidgets.QPushButton("Remove Slot")
+        self.texture_group_remove_slot_button.setToolTip("Remove the selected (or last) slot column.")
+        self.texture_group_add_skin_button = QtWidgets.QPushButton("Add Skin")
+        self.texture_group_add_skin_button.setToolTip("Add an alternate skin row.")
+        self.texture_group_remove_skin_button = QtWidgets.QPushButton("Remove Skin")
+        self.texture_group_remove_skin_button.setToolTip("Remove the selected (or last) skin row.")
+        self.texture_group_import_button = QtWidgets.QPushButton("Import Texture…")
+        self.texture_group_import_button.setToolTip("Import an image to use as a skin texture; assigns it to the selected skin cell.")
+        self.texture_group_reset_button = QtWidgets.QPushButton("Clear")
+        self.texture_group_reset_button.setToolTip("Remove all slots and skins.")
+        for button in (
+            self.texture_group_add_slot_button,
+            self.texture_group_remove_slot_button,
+            self.texture_group_add_skin_button,
+            self.texture_group_remove_skin_button,
+            self.texture_group_import_button,
+        ):
+            actions.addWidget(button)
+        actions.addStretch(1)
+        actions.addWidget(self.texture_group_reset_button)
+        layout.addLayout(actions)
+
+        self.texture_group_table = QtWidgets.QTableWidget(0, 0)
+        self.texture_group_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectItems)
+        self.texture_group_table.setSelectionMode(QtWidgets.QAbstractItemView.SelectionMode.SingleSelection)
+        self.texture_group_table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.texture_group_table.verticalHeader().setDefaultSectionSize(34)
+        self.texture_group_table.horizontalHeader().setSectionResizeMode(QtWidgets.QHeaderView.ResizeMode.Stretch)
+        layout.addWidget(self.texture_group_table, 1)
+
+        self.texture_group_imports_label = QtWidgets.QLabel("")
+        self.texture_group_imports_label.setObjectName("fieldHint")
+        self.texture_group_imports_label.setWordWrap(True)
+        layout.addWidget(self.texture_group_imports_label)
+
+        preview_group = QtWidgets.QGroupBox("QC Preview")
+        preview_layout = QtWidgets.QVBoxLayout(preview_group)
+        self.texture_group_preview = QtWidgets.QPlainTextEdit()
+        self.texture_group_preview.setReadOnly(True)
+        self.texture_group_preview.setMaximumHeight(150)
+        self.texture_group_preview.setFont(QtGui.QFont("Consolas"))
+        preview_layout.addWidget(self.texture_group_preview)
+        layout.addWidget(preview_group)
+
+        self.material_subtabs.addTab(tab, "Texture Groups")
+
+        self.texture_group_add_slot_button.clicked.connect(self.texture_group_add_slot)
+        self.texture_group_remove_slot_button.clicked.connect(self.texture_group_remove_slot)
+        self.texture_group_add_skin_button.clicked.connect(self.texture_group_add_skin)
+        self.texture_group_remove_skin_button.clicked.connect(self.texture_group_remove_skin)
+        self.texture_group_import_button.clicked.connect(self.texture_group_import_texture)
+        self.texture_group_reset_button.clicked.connect(self.texture_group_clear)
+        self.populate_texture_group_table()
+
+    # --- Texture group (skin) editor: state, persistence, and grid ---------------
+
+    def texture_groups_workspace_root(self) -> Path | None:
+        text = self.material_output_edit.text().strip() if hasattr(self, "material_output_edit") else ""
+        if text:
+            path = Path(text)
+            return path.parent if path.name == "5_sort_materials" else path
+        raw = self.material_input_row.value() if hasattr(self, "material_input_row") else ""
+        if raw:
+            try:
+                material_dir = core.material_paths_for_sort_bones_blend(Path(raw))[0]
+            except Exception:
+                return None
+            return material_dir.parent if material_dir.name == "5_sort_materials" else material_dir
+        return None
+
+    def texture_groups_config_file(self) -> Path | None:
+        ws = self.texture_groups_workspace_root()
+        return (ws / "texture_groups" / "texture_groups.json") if ws else None
+
+    def texture_group_existing_materials(self) -> list[str]:
+        names: list[str] = []
+        seen: set[str] = set()
+        if self.current_material_merge_plan:
+            for entry in self.merge_entries():
+                if entry.get("enabled", True) is False:
+                    continue
+                name = str(entry.get("final_name") or entry.get("material_name") or "").strip()
+                if name and name not in seen:
+                    seen.add(name)
+                    names.append(name)
+        if not names and self.current_material_plan:
+            for entry in self.material_entries():
+                if entry.get("keep") is False:
+                    continue
+                name = str(entry.get("proposed_name") or entry.get("material_name") or "").strip()
+                if name and name not in seen:
+                    seen.add(name)
+                    names.append(name)
+        return sorted(names)
+
+    def texture_group_import_names(self) -> list[str]:
+        imports = self.texture_groups_config.get("imports", []) if isinstance(self.texture_groups_config, dict) else []
+        return [str(item.get("name")).strip() for item in imports if isinstance(item, dict) and str(item.get("name") or "").strip()]
+
+    def _normalize_texture_groups_config(self) -> None:
+        cfg = self.texture_groups_config if isinstance(self.texture_groups_config, dict) else {}
+        slots = [str(s) for s in cfg.get("slots", [])] if isinstance(cfg.get("slots"), list) else []
+        raw_skins = cfg.get("skins", []) if isinstance(cfg.get("skins"), list) else []
+        skins: list[dict[str, object]] = []
+        for index, skin in enumerate(raw_skins, start=1):
+            if isinstance(skin, dict):
+                name = str(skin.get("name") or f"skin{index}")
+                cells = [str(c) for c in skin.get("cells", [])] if isinstance(skin.get("cells"), list) else []
+            elif isinstance(skin, list):
+                name = f"skin{index}"
+                cells = [str(c) for c in skin]
+            else:
+                continue
+            cells = [(cells[j] if j < len(cells) else "") for j in range(len(slots))]
+            skins.append({"name": name, "cells": cells})
+        raw_imports = cfg.get("imports", []) if isinstance(cfg.get("imports"), list) else []
+        imports: list[dict[str, object]] = []
+        for item in raw_imports:
+            if isinstance(item, dict) and str(item.get("name") or "").strip():
+                imports.append(
+                    {
+                        "name": str(item.get("name")).strip(),
+                        "path": str(item.get("path") or ""),
+                        "source": str(item.get("source") or ""),
+                    }
+                )
+        self.texture_groups_config = {"version": 1, "slots": slots, "skins": skins, "imports": imports}
+
+    def load_texture_groups_config_from_disk(self) -> None:
+        path = self.texture_groups_config_file()
+        if path and path.exists():
+            try:
+                data = json.loads(path.read_text(encoding="utf-8"))
+                if isinstance(data, dict):
+                    self.texture_groups_config = data
+            except Exception:
+                pass
+        self._normalize_texture_groups_config()
+        self.populate_texture_group_table()
+
+    def save_texture_groups_config(self) -> None:
+        self._normalize_texture_groups_config()
+        path = self.texture_groups_config_file()
+        if path is None:
+            return
+        try:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(self.texture_groups_config, ensure_ascii=False, indent=2), encoding="utf-8")
+        except Exception:
+            pass
+
+    def populate_texture_group_table(self) -> None:
+        if not hasattr(self, "texture_group_table"):
+            return
+        self._normalize_texture_groups_config()
+        cfg = self.texture_groups_config
+        slots = list(cfg.get("slots", []))
+        skins = list(cfg.get("skins", []))
+        existing = self.texture_group_existing_materials()
+        table = self.texture_group_table
+        self._updating_texture_group_table = True
+        try:
+            table.clear()
+            table.setColumnCount(len(slots))
+            table.setRowCount(1 + len(skins))
+            table.setHorizontalHeaderLabels([f"Slot {i + 1}" for i in range(len(slots))])
+            vlabels = [self.translate_static_text("Default")]
+            for i, skin in enumerate(skins, start=1):
+                vlabels.append(str(skin.get("name") or f"Skin {i}"))
+            table.setVerticalHeaderLabels(vlabels)
+            for col in range(len(slots)):
+                self._set_texture_group_combo(0, col, str(slots[col]), existing, allow_imports=False)
+            for row, skin in enumerate(skins, start=1):
+                cells = skin.get("cells", [])
+                for col in range(len(slots)):
+                    value = str(cells[col]) if col < len(cells) else ""
+                    self._set_texture_group_combo(row, col, value, existing, allow_imports=True)
+        finally:
+            self._updating_texture_group_table = False
+        self._update_texture_group_imports_label()
+        self.update_texture_group_preview()
+
+    def _set_texture_group_combo(self, row: int, col: int, value: str, existing: list[str], allow_imports: bool) -> None:
+        combo = QtWidgets.QComboBox()
+        combo.setEditable(True)
+        options = ["", *existing]
+        if allow_imports:
+            for name in self.texture_group_import_names():
+                if name not in options:
+                    options.append(name)
+        combo.addItems(options)
+        combo.setCurrentText(value)
+        combo.setProperty("tg_row", row)
+        combo.setProperty("tg_col", col)
+        combo.currentTextChanged.connect(self.on_texture_group_cell_changed)
+        combo.activated.connect(self._on_texture_group_combo_activated)
+        self.texture_group_table.setCellWidget(row, col, combo)
+
+    def _on_texture_group_combo_activated(self, _index: int) -> None:
+        combo = self.sender()
+        if isinstance(combo, QtWidgets.QComboBox):
+            self._texture_group_active_cell = (int(combo.property("tg_row") or 0), int(combo.property("tg_col") or 0))
+
+    def on_texture_group_cell_changed(self, _text: str) -> None:
+        if self._updating_texture_group_table:
+            return
+        combo = self.sender()
+        if not isinstance(combo, QtWidgets.QComboBox):
+            return
+        row = int(combo.property("tg_row") or 0)
+        col = int(combo.property("tg_col") or 0)
+        self._texture_group_active_cell = (row, col)
+        text = str(combo.currentText()).strip()
+        cfg = self.texture_groups_config
+        slots = cfg.setdefault("slots", [])
+        skins = cfg.setdefault("skins", [])
+        if row == 0:
+            if 0 <= col < len(slots):
+                slots[col] = text
+        else:
+            si = row - 1
+            if 0 <= si < len(skins):
+                cells = skins[si].setdefault("cells", [])
+                while len(cells) <= col:
+                    cells.append("")
+                cells[col] = text
+        self.save_texture_groups_config()
+        self.update_texture_group_preview()
+
+    def _texture_group_active(self) -> tuple[int, int] | None:
+        cell = getattr(self, "_texture_group_active_cell", None)
+        return cell if isinstance(cell, tuple) else None
+
+    def texture_group_add_slot(self) -> None:
+        cfg = self.texture_groups_config
+        slots = cfg.setdefault("slots", [])
+        existing = self.texture_group_existing_materials()
+        default = next((name for name in existing if name not in slots), existing[0] if existing else "")
+        slots.append(default)
+        for skin in cfg.setdefault("skins", []):
+            skin.setdefault("cells", []).append(default)
+        self.save_texture_groups_config()
+        self.populate_texture_group_table()
+
+    def texture_group_remove_slot(self) -> None:
+        cfg = self.texture_groups_config
+        slots = cfg.setdefault("slots", [])
+        if not slots:
+            return
+        active = self._texture_group_active()
+        idx = active[1] if active and 0 <= active[1] < len(slots) else len(slots) - 1
+        slots.pop(idx)
+        for skin in cfg.setdefault("skins", []):
+            cells = skin.setdefault("cells", [])
+            if idx < len(cells):
+                cells.pop(idx)
+        self._texture_group_active_cell = None
+        self.save_texture_groups_config()
+        self.populate_texture_group_table()
+
+    def texture_group_add_skin(self) -> None:
+        cfg = self.texture_groups_config
+        slots = cfg.setdefault("slots", [])
+        if not slots:
+            self.show_error("Add skin", "Add at least one material slot first.")
+            return
+        skins = cfg.setdefault("skins", [])
+        skins.append({"name": f"skin{len(skins) + 1}", "cells": list(slots)})
+        self.save_texture_groups_config()
+        self.populate_texture_group_table()
+
+    def texture_group_remove_skin(self) -> None:
+        cfg = self.texture_groups_config
+        skins = cfg.setdefault("skins", [])
+        if not skins:
+            return
+        active = self._texture_group_active()
+        idx = (active[0] - 1) if active and active[0] >= 1 else len(skins) - 1
+        if 0 <= idx < len(skins):
+            skins.pop(idx)
+        self._texture_group_active_cell = None
+        self.save_texture_groups_config()
+        self.populate_texture_group_table()
+
+    def texture_group_import_texture(self) -> None:
+        ws = self.texture_groups_workspace_root()
+        if ws is None:
+            self.show_error(
+                "Import texture",
+                "Set the Step-4 bone-sorted .blend (or run the material scan) first so a workspace exists to store the imported texture.",
+            )
+            return
+        path, _ = QtWidgets.QFileDialog.getOpenFileName(
+            self,
+            "Import skin texture",
+            "",
+            "Images (*.png *.tga *.jpg *.jpeg *.bmp *.dds *.tif *.tiff);;All files (*.*)",
+        )
+        if not path:
+            return
+        src = Path(path)
+        default_name = re.sub(r"[^A-Za-z0-9_]+", "", src.stem) or "skin"
+        name, ok = QtWidgets.QInputDialog.getText(
+            self,
+            "Imported texture name",
+            "Material name for this skin texture (letters, numbers, underscore):",
+            text=default_name,
+        )
+        if not ok:
+            return
+        name = re.sub(r"[^A-Za-z0-9_]+", "", str(name).strip())
+        if not name:
+            self.show_error("Import texture", "Enter a valid material name (letters, numbers, underscore).")
+            return
+        if name.lower() in {existing.lower() for existing in self.texture_group_existing_materials()}:
+            self.show_error(
+                "Import texture",
+                f"'{name}' is already a model material. Choose a different name for the imported skin texture.",
+            )
+            return
+        imports = self.texture_groups_config.setdefault("imports", [])
+        if not any(str(item.get("name", "")).lower() == name.lower() for item in imports):
+            dest_dir = ws / "texture_groups" / "imported"
+            try:
+                dest_dir.mkdir(parents=True, exist_ok=True)
+                dest = dest_dir / f"{name}{src.suffix.lower()}"
+                shutil.copyfile(src, dest)
+            except Exception as exc:
+                self.show_error("Import texture", f"Could not copy the image:\n{exc}")
+                return
+            imports.append({"name": name, "path": str(dest), "source": str(src)})
+        active = self._texture_group_active()
+        if active and active[0] >= 1:
+            row, col = active
+            skins = self.texture_groups_config.setdefault("skins", [])
+            si = row - 1
+            if 0 <= si < len(skins):
+                cells = skins[si].setdefault("cells", [])
+                while len(cells) <= col:
+                    cells.append("")
+                cells[col] = name
+        self.save_texture_groups_config()
+        self.populate_texture_group_table()
+
+    def texture_group_clear(self) -> None:
+        if not (self.texture_groups_config.get("slots") or self.texture_groups_config.get("skins")):
+            return
+        confirm = QtWidgets.QMessageBox.question(
+            self,
+            self.translate_static_text("Clear texture groups"),
+            self.translate_static_text("Remove all slots and skins? Imported texture files are kept on disk."),
+        )
+        if confirm != QtWidgets.QMessageBox.StandardButton.Yes:
+            return
+        self.texture_groups_config = {"version": 1, "slots": [], "skins": [], "imports": list(self.texture_groups_config.get("imports", []))}
+        self.save_texture_groups_config()
+        self.populate_texture_group_table()
+
+    def _update_texture_group_imports_label(self) -> None:
+        names = self.texture_group_import_names()
+        if names:
+            self.texture_group_imports_label.setText(self.translate_static_text("Imported textures:") + " " + ", ".join(names))
+        else:
+            self.texture_group_imports_label.setText(self.translate_static_text("No imported textures yet. Use 'Import Texture…' to add one."))
+
+    def update_texture_group_preview(self) -> None:
+        cfg = self.texture_groups_config
+        slots = list(cfg.get("slots", []))
+        skins = list(cfg.get("skins", []))
+        if not slots or not skins:
+            self.texture_group_preview.setPlainText(
+                self.translate_static_text("No skins defined yet. Add at least one slot and one skin to emit a $texturegroup.")
+            )
+            return
+
+        def fmt(cells: list[str]) -> str:
+            return "\t{ " + " ".join(f'"{cell or "?"}"' for cell in cells) + " }"
+
+        lines = ["$texturegroup skinfamilies", "{", fmt(slots)]
+        for skin in skins:
+            cells = skin.get("cells", [])
+            resolved = [(cells[j] if j < len(cells) and cells[j] else slots[j]) for j in range(len(slots))]
+            lines.append(fmt(resolved))
+        lines.append("}")
+        self.texture_group_preview.setPlainText("\n".join(lines))
 
     def _build_sort_bodygroups_tab(self) -> None:
         tab = QtWidgets.QWidget()
@@ -8699,24 +9121,30 @@ class ImporterWindow(QtWidgets.QMainWindow):
         bodygroup_layout = QtWidgets.QVBoxLayout(bodygroup_tab)
         bodygroup_layout.setContentsMargins(6, 6, 6, 6)
         bodygroup_hint = QtWidgets.QLabel(
-            "Control how body parts become in-game bodygroups. Set two or more parts to the same Group to make "
-            "them switchable options under one bodygroup (the part matching the group name is shown by default). "
-            "Untick Can Hide to drop the 'blank' (hidden) option so a bodygroup is always shown. Face/Body and any "
-            "part with a .vta (shapekey/flex) are locked: they stay their own bodygroup and cannot be grouped or hidden."
+            "Each top-level row is an in-game bodygroup. To let parts switch in-game, set a part's Bodygroup to "
+            "another part — it moves underneath that bodygroup as a switchable option. Untick Can Hide to drop the "
+            "hidden ('blank') option so the bodygroup is always shown. Face/Body and any part with a .vta "
+            "(shapekey/flex) stay locked to their own bodygroup and cannot be grouped or hidden."
         )
         bodygroup_hint.setObjectName("fieldHint")
         bodygroup_hint.setWordWrap(True)
+        bodygroup_hint.setProperty("_mci_i18n_text", bodygroup_hint.text())
         bodygroup_layout.addWidget(bodygroup_hint)
-        self.qc_bodygroup_table = QtWidgets.QTableWidget(0, 4)
-        self.qc_bodygroup_table.setHorizontalHeaderLabels(["Part (SMD)", "Group", "Can Hide", "Type"])
-        self.qc_bodygroup_table.verticalHeader().setVisible(False)
-        self.qc_bodygroup_table.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
-        self.qc_bodygroup_table.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
-        self.qc_bodygroup_table.horizontalHeader().setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.Stretch)
-        self.qc_bodygroup_table.horizontalHeader().setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.Stretch)
-        self.qc_bodygroup_table.horizontalHeader().setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
-        self.qc_bodygroup_table.horizontalHeader().setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
-        bodygroup_layout.addWidget(self.qc_bodygroup_table, 1)
+        self.qc_bodygroup_tree = QtWidgets.QTreeWidget()
+        self.qc_bodygroup_tree.setColumnCount(4)
+        self.qc_bodygroup_tree.setHeaderLabels(["Part", "Bodygroup", "Can Hide", "Type"])
+        self.qc_bodygroup_tree.setSelectionBehavior(QtWidgets.QAbstractItemView.SelectionBehavior.SelectRows)
+        self.qc_bodygroup_tree.setEditTriggers(QtWidgets.QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.qc_bodygroup_tree.setRootIsDecorated(True)
+        self.qc_bodygroup_tree.setExpandsOnDoubleClick(False)
+        self.qc_bodygroup_tree.setIndentation(18)
+        self.qc_bodygroup_tree.setAlternatingRowColors(True)
+        bodygroup_header = self.qc_bodygroup_tree.header()
+        bodygroup_header.setSectionResizeMode(0, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        bodygroup_header.setSectionResizeMode(1, QtWidgets.QHeaderView.ResizeMode.Stretch)
+        bodygroup_header.setSectionResizeMode(2, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        bodygroup_header.setSectionResizeMode(3, QtWidgets.QHeaderView.ResizeMode.ResizeToContents)
+        bodygroup_layout.addWidget(self.qc_bodygroup_tree, 1)
         self.qc_reset_bodygroups_button = QtWidgets.QPushButton("Reset bodygroups to defaults")
         bodygroup_layout.addWidget(self.qc_reset_bodygroups_button, 0, QtCore.Qt.AlignmentFlag.AlignLeft)
         self.qc_advanced_panel.addTab(bodygroup_tab, "Bodygroups")
@@ -12847,6 +13275,8 @@ class ImporterWindow(QtWidgets.QMainWindow):
                 self.material_sorted_blend_path = str(output_blend)
             if final_blend.exists():
                 self.material_final_blend_label.setText(str(final_blend))
+            if hasattr(self, "texture_group_table"):
+                self.load_texture_groups_config_from_disk()
         except Exception:
             self.material_output_edit.clear()
             self.open_material_folder_button.setEnabled(False)
@@ -12922,6 +13352,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
         self.material_log_label.setText(str(result.get("log", "")))
         self.open_material_folder_button.setEnabled(True)
         self.populate_material_table()
+        self.load_texture_groups_config_from_disk()
         self.refresh_material_preview()
         self.update_material_summary()
         self.set_material_progress(100, "Scan Complete", str(result.get("scan", "")), "#2ea043")
@@ -13537,6 +13968,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
         self.current_material_merge_plan = result.get("merge_plan_data") if isinstance(result.get("merge_plan_data"), dict) else None
         self.populate_material_table()
         self.populate_material_merge_table()
+        self.populate_texture_group_table()
         self.refresh_material_preview()
         self.update_material_summary()
         self.update_material_merge_summary()
@@ -20087,64 +20519,179 @@ class ImporterWindow(QtWidgets.QMainWindow):
                 return entry
         return None
 
+    def _normalize_qc_bodygroups(self) -> None:
+        """Keep the bodygroup data model consistent before rendering: flex parts own
+        their group and never hide, group targets must reference an existing non-flex
+        part (else they fall back to themselves), grouping chains collapse to a single
+        anchor, and every member of a group shares one Can-Hide value (the backend
+        emits `blank` only when all members allow it)."""
+        rows = self.qc_bodygroup_rows()
+        if not rows:
+            return
+        nonflex = [r for r in rows if not bool(r.get("has_flex"))]
+        names = {str(r.get("name") or "") for r in nonflex}
+        flex_names = {str(r.get("name") or "") for r in rows if bool(r.get("has_flex"))}
+        for r in rows:
+            if bool(r.get("has_flex")):
+                r["group"] = str(r.get("name") or "")
+                r["can_hide"] = False
+        for r in nonflex:
+            group = str(r.get("group") or r.get("name") or "").strip() or str(r.get("name") or "")
+            if group in flex_names or group not in names:
+                group = str(r.get("name") or "")
+            r["group"] = group
+        # Collapse grouping chains (A→B, B→C) so every part points at the ultimate
+        # anchor (a part whose group is itself). Children of a moved anchor follow it.
+        by_name = {str(r.get("name") or ""): r for r in nonflex}
+
+        def resolve(start: str) -> str:
+            seen: set[str] = set()
+            cur = start
+            for _ in range(len(nonflex) + 1):
+                row = by_name.get(cur)
+                if row is None:
+                    return start
+                nxt = str(row.get("group") or cur)
+                if nxt == cur or cur in seen:
+                    return cur
+                seen.add(cur)
+                cur = nxt
+            return cur
+
+        for r in nonflex:
+            r["group"] = resolve(str(r.get("name") or ""))
+        groups: dict[str, list[dict[str, object]]] = {}
+        for r in nonflex:
+            groups.setdefault(str(r.get("group") or ""), []).append(r)
+        for members in groups.values():
+            unified = all(bool(m.get("can_hide", True)) for m in members)
+            for m in members:
+                m["can_hide"] = unified
+
+    def _set_tree_header_i18n(self, tree: QtWidgets.QTreeWidget, labels: list[str]) -> None:
+        header_item = tree.headerItem()
+        if header_item is None:
+            tree.setHeaderLabels([self.translate_static_text(text) for text in labels])
+            header_item = tree.headerItem()
+            if header_item is None:
+                return
+        for column, source in enumerate(labels):
+            header_item.setData(column, QtCore.Qt.ItemDataRole.UserRole + 50, source)
+            header_item.setText(column, self.translate_static_text(source))
+
     def populate_qc_bodygroup_table(self) -> None:
-        if not hasattr(self, "qc_bodygroup_table"):
+        if not hasattr(self, "qc_bodygroup_tree"):
             return
         rows = self.qc_bodygroup_rows()
         if self.current_qc_plan is not None and rows and not isinstance(self.current_qc_plan.get("bodygroups_default"), list):
             self.current_qc_plan["bodygroups_default"] = deepcopy(rows)
-        # Candidate group names: every non-flex part can serve as a group target.
-        group_options = sorted({str(row.get("name") or "") for row in rows if not bool(row.get("has_flex"))})
+        self._normalize_qc_bodygroups()
+        rows = self.qc_bodygroup_rows()
+        tree = self.qc_bodygroup_tree
         self._updating_qc_bodygroup_table = True
         try:
-            table = self.qc_bodygroup_table
-            table.setRowCount(len(rows))
-            for row_index, entry in enumerate(rows):
+            tree.clear()
+            self._set_tree_header_i18n(tree, ["Part", "Bodygroup", "Can Hide", "Type"])
+            anchor_set = {
+                str(r.get("name") or "")
+                for r in rows
+                if not bool(r.get("has_flex")) and str(r.get("group") or r.get("name")) == str(r.get("name") or "")
+            }
+            group_options = sorted(anchor_set)
+            placed: set[str] = set()
+            for entry in rows:
                 uid = str(entry.get("uid") or "")
+                if uid in placed:
+                    continue
                 has_flex = bool(entry.get("has_flex"))
                 name = str(entry.get("name") or "")
-                part_item = QtWidgets.QTableWidgetItem(str(entry.get("smd") or name))
-                part_item.setFlags(part_item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable)
-                part_item.setToolTip(name)
-                table.setItem(row_index, 0, part_item)
-
-                if has_flex:
-                    group_item = QtWidgets.QTableWidgetItem(name)
-                    group_item.setFlags(QtCore.Qt.ItemFlag.ItemIsEnabled)
-                    group_item.setToolTip("Flex part (has a .vta) — locked to its own bodygroup.")
-                    table.setItem(row_index, 1, group_item)
-                    table.removeCellWidget(row_index, 1)
-                else:
-                    combo = QtWidgets.QComboBox()
-                    combo.setEditable(True)
-                    combo.addItems(group_options)
-                    combo.setCurrentText(str(entry.get("group") or name) or name)
-                    combo.setProperty("bg_uid", uid)
-                    combo.setToolTip("Set this to another part's name to switch them under one bodygroup.")
-                    combo.currentTextChanged.connect(self.on_qc_bodygroup_group_changed)
-                    table.setCellWidget(row_index, 1, combo)
-
-                hide_widget = QtWidgets.QWidget()
-                hide_layout = QtWidgets.QHBoxLayout(hide_widget)
-                hide_layout.setContentsMargins(0, 0, 0, 0)
-                hide_layout.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
-                hide_check = QtWidgets.QCheckBox()
-                hide_check.setChecked(bool(entry.get("can_hide", True)) and not has_flex)
-                hide_check.setEnabled(not has_flex)
-                hide_check.setProperty("bg_uid", uid)
-                hide_check.setToolTip(
-                    "Flex parts can never be hidden." if has_flex else "Untick to always show this bodygroup (no 'blank' option)."
-                )
-                hide_check.toggled.connect(self.on_qc_bodygroup_hide_changed)
-                hide_layout.addWidget(hide_check)
-                table.setCellWidget(row_index, 2, hide_widget)
-
-                type_item = QtWidgets.QTableWidgetItem("Flex (locked)" if has_flex else "Bodygroup")
-                type_item.setFlags(type_item.flags() & ~QtCore.Qt.ItemFlag.ItemIsEditable)
-                table.setItem(row_index, 3, type_item)
-            table.resizeColumnsToContents()
+                is_anchor = has_flex or str(entry.get("group") or name) == name
+                if not is_anchor:
+                    continue
+                top = QtWidgets.QTreeWidgetItem(tree)
+                self._fill_qc_bodygroup_item(top, entry, group_options, is_child=False)
+                placed.add(uid)
+                if not has_flex:
+                    children = [
+                        member
+                        for member in rows
+                        if not bool(member.get("has_flex"))
+                        and str(member.get("name") or "") != name
+                        and str(member.get("group") or member.get("name")) == name
+                    ]
+                    for child in children:
+                        child_item = QtWidgets.QTreeWidgetItem(top)
+                        self._fill_qc_bodygroup_item(child_item, child, group_options, is_child=True)
+                        placed.add(str(child.get("uid") or ""))
+                    if children:
+                        font = top.font(0)
+                        font.setBold(True)
+                        top.setFont(0, font)
+                        top.setText(3, f"{self.translate_static_text('Bodygroup')} ({len(children) + 1})")
+                top.setExpanded(True)
+            tree.expandAll()
         finally:
             self._updating_qc_bodygroup_table = False
+
+    def _fill_qc_bodygroup_item(
+        self,
+        item: QtWidgets.QTreeWidgetItem,
+        entry: dict[str, object],
+        group_options: list[str],
+        is_child: bool,
+    ) -> None:
+        tree = self.qc_bodygroup_tree
+        uid = str(entry.get("uid") or "")
+        has_flex = bool(entry.get("has_flex"))
+        name = str(entry.get("name") or "")
+        smd = str(entry.get("smd") or name)
+        group = str(entry.get("group") or name)
+        item.setText(0, ("↳ " + smd) if is_child else smd)
+        item.setToolTip(0, name)
+        item.setData(0, QtCore.Qt.ItemDataRole.UserRole, uid)
+        if has_flex:
+            item.setText(1, "—")
+            item.setToolTip(1, self.translate_static_text("Flex part (has a .vta) — locked to its own bodygroup."))
+        else:
+            combo = QtWidgets.QComboBox()
+            options = sorted(set(group_options) | {name})
+            combo.addItems(options)
+            index = combo.findText(group)
+            if index < 0:
+                combo.insertItem(0, group)
+                index = 0
+            combo.setCurrentIndex(index)
+            combo.setProperty("bg_uid", uid)
+            combo.setToolTip(
+                self.translate_static_text(
+                    "Pick another part to switch them together as one in-game bodygroup; pick this part's own name to keep it on its own."
+                )
+            )
+            combo.currentTextChanged.connect(self.on_qc_bodygroup_group_changed)
+            tree.setItemWidget(item, 1, combo)
+        hide_widget = QtWidgets.QWidget()
+        hide_layout = QtWidgets.QHBoxLayout(hide_widget)
+        hide_layout.setContentsMargins(0, 0, 0, 0)
+        hide_layout.setAlignment(QtCore.Qt.AlignmentFlag.AlignCenter)
+        hide_check = QtWidgets.QCheckBox()
+        hide_check.setChecked(bool(entry.get("can_hide", True)) and not has_flex)
+        hide_check.setEnabled(not has_flex)
+        hide_check.setProperty("bg_uid", uid)
+        hide_check.setToolTip(
+            self.translate_static_text(
+                "Flex parts can never be hidden." if has_flex else "Untick to always show this bodygroup (no 'blank' option)."
+            )
+        )
+        hide_check.toggled.connect(self.on_qc_bodygroup_hide_changed)
+        hide_layout.addWidget(hide_check)
+        tree.setItemWidget(item, 2, hide_widget)
+        if has_flex:
+            type_text = self.translate_static_text("Flex (locked)")
+        elif is_child:
+            type_text = self.translate_static_text("Switchable option")
+        else:
+            type_text = self.translate_static_text("Bodygroup")
+        item.setText(3, type_text)
 
     def on_qc_bodygroup_group_changed(self, text: str) -> None:
         if self._updating_qc_bodygroup_table:
@@ -20162,7 +20709,9 @@ class ImporterWindow(QtWidgets.QMainWindow):
             new_group = str(entry.get("name") or "")
         entry["group"] = new_group
         self._qc_plan_user_modified = True
-        self.update_qc_summary()
+        # Rebuild the tree on the next event-loop turn so the combo that emitted this
+        # signal isn't destroyed mid-callback (clearing the tree deletes its widgets).
+        QtCore.QTimer.singleShot(0, self._refresh_qc_bodygroup_tree_deferred)
 
     def on_qc_bodygroup_hide_changed(self, checked: bool) -> None:
         if self._updating_qc_bodygroup_table:
@@ -20173,36 +20722,18 @@ class ImporterWindow(QtWidgets.QMainWindow):
         entry = self.qc_bodygroup_entry_for_uid(str(check.property("bg_uid") or ""))
         if not entry or bool(entry.get("has_flex")):
             return
-        entry["can_hide"] = bool(checked)
-        # A bodygroup's hide option is shared by all parts grouped under it; keep
-        # grouped members in sync so the emitted "blank" is unambiguous.
+        # Can-Hide is a per-bodygroup property; apply the choice to every part grouped
+        # under the same anchor so the emitted "blank" is unambiguous.
         group = str(entry.get("group") or entry.get("name") or "")
-        member_uids = {
-            str(r.get("uid") or "")
-            for r in self.qc_bodygroup_rows()
-            if not bool(r.get("has_flex")) and str(r.get("group") or r.get("name")) == group
-        }
-        if len(member_uids) > 1:
-            for r in self.qc_bodygroup_rows():
-                if str(r.get("uid") or "") in member_uids:
-                    r["can_hide"] = bool(checked)
-            self._sync_bodygroup_hide_checks(member_uids, bool(checked))
+        for r in self.qc_bodygroup_rows():
+            if not bool(r.get("has_flex")) and str(r.get("group") or r.get("name")) == group:
+                r["can_hide"] = bool(checked)
         self._qc_plan_user_modified = True
-        self.update_qc_summary()
+        QtCore.QTimer.singleShot(0, self._refresh_qc_bodygroup_tree_deferred)
 
-    def _sync_bodygroup_hide_checks(self, uids: set[str], checked: bool) -> None:
-        table = self.qc_bodygroup_table
-        self._updating_qc_bodygroup_table = True
-        try:
-            for row in range(table.rowCount()):
-                widget = table.cellWidget(row, 2)
-                if widget is None:
-                    continue
-                check = widget.findChild(QtWidgets.QCheckBox)
-                if check is not None and str(check.property("bg_uid") or "") in uids:
-                    check.setChecked(checked)
-        finally:
-            self._updating_qc_bodygroup_table = False
+    def _refresh_qc_bodygroup_tree_deferred(self) -> None:
+        self.populate_qc_bodygroup_table()
+        self.update_qc_summary()
 
     def reload_qc_bodygroups_from_defaults(self) -> None:
         if not self.current_qc_plan:

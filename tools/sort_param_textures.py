@@ -426,7 +426,49 @@ def load_material_entries(input_path: Path) -> tuple[list[MaterialTexture], Path
     materials = read_materials_json(json_path, used_names) if json_path else []
     if not materials and npy_path:
         materials = read_materials_npy(npy_path, used_names)
+    materials.extend(load_imported_texture_entries(workspace_root, used_names))
     return materials, workspace_root, material_dir, json_path
+
+
+def load_imported_texture_entries(workspace_root: Path, used_names: set[str]) -> list[MaterialTexture]:
+    """Imported skin textures defined in the Step-5 texture-group editor.
+
+    They live in `<workspace>/texture_groups/texture_groups.json` under `imports`
+    and are processed here as ordinary materials so each gets a base PNG (and a
+    VMT/VTF in Step 14), letting `$texturegroup skinfamilies` reference them."""
+    path = workspace_root / "texture_groups" / "texture_groups.json"
+    if not path.exists():
+        return []
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    imports = data.get("imports") if isinstance(data, dict) else None
+    if not isinstance(imports, list):
+        return []
+    entries: list[MaterialTexture] = []
+    for index, entry in enumerate(imports, start=1):
+        if not isinstance(entry, dict):
+            continue
+        name = str(entry.get("name") or "").strip()
+        stored = str(entry.get("path") or "").strip()
+        if not name or not stored:
+            continue
+        stored_path = Path(stored)
+        if not stored_path.is_absolute():
+            stored_path = workspace_root / stored_path
+        warnings = [] if stored_path.exists() else [f"Imported skin texture is missing: {stored_path}"]
+        entries.append(
+            MaterialTexture(
+                uid=f"skin_import_{index:03d}",
+                material_name=name,
+                output_name=safe_basename(name, f"skin_{index:03d}", used_names),
+                base_source_path=str(stored_path),
+                base_color_file=stored_path.name,
+                warnings=warnings,
+            )
+        )
+    return entries
 
 
 def open_image(path: Path) -> Image.Image:

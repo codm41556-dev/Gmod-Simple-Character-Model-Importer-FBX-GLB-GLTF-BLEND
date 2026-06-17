@@ -1366,6 +1366,8 @@ def analyze(input_path: Path, author: str = "", category: str = "", model_name: 
             f'The --author value "{author}" is ignored; the author namespace is fixed to "{safe_author}".'
         )
     safe_category = safe_internal_identifier(category or "SheepyLord", "SheepyLord")
+    material_rows = material_plan_rows(texture_manifest)
+    texturegroups = load_texture_groups_config(discovered.get("workspace_root"))
     plan = {
         "version": 1,
         "kind": "sort_qc_compile",
@@ -1392,10 +1394,12 @@ def analyze(input_path: Path, author: str = "", category: str = "", model_name: 
         "physics_collision_text_lines": physics_collision_text_lines,
         "invert_jiggle_direction": False,
         "include_mci_metadata_json": True,
-        "material_rows": material_plan_rows(texture_manifest),
+        "material_rows": material_rows,
+        "texturegroups": texturegroups,
         "warnings": warnings,
         "validation_errors": errors,
     }
+    warnings.extend(validate_texturegroups(plan))
     analysis = {
         "version": 1,
         "kind": "sort_qc_compile_analysis",
@@ -1694,6 +1698,110 @@ def bodygroup_qc_blocks(source_dir: Path, include_flexes: bool = True, bodygroup
     return _bodygroup_qc_blocks_scan(source_dir, include_flexes)
 
 
+def texture_groups_config_path(workspace_root: Path) -> Path:
+    """Cross-step sidecar that holds the Step-5 `$texturegroup` (skin) config.
+    Step 5 writes it, Step 12 reads it to inject imported skin textures, and
+    Step 14 reads it to emit the `$texturegroup skinfamilies` QC block."""
+    return workspace_root / "texture_groups" / "texture_groups.json"
+
+
+def load_texture_groups_config(workspace_root: Path | None) -> dict[str, Any]:
+    if workspace_root is None:
+        return {}
+    path = texture_groups_config_path(Path(workspace_root))
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _texturegroup_skin_rows(config: dict[str, Any]) -> tuple[list[str], list[list[str]]]:
+    """Return (slots, rows) where `slots` are the default (skin-0) material names
+    and `rows` is the full skin table including the default row, each row padded to
+    the slot count (an empty cell inherits the default slot for that column)."""
+    if not isinstance(config, dict):
+        return [], []
+    slots = [str(s).strip() for s in config.get("slots", []) if str(s).strip()]
+    skins_raw = config.get("skins", [])
+    if not slots or not isinstance(skins_raw, list):
+        return slots, []
+    rows: list[list[str]] = [list(slots)]
+    for skin in skins_raw:
+        if isinstance(skin, dict):
+            cells = skin.get("cells", [])
+        elif isinstance(skin, list):
+            cells = skin
+        else:
+            continue
+        cells = [str(c).strip() for c in cells] if isinstance(cells, list) else []
+        normalized = [(cells[i] if i < len(cells) and cells[i] else slots[i]) for i in range(len(slots))]
+        rows.append(normalized)
+    # Only meaningful with at least one alternate skin beyond the default.
+    return slots, (rows if len(rows) >= 2 else [])
+
+
+def _texturegroup_name_to_vmt(plan: dict[str, Any]) -> dict[str, str]:
+    """Map every material display/output name to its final VMT base name so the
+    skin table references match the compiled .vmt files exactly."""
+    mapping: dict[str, str] = {}
+    for row in plan.get("material_rows", []):
+        if not isinstance(row, dict):
+            continue
+        vmt = safe_name(str(row.get("output_name") or row.get("material_name") or ""), "")
+        if not vmt:
+            continue
+        for key in (row.get("material_name"), row.get("output_name"), vmt):
+            key_str = str(key or "").strip()
+            if key_str:
+                mapping.setdefault(key_str, vmt)
+    return mapping
+
+
+def texturegroup_qc_lines(plan: dict[str, Any]) -> list[str]:
+    slots, rows = _texturegroup_skin_rows(plan.get("texturegroups") or {})
+    if not slots or not rows:
+        return []
+    mapping = _texturegroup_name_to_vmt(plan)
+
+    def resolve(name: str) -> str:
+        name = str(name).strip()
+        return mapping.get(name) or safe_name(name, name)
+
+    lines = ["$texturegroup skinfamilies\n", "{\n"]
+    for row in rows:
+        cells = " ".join(f'"{resolve(cell)}"' for cell in row)
+        lines.append(f"\t{{ {cells} }}\n")
+    lines.append("}\n\n")
+    return lines
+
+
+def validate_texturegroups(plan: dict[str, Any]) -> list[str]:
+    """Warn (do not fail) when a skin references a material with no matching .vmt,
+    so the user learns the skin will not work in-game."""
+    slots, rows = _texturegroup_skin_rows(plan.get("texturegroups") or {})
+    if not slots or not rows:
+        return []
+    mapping = _texturegroup_name_to_vmt(plan)
+    known = set(mapping)
+    missing: list[str] = []
+    for row in rows:
+        for cell in row:
+            cell = str(cell).strip()
+            if cell and cell not in known and cell not in missing:
+                missing.append(cell)
+    warnings: list[str] = []
+    if missing:
+        warnings.append(
+            "$texturegroup references material(s) with no matching .vmt: "
+            + ", ".join(missing)
+            + ". The skin will fall back to a missing texture in-game unless the name matches a model material or an imported texture."
+        )
+    return warnings
+
+
 def base_qc_lines(
     plan: dict[str, Any],
     source_dir: Path,
@@ -1715,6 +1823,7 @@ def base_qc_lines(
     lines.append("$ambientboost \n\n")
     lines.append("$mostlyopaque \n\n")
     lines.append(f'$cdmaterials "models/{plan["author"]}/{plan["model_name"]}/" \n\n')
+    lines.extend(texturegroup_qc_lines(plan))
     lines.append('$cbox 0 0 0 0 0 0 \n\n')
     lines.append('$bbox -13 -13 0 13 13 72 \n\n')
     if include_definebones:
