@@ -117,6 +117,35 @@ def normalize_survivor(value: object) -> str:
     return text if text in L4D2_SURVIVOR_SLOTS else DEFAULT_L4D2_SURVIVOR
 
 
+# Gender of each survivor's animation set. The Step 9 proportion trick subtracts
+# anims/proportions against a generic ValveBiped reference pose, and that reference
+# MUST share the bone-roll/local-axis convention of proportions.smd (both are exported
+# from the same proportion-trick template armatures) -- otherwise the per-bone subtract
+# bakes spurious rotation deltas into the autoplay proportion predelta (e.g. ~217deg on
+# the thumb, ~41deg on the upper arm), distorting the rest pose. L4D2 therefore reuses
+# the same proven generic reference as GMod, matched to the survivor's animation gender
+# (Rochelle is female; Coach/Nick/Ellis are male) so the subtract base lines up with the
+# included survivor animations' skeleton.
+L4D2_SURVIVOR_GENDER = {
+    "producer": "female",
+    "coach": "male",
+    "gambler": "male",
+    "mechanic": "male",
+}
+
+
+def reference_gender_for_plan(plan: dict) -> str:
+    """Gender of the reference pose the proportion subtract uses for this plan.
+
+    L4D2 has no gender selector; the proportion reference follows the selected
+    survivor's animation gender instead.
+    """
+
+    if normalize_game(plan.get("game")) == "l4d2":
+        return L4D2_SURVIVOR_GENDER.get(normalize_survivor(plan.get("survivor")), "female")
+    return normalize_gender(plan.get("gender"))
+
+
 def l4d2_character_modelname(slot: str) -> str:
     return f"survivors/survivor_{normalize_survivor(slot)}.mdl"
 
@@ -132,7 +161,7 @@ def gendered_reference_name(plan: dict, anims_dir: Path, warnings: list | None =
     workspaces may predate the male export; never emit a QC that cannot compile.
     """
 
-    gender = normalize_gender(plan.get("gender"))
+    gender = reference_gender_for_plan(plan)
     reference = str(GENDER_ANIMATION_INCLUDES[gender]["reference_smd"])
     if gender != "female" and not (anims_dir / f"{reference}.smd").exists():
         if warnings is not None:
