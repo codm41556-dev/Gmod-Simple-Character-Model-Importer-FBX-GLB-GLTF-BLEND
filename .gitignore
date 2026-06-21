@@ -30,3 +30,4 @@ MMDCharacterImporter.spec
 !/reference/\!enhanced_animation_importer_arc/tools/
 /smoke_tests
 GmodSimpleMMDCharacterImporter.spec
+GmodSimpleMMDCharacterImporter_NoBlender.spec
