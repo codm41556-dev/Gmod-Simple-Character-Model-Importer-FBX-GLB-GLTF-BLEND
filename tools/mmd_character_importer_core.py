@@ -64,12 +64,25 @@ BLENDER_ICON_SCRIPT = TOOLS_DIR / "blender_render_icon.py"
 ICON_PROCESSOR_SCRIPT = TOOLS_DIR / "sort_icons_and_arts.py"
 QC_PROCESSOR_SCRIPT = TOOLS_DIR / "sort_qc_compile.py"
 RELEASE_PROCESSOR_SCRIPT = TOOLS_DIR / "sort_release_description.py"
-# Survivor code (compiled .mdl stem) -> in-game character display name.
+# Per-survivor proportion reference skeletons (one .smd per survivor). Each is the
+# survivor's bind pose expressed in the proportion-trick TEMPLATE convention (the same
+# convention as proportions.smd) with ONLY the essential ValveBiped bones — generated
+# offline by tools/build_l4d2_reference_skeletons.py from the base-game survivor .mdls.
+# In L4D2 mode Step 9 swaps the selected survivor's .smd in as the proportion-trick
+# reference so the subtract delta aligns the MMD body to that survivor without the
+# convention mismatch that distorted the earlier raw-.mdl reference.
+L4D2_REFERENCE_SKELETON_DIR = TOOLS_DIR / "l4d2_reference_skeletons"
+# Survivor code (compiled .mdl stem) -> in-game character display name. The 4 L4D2
+# survivors plus the 4 returning L4D1 survivors.
 L4D2_SURVIVORS = {
     "producer": "Rochelle",
     "coach": "Coach",
     "gambler": "Nick",
     "mechanic": "Ellis",
+    "namvet": "Bill",
+    "teenangst": "Zoey",
+    "biker": "Francis",
+    "manager": "Louis",
 }
 DEFAULT_L4D2_SURVIVOR = "producer"
 DEFAULT_ICON_VMD = ROOT / "reference" / "ref_motion" / "bad_bad_water.vmd"
@@ -4397,6 +4410,11 @@ def validate_manual_bodygroups_blend(
     )
 
 
+def l4d2_reference_skeleton_path(survivor: str) -> Path:
+    survivor = survivor if survivor in L4D2_SURVIVORS else DEFAULT_L4D2_SURVIVOR
+    return L4D2_REFERENCE_SKELETON_DIR / f"{survivor}.smd"
+
+
 def run_proportion_export(
     input_blend: Path,
     remove_zero_weight_bones: bool = True,
@@ -4456,6 +4474,21 @@ def run_proportion_export(
     ]
     if remove_zero_weight_bones:
         command.append("--remove-zero-weight-bones")
+    if str(game or "").strip().lower() == "l4d2":
+        # L4D2: process the model against the selected survivor's skeleton instead of the
+        # built-in GMod ValveBiped armature, so the compiled model lives in the survivor's
+        # bone convention (matching the included survivor animations). Step 9 swaps the
+        # bundled survivor skeleton in for the template proportions/reference armatures.
+        reference_smd = l4d2_reference_skeleton_path(survivor)
+        if reference_smd.exists():
+            command.extend(["--game", "l4d2", "--survivor-reference-smd", str(reference_smd)])
+            emit(progress, f"L4D2 proportion base = survivor '{survivor}' skeleton ({reference_smd.name}).")
+        else:
+            emit(
+                progress,
+                f"NOTE: no bundled L4D2 skeleton for survivor '{survivor}'; falling back to the "
+                "built-in GMod proportion armature (convention-correct, not survivor-specific).",
+            )
     emit(progress, f"Starting Blender proportion export: {input_blend}")
     started = time.monotonic()
     run_process_streamed(command, progress=progress, log_path=log_path, cancel_check=cancel_check)
@@ -4469,17 +4502,10 @@ def run_proportion_export(
         raise RuntimeError(f"Blender completed but did not write {files_path}")
     report = json.loads(report_path.read_text(encoding="utf-8"))
     files = json.loads(files_path.read_text(encoding="utf-8"))
-    # L4D2 uses the proportion-trick output as-is. The proportion subtract
-    # (anims/proportions - anims/reference) requires the reference pose to share
-    # proportions.smd's bone-roll/local-axis convention, which only the template's
-    # own reference_female/reference_male armatures satisfy. An earlier cut overwrote
-    # the reference with a raw .mdl-extracted survivor skeleton (a DIFFERENT local
-    # convention); studiomdl then baked large spurious rotation deltas into the
-    # autoplay proportion predelta (~217deg thumb, ~41deg upper arm), so the in-game
-    # rest pose showed arms leaning forward with the thumb folded into the palm.
-    # The generic ValveBiped reference is the proven, convention-correct base (it is
-    # exactly what the working GMod pipeline subtracts against); Step 14 selects the
-    # gender that matches the survivor's animation set via reference_gender_for_plan.
+    # For L4D2 the survivor skeleton is swapped in as the proportion base armature INSIDE the
+    # Blender step (see --survivor-reference-smd above), so proportions.smd AND the reference
+    # SMDs are already exported in the survivor's bone convention. No post-export reference
+    # overwrite is needed (and doing one would reintroduce a convention mismatch).
     emit(progress, f"Blender proportion export finished in {time.monotonic() - started:.1f}s")
     return ProportionResult(
         input_blend=input_blend,

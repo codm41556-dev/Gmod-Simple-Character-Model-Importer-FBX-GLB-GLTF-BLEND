@@ -26,6 +26,12 @@ PROTECTED_EXTRA_BONES = {"ZArmTwist_L", "ZArmTwist_R", "ZHandTwist_L", "ZHandTwi
 # $definebone parent-repair (which can add a few bones) still fits under 256.
 SOURCE_MAX_BONES = 256
 SOURCE_BONE_LIMIT_TARGET = 248
+# L4D2's studiomdl aborts above 128 bones. The survivor swap adds the survivor's functional
+# weapon/attachment bones on top of the MMD cloth, so after the proportion trick the model can
+# exceed 128. Merge the lowest-impact MMD cloth leaf bones down to this budget (a couple under
+# the hard 128 limit, since ValveBiped + weapon/attachment bones are protected from merging).
+L4D2_MAX_BONES = 128
+L4D2_PROPORTION_BONE_TARGET = 126
 PHYSICS_MERGE_DISTANCE = 1.0
 NONESSENTIAL_EXPORT_ROLL_OFFSET_RADIANS = math.pi
 EXPECTED_PROPORTION_ANIMS = {
@@ -798,6 +804,115 @@ def import_raw_vtas(raw_dir: Path) -> list[dict[str, object]]:
     ]
 
 
+def _set_export_slot_name(obj, export_name: str) -> None:
+    """Make Source Tools export this armature to ``<export_name>.smd``.
+
+    On Blender 4.4+ Source Tools derives a CURRENT-selection export filename from the active
+    action SLOT's ``name_display`` (``actionSlotExportName``), not the action name. A freshly
+    imported SMD leaves a slot named after the source file, so rename the active slot.
+    """
+    ad = getattr(obj, "animation_data", None)
+    if ad is None or ad.action is None:
+        return
+    slot = getattr(ad, "action_slot", None)
+    if slot is None:
+        slots = getattr(ad.action, "slots", None)
+        if slots:
+            ad.action_slot = slots[0]
+            slot = ad.action_slot
+    if slot is not None:
+        try:
+            slot.name_display = export_name
+        except Exception as exc:
+            log(f"Could not rename action slot for '{obj.name}': {exc}")
+
+
+def install_survivor_base_armatures(reference_smd: Path) -> dict[str, object]:
+    """L4D2: replace the built-in GMod template armatures with the selected survivor's skeleton.
+
+    The proportion-trick template ships GMod ValveBiped armatures: ``proportions`` (the
+    retarget/bind target the MMD mesh is snapped onto and bound to) and
+    ``reference_female``/``reference_male`` (the subtract base). In the GMod pipeline the model
+    is processed against this built-in GMod armature, so the compiled model lives in GMod's
+    bone convention -- which matches the GMod player animations.
+
+    L4D2 survivor animations (``anim_<slot>.mdl``) are authored in the SURVIVOR skeleton's own
+    bone convention, so for L4D2 all three armatures are swapped for that survivor's essential
+    skeleton. ``proportions`` becomes the survivor skeleton (the trick snaps it onto the MMD
+    body and binds the mesh to it, so the bind lives in the survivor convention), and both
+    gender references become the survivor's bind pose. The proportion subtract
+    (``proportions - reference``) is then internally consistent in the survivor convention, and
+    the compiled model is built on the survivor skeleton so its animations play correctly.
+    """
+    if not reference_smd.exists():
+        raise FileNotFoundError(reference_smd)
+    if not enable_source_tools():
+        raise RuntimeError("Blender Source Tools is required to import the survivor skeleton.")
+    existing = {obj.name for obj in bpy.data.objects if obj.type == "ARMATURE"}
+    log(f"Importing L4D2 survivor base skeleton: {reference_smd}")
+    bpy.ops.import_scene.smd(filepath=str(reference_smd), append="NEW_ARMATURE", upAxis="Z")
+    new_armatures = [
+        obj for obj in bpy.data.objects if obj.type == "ARMATURE" and obj.name not in existing
+    ]
+    if not new_armatures:
+        raise RuntimeError(f"Survivor skeleton import created no armature: {reference_smd}")
+    survivor = max(new_armatures, key=lambda obj: len(obj.data.bones))
+    target_collection = survivor.users_collection[0] if survivor.users_collection else bpy.context.collection
+
+    removed: list[str] = []
+    for name in ("proportions", "reference_female", "reference_male"):
+        old = bpy.data.objects.get(name)
+        if old is not None and old is not survivor:
+            data = old.data
+            bpy.data.objects.remove(old, do_unlink=True)
+            removed.append(name)
+            if isinstance(data, bpy.types.Armature) and data.users == 0:
+                bpy.data.armatures.remove(data)
+        # Also drop the template's now-orphaned rest-pose action of that name, otherwise the
+        # survivor action renamed below collides with it and becomes "<name>.001" (which Source
+        # Tools would export to "<name>.001.smd", missing the required proportions/reference SMDs).
+        # The template marks these actions with a fake user, so clear it before removing.
+        stale_action = bpy.data.actions.get(name)
+        if stale_action is not None:
+            stale_action.use_fake_user = False
+            if stale_action.users == 0:
+                bpy.data.actions.remove(stale_action)
+
+    # Source Tools names a CURRENT-action export after the armature's ACTION (the template
+    # ships rest-pose actions literally named "proportions"/"reference_female"/"reference_male").
+    # The SMD import leaves a 1-frame rest action named after the file; rename it to the object
+    # name so the three armatures export to distinct files instead of clobbering one another.
+    survivor.name = "proportions"
+    survivor.data.name = "proportions"
+    if survivor.animation_data and survivor.animation_data.action:
+        survivor.animation_data.action.name = "proportions"
+    _set_export_slot_name(survivor, "proportions")
+    for name in ("reference_female", "reference_male"):
+        dup = survivor.copy()
+        dup.data = survivor.data.copy()
+        dup.name = name
+        dup.data.name = name
+        if dup.animation_data and dup.animation_data.action:
+            action_copy = dup.animation_data.action.copy()
+            action_copy.name = name
+            dup.animation_data.action = action_copy
+        _set_export_slot_name(dup, name)
+        target_collection.objects.link(dup)
+
+    unhide_all_export_objects()
+    bone_count = len(survivor.data.bones)
+    log(
+        f"Installed survivor base skeleton ({bone_count} bones) as "
+        "proportions/reference_female/reference_male (replaced the built-in GMod armatures)."
+    )
+    return {
+        "enabled": True,
+        "reference_smd": str(reference_smd),
+        "survivor_bone_count": bone_count,
+        "removed_template_armatures": removed,
+    }
+
+
 def run_proportion_text_block() -> None:
     text = bpy.data.texts.get(PROPORTION_TEXT_BLOCK)
     if text is None:
@@ -1171,12 +1286,37 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     import_report = import_raw_smds(raw_dir)
     vta_import_report = import_raw_vtas(raw_dir)
 
+    # L4D2: process the model against the selected survivor's skeleton instead of the
+    # built-in GMod ValveBiped armature, so the compiled model matches the survivor's
+    # animation bone convention. GMod leaves the template armatures untouched.
+    if str(getattr(args, "game", "gmod") or "gmod").strip().lower() == "l4d2" and getattr(args, "survivor_reference_smd", ""):
+        survivor_base_report = install_survivor_base_armatures(Path(args.survivor_reference_smd).resolve())
+    else:
+        survivor_base_report = {"enabled": False}
+
     log(f"Saving imported proportion workspace: {processed_blend}")
     processed_blend.parent.mkdir(parents=True, exist_ok=True)
     bpy.ops.wm.save_as_mainfile(filepath=str(processed_blend))
 
     run_proportion_text_block()
     processed_verification = verify_processed_scene()
+
+    if str(getattr(args, "game", "gmod") or "gmod").strip().lower() == "l4d2":
+        # The survivor swap added the survivor's functional weapon/attachment bones; together
+        # with the merged MMD cloth that can push the model past L4D2's 128-bone studiomdl limit.
+        # Merge the lowest-impact non-essential cloth leaf bones in the proportions armature (the
+        # mesh's bind target) down to a safe L4D2 budget. ValveBiped.* core + weapon/attachment
+        # bones are protected, so only MMD cloth/hair tips are folded into their parents.
+        prop_arm = bpy.data.objects.get("proportions")
+        if prop_arm is not None and len(prop_arm.data.bones) > L4D2_PROPORTION_BONE_TARGET:
+            set_active_only(prop_arm)
+            l4d2_bone_limit_report = enforce_source_bone_limit(prop_arm, target=L4D2_PROPORTION_BONE_TARGET)
+            bpy.context.view_layer.update()
+        else:
+            count = len(prop_arm.data.bones) if prop_arm is not None else 0
+            l4d2_bone_limit_report = {"enabled": True, "needed": False, "bone_count": count}
+    else:
+        l4d2_bone_limit_report = {"enabled": False}
 
     final_files_before_vta = export_source_files(final_dir, processed=True)
     log(f"Saving proportion processed blend: {processed_blend}")
@@ -1211,6 +1351,8 @@ def run(args: argparse.Namespace) -> dict[str, object]:
             "file_count": len(raw_files),
             "files": [str(path.relative_to(raw_dir)) for path in raw_files],
         },
+        "survivor_base_armatures": survivor_base_report,
+        "l4d2_proportion_bone_limit": l4d2_bone_limit_report,
         "proportion_import": import_report,
         "vta_import": vta_import_report,
         "processed_scene_verification": processed_verification,
@@ -1242,6 +1384,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--report-json", required=True)
     parser.add_argument("--files-json", required=True)
     parser.add_argument("--remove-zero-weight-bones", action="store_true")
+    parser.add_argument("--game", default="gmod")
+    parser.add_argument("--survivor-reference-smd", default="")
     return parser.parse_args(argv)
 
 

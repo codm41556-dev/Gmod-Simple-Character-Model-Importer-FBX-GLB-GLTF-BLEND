@@ -115,6 +115,10 @@ L4D2_SURVIVOR_OPTIONS = [
     ("coach", "Coach"),
     ("gambler", "Nick (Gambler)"),
     ("mechanic", "Ellis (Mechanic)"),
+    ("namvet", "Bill (Nam Vet)"),
+    ("teenangst", "Zoey (Teen Angst)"),
+    ("biker", "Francis (Biker)"),
+    ("manager", "Louis (Manager)"),
 ]
 L4D2_SURVIVOR_CODES = {code for code, _display in L4D2_SURVIVOR_OPTIONS}
 DEFAULT_L4D2_SURVIVOR = "producer"

@@ -102,13 +102,25 @@ def normalize_game(value: object) -> str:
     return text if text in GAME_CHOICES else "gmod"
 
 
-# The 4 L4D2 survivor slots an MMD model can be ported onto. The model name/path
-# MUST be the exact survivor slot (custom names are not allowed in L4D2): the
-# character is survivors/survivor_<slot>.mdl and the first-person arms are
+# The 8 L4D2 survivor slots an MMD model can be ported onto (the 4 L4D2 survivors
+# plus the 4 returning L4D1 survivors). The model name/path MUST be the exact
+# survivor slot (custom names are not allowed in L4D2): the character is
+# survivors/survivor_<slot>.mdl and the first-person arms are
 # weapons/arms/v_arms_<slot>_new.mdl (the "_new" suffix is the L4D2 arms
 # convention). anim/gesture includes and the vgui survivor panels also use the
-# exact slot.
-L4D2_SURVIVOR_SLOTS = ("producer", "coach", "gambler", "mechanic")
+# exact slot. Internal slot -> in-game name: producer=Rochelle, coach=Coach,
+# gambler=Nick, mechanic=Ellis, namvet=Bill, teenangst=Zoey, biker=Francis,
+# manager=Louis.
+L4D2_SURVIVOR_SLOTS = (
+    "producer",
+    "coach",
+    "gambler",
+    "mechanic",
+    "namvet",
+    "teenangst",
+    "biker",
+    "manager",
+)
 DEFAULT_L4D2_SURVIVOR = "producer"
 
 
@@ -117,33 +129,88 @@ def normalize_survivor(value: object) -> str:
     return text if text in L4D2_SURVIVOR_SLOTS else DEFAULT_L4D2_SURVIVOR
 
 
-# Gender of each survivor's animation set. The Step 9 proportion trick subtracts
-# anims/proportions against a generic ValveBiped reference pose, and that reference
-# MUST share the bone-roll/local-axis convention of proportions.smd (both are exported
-# from the same proportion-trick template armatures) -- otherwise the per-bone subtract
-# bakes spurious rotation deltas into the autoplay proportion predelta (e.g. ~217deg on
-# the thumb, ~41deg on the upper arm), distorting the rest pose. L4D2 therefore reuses
-# the same proven generic reference as GMod, matched to the survivor's animation gender
-# (Rochelle is female; Coach/Nick/Ellis are male) so the subtract base lines up with the
-# included survivor animations' skeleton.
-L4D2_SURVIVOR_GENDER = {
-    "producer": "female",
-    "coach": "male",
-    "gambler": "male",
-    "mechanic": "male",
-}
+# L4D2 survivor $attachment set (from the base-game survivor_producer decompile). These tell
+# the game where to place weapons and items: without them the held weapon world-model has no
+# bone to bone-merge to and is dropped at the model origin. Offsets are bone-relative and shared
+# across survivors (the body is a custom MMD model regardless); each line is emitted only if the
+# referenced bone exists in the selected survivor's skeleton (the L4D1 survivors lack
+# L_weapon_bone, etc.), so the compile never references a missing bone.
+L4D2_SURVIVOR_ATTACHMENTS = [
+    '$attachment "eyes" "ValveBiped.Bip01_Head1" 3.42 -2.36 0.05 rotate 0 -89.37 -90',
+    '$attachment "mouth" "ValveBiped.Bip01_Head1" 0.71 -5.15 -0.13 rotate 0 -80 -90',
+    '$attachment "survivor_light" "ValveBiped.Bip01_Spine2" 5.33 21.31 0 rotate 0 0 0',
+    '$attachment "forward" "ValveBiped.forward" 0 0 0 rotate 0 0 0',
+    '$attachment "pistol" "ValveBiped.Bip01_R_Thigh" -2.95 1.84 -4.61 rotate -3.66 -0.47 91.7',
+    '$attachment "L_weapon_bone" "ValveBiped.L_weapon_bone" 0 0 0 rotate 0 0 0',
+    '$attachment "weapon_bone" "ValveBiped.weapon_bone" 0 0 0 rotate 0 0 0',
+    '$attachment "medkit" "ValveBiped.Bip01_Spine4" -0.65 -2.83 -1.16 rotate 5.03 77.16 0',
+    '$attachment "primary" "ValveBiped.Bip01_Spine4" 2.71 -4.36 -2.33 rotate -13.7 170.19 174.29',
+    '$attachment "attach_R_shoulderBladeAim" "ValveBiped.Bip01_Spine4" -8.88 0.88 -4.51 rotate -90 -102.85 0',
+    '$attachment "attach_L_shoulderBladeAim" "ValveBiped.Bip01_Spine4" -8.88 0.88 3.12 rotate -90 -102.85 0',
+    '$attachment "melee" "ValveBiped.Bip01_Spine4" 2.64 -3.12 4.45 rotate 24.08 175.37 97.14',
+    '$attachment "molotov" "ValveBiped.Bip01_Spine" -3.19 -2.44 7.01 rotate -63.44 -74.67 -101.41',
+    '$attachment "grenade" "ValveBiped.Bip01_Spine" -0.68 1.17 6.97 rotate -90 -175.23 0',
+    '$attachment "pills" "ValveBiped.Bip01_Spine" -2.63 0.63 -7.56 rotate -41.18 -88.48 -87.05',
+    '$attachment "lfoot" "ValveBiped.Bip01_L_Foot" 0 4.44 0 rotate 0 0 0',
+    '$attachment "rfoot" "ValveBiped.Bip01_R_Foot" 0 4.44 0 rotate 0 0 0',
+    '$attachment "muzzle_flash" "ValveBiped.Bip01_L_Hand" 0 0 0 rotate 0 0 0',
+    '$attachment "survivor_neck" "ValveBiped.Bip01_Neck1" 0 0 0 rotate 0 0 0',
+    '$attachment "bleedout" "ValveBiped.Bip01_Pelvis" 8.44 8.88 4.44 rotate 0 0 0',
+    '$attachment "legL_B" "ValveBiped.attachment_bandage_legL" 0 0 0 rotate -90 -90 0',
+    '$attachment "armL_B" "ValveBiped.attachment_bandage_armL" 0 0 0 rotate -90 -90 0',
+    '$attachment "armL_T" "ValveBiped.attachment_armL_T" 0 0 0 rotate -90 -90 0',
+    '$attachment "armR_T" "ValveBiped.attachment_armR_T" 0 0 0 rotate -90 -90 0',
+    '$attachment "armL" "ValveBiped.Bip01_L_Forearm" 0 0 0 rotate 0 0 0',
+    '$attachment "legL" "ValveBiped.Bip01_L_Calf" 0 0 0 rotate 0 0 0',
+    '$attachment "thighL" "ValveBiped.Bip01_L_Thigh" 0 0 0 rotate 0 0 0',
+    '$attachment "spine" "ValveBiped.Bip01_Spine" 0 0 0 rotate -90 -90 0',
+]
 
 
-def reference_gender_for_plan(plan: dict) -> str:
-    """Gender of the reference pose the proportion subtract uses for this plan.
+def l4d2_survivor_skeleton_bones(slot: str) -> set[str]:
+    """Bone names present in the bundled survivor skeleton (the proportion base armature).
 
-    L4D2 has no gender selector; the proportion reference follows the selected
-    survivor's animation gender instead.
+    The compiled L4D2 model carries exactly these bones (core biped + the survivor's functional
+    weapon/attachment bones), so this is the authoritative set for deciding which attachments and
+    IK chains can be emitted without referencing a bone that does not exist.
     """
 
-    if normalize_game(plan.get("game")) == "l4d2":
-        return L4D2_SURVIVOR_GENDER.get(normalize_survivor(plan.get("survivor")), "female")
-    return normalize_gender(plan.get("gender"))
+    smd = Path(__file__).resolve().parent / "l4d2_reference_skeletons" / f"{normalize_survivor(slot)}.smd"
+    names: set[str] = set()
+    if not smd.exists():
+        return names
+    for line in smd.read_text(encoding="utf-8", errors="replace").splitlines():
+        if line.strip() == "skeleton":
+            break
+        match = re.match(r'\s*\d+\s+"([^"]+)"', line)
+        if match:
+            names.add(match.group(1))
+    return names
+
+
+def _attachment_bone(line: str) -> str:
+    parts = line.split('"')
+    return parts[3] if len(parts) >= 4 else ""
+
+
+def l4d2_attachment_lines(model_bones: set[str]) -> list[str]:
+    return [f"{line} \n" for line in L4D2_SURVIVOR_ATTACHMENTS if _attachment_bone(line) in model_bones]
+
+
+def l4d2_ik_lines(model_bones: set[str]) -> list[str]:
+    """L4D2 survivor IK chains + autoplay locks (matches the base-game survivor QC)."""
+    lines = [
+        '$ikchain "rhand" "ValveBiped.Bip01_R_Hand" knee 0.707 0.707 0 \n',
+        '$ikchain "lhand" "ValveBiped.Bip01_L_Hand" knee 0.707 0.707 0 \n',
+        '$ikchain "rfoot" "ValveBiped.Bip01_R_Foot" knee 0.707 -0.707 0 \n',
+        '$ikchain "lfoot" "ValveBiped.Bip01_L_Foot" knee 0.707 -0.707 0 \n',
+    ]
+    if "ValveBiped.weapon_bone_Clip" in model_bones:
+        lines.append('$ikchain "ikclip" "ValveBiped.weapon_bone_Clip" knee 0.707 -0.707 0 \n')
+    lines.append("\n")
+    lines.append('$ikautoplaylock "rfoot" 1 0.1 \n')
+    lines.append('$ikautoplaylock "lfoot" 1 0.1 \n\n')
+    return lines
 
 
 def l4d2_character_modelname(slot: str) -> str:
@@ -161,7 +228,7 @@ def gendered_reference_name(plan: dict, anims_dir: Path, warnings: list | None =
     workspaces may predate the male export; never emit a QC that cannot compile.
     """
 
-    gender = reference_gender_for_plan(plan)
+    gender = normalize_gender(plan.get("gender"))
     reference = str(GENDER_ANIMATION_INCLUDES[gender]["reference_smd"])
     if gender != "female" and not (anims_dir / f"{reference}.smd").exists():
         if warnings is not None:
@@ -1984,12 +2051,23 @@ def base_qc_lines(
         lines.append('$poseparameter "head_yaw" -90 90 loop 360 \n\n')
     if (source_dir / "vrd.vrd").exists():
         lines.append('$proceduralbones "vrd.vrd"\n\n')
-    lines.append('$ikchain "rhand" "ValveBiped.Bip01_R_Hand" knee 0.707 0.707 0 \n')
-    lines.append('$ikchain "lhand" "ValveBiped.Bip01_L_Hand" knee 0.707 0.707 0 \n')
-    lines.append('$ikchain "rfoot" "ValveBiped.Bip01_R_Foot" knee 0.707 -0.707 0 \n')
-    lines.append('$ikchain "lfoot" "ValveBiped.Bip01_L_Foot" knee 0.707 -0.707 0 \n\n')
-    lines.append('$ikautoplaylock "rfoot" 0.7 0.1 \n')
-    lines.append('$ikautoplaylock "lfoot" 0.7 0.1 \n\n')
+    if l4d2:
+        # L4D2 survivor weapon/item placement + IK. Without these $attachments the game has
+        # nowhere to place the held weapon and drops it at the model origin; the survivor IK set
+        # (incl. the "ikclip" weapon chain and ikautoplaylock 1) matches the base-game survivor.
+        survivor_bones = l4d2_survivor_skeleton_bones(plan.get("survivor"))
+        attachment_lines = l4d2_attachment_lines(survivor_bones)
+        if attachment_lines:
+            lines.extend(attachment_lines)
+            lines.append("\n")
+        lines.extend(l4d2_ik_lines(survivor_bones))
+    else:
+        lines.append('$ikchain "rhand" "ValveBiped.Bip01_R_Hand" knee 0.707 0.707 0 \n')
+        lines.append('$ikchain "lhand" "ValveBiped.Bip01_L_Hand" knee 0.707 0.707 0 \n')
+        lines.append('$ikchain "rfoot" "ValveBiped.Bip01_R_Foot" knee 0.707 -0.707 0 \n')
+        lines.append('$ikchain "lfoot" "ValveBiped.Bip01_L_Foot" knee 0.707 -0.707 0 \n\n')
+        lines.append('$ikautoplaylock "rfoot" 0.7 0.1 \n')
+        lines.append('$ikautoplaylock "lfoot" 0.7 0.1 \n\n')
     reference_name = gendered_reference_name(plan, source_dir / "anims")
     lines.append(f'$sequence reference "anims/{reference_name}" fps 1 \n')
     lines.append('$origin 0 0 -2.50 \n\n')
