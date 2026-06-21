@@ -3528,13 +3528,34 @@ class ImporterWindow(QtWidgets.QMainWindow):
         # brand text (buttons, labels, tabs, titles) relabels live (see apply_game_dependent_defaults).
         self._i18n_initialized = True
         self.set_advanced_steps_visible(False)
-        QtCore.QTimer.singleShot(0, lambda: self._defer_step_preview(1, self.populate_pmx_files))
-        QtCore.QTimer.singleShot(0, self.populate_main_pmx_files)
-        QtCore.QTimer.singleShot(0, self.refresh_workflow_statuses)
-        QtCore.QTimer.singleShot(0, self.refresh_workspace_cache_size)
-        QtCore.QTimer.singleShot(200, self.start_category_scan)
-        QtCore.QTimer.singleShot(1500, self.start_update_check)
+        # Startup background work (PMX analysis, workspace scan, category scan, update check) spins
+        # up QThreads. Starting a QThread while the event loop is still processing the window's
+        # initial, input-synchronous show intermittently access-violates on Windows
+        # (RPC_E_CANTCALLOUT_ININPUTSYNCCALL -> ~50% blank-window crash, no Python traceback). So we
+        # defer all of it to the FIRST showEvent (event-driven, so it waits for the real show
+        # regardless of machine speed) instead of firing singleShot(0) timers from the constructor.
+        self._deferred_startup_started = False
         self.statusBar().showMessage(self._t("app.status.ready", "Ready"))
+
+    def showEvent(self, event: QtGui.QShowEvent) -> None:
+        super().showEvent(event)
+        if not getattr(self, "_deferred_startup_started", False):
+            self._deferred_startup_started = True
+            # One more event-loop turn so the window's show/first-paint finishes before any thread
+            # starts; this is what moves the QThread.start() calls out of the input-sync window.
+            QtCore.QTimer.singleShot(0, self._run_deferred_startup_tasks)
+
+    def _run_deferred_startup_tasks(self) -> None:
+        # Runs after the first showEvent. Stagger the QThread-spawning tasks (PMX analysis,
+        # workspace scan, category scan, update check) so they (a) start well clear of the window's
+        # initial input-synchronous paint and (b) never start two threads in the same event-loop
+        # turn — both conditions were needed to eliminate the ~50% startup access violation.
+        self.refresh_workflow_statuses()
+        QtCore.QTimer.singleShot(300, lambda: self._defer_step_preview(1, self.populate_pmx_files))
+        QtCore.QTimer.singleShot(500, self.populate_main_pmx_files)
+        QtCore.QTimer.singleShot(700, self.refresh_workspace_cache_size)
+        QtCore.QTimer.singleShot(900, self.start_category_scan)
+        QtCore.QTimer.singleShot(1600, self.start_update_check)
 
     def apply_startup_geometry(self) -> None:
         app = QtWidgets.QApplication.instance()
@@ -22799,6 +22820,9 @@ def main() -> int:
     if dispatched_exit_code is not None:
         return dispatched_exit_code
     crash_log_path = enable_crash_logging()
+    # Sharing one GL context across the app's two QOpenGLWidgets (model + material preview) is good
+    # practice and harmless; set before QApplication as Qt requires.
+    QtCore.QCoreApplication.setAttribute(QtCore.Qt.ApplicationAttribute.AA_ShareOpenGLContexts, True)
     app = QtWidgets.QApplication(sys.argv)
     app.setApplicationName("MMD Character Importer")
     theme_preference = str(

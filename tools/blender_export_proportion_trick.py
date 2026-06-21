@@ -32,6 +32,12 @@ SOURCE_BONE_LIMIT_TARGET = 248
 # the hard 128 limit, since ValveBiped + weapon/attachment bones are protected from merging).
 L4D2_MAX_BONES = 128
 L4D2_PROPORTION_BONE_TARGET = 126
+# Source hardware skinning binds at most 3 bones per vertex. GMod's studiomdl truncates
+# over-weighted vertices and renormalizes them cleanly, but L4D2's older studiomdl truncates to
+# 3 WITHOUT renormalizing, so the 4th+ weight is silently dropped, the vertex is left
+# under-weighted, and it collapses toward the origin -- the whole bodygroup then renders as
+# exploding triangles in game. MMD meshes routinely exceed this (PMX BDEF4 = up to 4 weights).
+L4D2_MAX_VERTEX_BONE_INFLUENCES = 3
 PHYSICS_MERGE_DISTANCE = 1.0
 NONESSENTIAL_EXPORT_ROLL_OFFSET_RADIANS = math.pi
 EXPECTED_PROPORTION_ANIMS = {
@@ -572,6 +578,124 @@ def enforce_source_bone_limit(armature: bpy.types.Object, target: int = SOURCE_B
         "bone_count_after": bone_count_after,
         "merged_bone_count": len(merged),
         "merged_bones": merged[:1000],
+    }
+
+
+def limit_vertex_bone_influences(
+    armature: bpy.types.Object,
+    meshes: list[bpy.types.Object],
+    max_influences: int = L4D2_MAX_VERTEX_BONE_INFLUENCES,
+) -> dict[str, object]:
+    """L4D2: enforce Source's max-3-bones-per-vertex skinning limit on every export mesh.
+
+    Mirrors the Blender Source Tools pre-export fix the community recommends for the
+    "Too many bone influences per vertex" / exploding-mesh failure:
+
+      1. Delete every vertex group that does not name a real bone in the export skeleton
+         (mmd_tools leaves junk groups such as ``mmd_vertex_*`` for UV/material morphs, and
+         a removed bone can leave an orphaned group). These deform nothing, but if left in
+         place they would occupy one of the 3 precious influence slots and could push a real
+         bone out when the weakest weights are stripped.
+      2. Keep only each vertex's ``max_influences`` strongest *bone* weights, dropping the rest.
+      3. Renormalize the surviving weights to sum 1.0.
+
+    Run on the raw-export meshes BEFORE the proportion trick. Every later step only folds
+    weights together (the bone-limit merge, via additive transfer) or rebinds the mesh without
+    repainting it -- neither raises the per-vertex influence count -- so the final compiled
+    survivor model stays within the limit. GMod is never called here, so its pipeline is
+    byte-identical.
+    """
+    bone_names = {bone.name for bone in armature.data.bones}
+    removed_group_total = 0
+    meshes_with_orphan_groups = 0
+    limited_vertex_total = 0
+    renormalized_vertex_total = 0
+    max_influences_seen = 0
+    object_reports: list[dict[str, object]] = []
+
+    ensure_object_mode()
+    for obj in meshes:
+        mesh = obj.data
+
+        # (1) Drop vertex groups that map to no bone in the export skeleton.
+        orphan_groups = [vertex_group.name for vertex_group in obj.vertex_groups if vertex_group.name not in bone_names]
+        for name in orphan_groups:
+            group = obj.vertex_groups.get(name)
+            if group is not None:
+                obj.vertex_groups.remove(group)
+        if orphan_groups:
+            meshes_with_orphan_groups += 1
+            removed_group_total += len(orphan_groups)
+
+        # (2)+(3) Per vertex: keep the strongest `max_influences` weights, then renormalize to 1.0.
+        # Group indices are stable after the orphan removal above, so this map stays valid while we
+        # add/remove individual vertex assignments below (those never reindex the groups themselves).
+        group_by_index = {vertex_group.index: vertex_group for vertex_group in obj.vertex_groups}
+        obj_limited = 0
+        obj_renormalized = 0
+        obj_max_before = 0
+        for vertex in mesh.vertices:
+            # Snapshot to plain (index, weight) tuples first: adding/removing assignments
+            # invalidates the live VertexGroupElement wrappers we are iterating.
+            entries = [
+                (assignment.group, float(assignment.weight))
+                for assignment in vertex.groups
+                if assignment.group in group_by_index and assignment.weight > 0.0
+            ]
+            if not entries:
+                continue
+            obj_max_before = max(obj_max_before, len(entries))
+
+            drop_indices: list[int] = []
+            keep = entries
+            if len(entries) > max_influences:
+                entries.sort(key=lambda item: item[1], reverse=True)
+                keep = entries[:max_influences]
+                drop_indices = [group_index for group_index, _ in entries[max_influences:]]
+                obj_limited += 1
+
+            total = sum(weight for _, weight in keep)
+            if total <= 0.0:
+                continue
+
+            for group_index in drop_indices:
+                group_by_index[group_index].remove([vertex.index])
+            if not math.isclose(total, 1.0, rel_tol=1.0e-6, abs_tol=1.0e-6):
+                for group_index, weight in keep:
+                    group_by_index[group_index].add([vertex.index], weight / total, "REPLACE")
+                obj_renormalized += 1
+
+        if obj_limited or obj_renormalized or orphan_groups:
+            mesh.update()
+        limited_vertex_total += obj_limited
+        renormalized_vertex_total += obj_renormalized
+        max_influences_seen = max(max_influences_seen, obj_max_before)
+        object_reports.append(
+            {
+                "object": obj.name,
+                "removed_orphan_groups": orphan_groups[:200],
+                "max_influences_before": obj_max_before,
+                "limited_vertices": obj_limited,
+                "renormalized_vertices": obj_renormalized,
+            }
+        )
+
+    log(
+        f"L4D2 vertex weight limit: removed {removed_group_total} orphan vertex group(s) across "
+        f"{meshes_with_orphan_groups} mesh(es); capped {limited_vertex_total} vertex/vertices to "
+        f"{max_influences} bone(s) (max influences seen {max_influences_seen}); renormalized "
+        f"{renormalized_vertex_total} vertex/vertices to total weight 1.0."
+    )
+    return {
+        "enabled": True,
+        "max_influences": max_influences,
+        "mesh_count": len(meshes),
+        "removed_orphan_group_count": removed_group_total,
+        "meshes_with_orphan_groups": meshes_with_orphan_groups,
+        "limited_vertex_count": limited_vertex_total,
+        "renormalized_vertex_count": renormalized_vertex_total,
+        "max_influences_before": max_influences_seen,
+        "objects": object_reports,
     }
 
 
@@ -1268,6 +1392,15 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     armature_report = prepare_armature_for_raw_export(armature)
     physics_simplification_report = simplify_physics_for_source_compile()
 
+    # L4D2: enforce Source's max-3-bones-per-vertex skinning limit (and drop junk vertex groups)
+    # before the raw export, so the survivor model never ships over-weighted vertices that L4D2's
+    # studiomdl would under-weight and fling outward (the "exploding bodygroup"). GMod's studiomdl
+    # handles >3 weights itself, so GMod is left byte-identical (the limit only runs for L4D2).
+    if str(getattr(args, "game", "gmod") or "gmod").strip().lower() == "l4d2":
+        vertex_influence_limit_report = limit_vertex_bone_influences(armature, visible_export_meshes())
+    else:
+        vertex_influence_limit_report = {"enabled": False}
+
     log(f"Saving prepared pre-proportion blend: {pre_blend}")
     pre_blend.parent.mkdir(parents=True, exist_ok=True)
     bpy.ops.wm.save_as_mainfile(filepath=str(pre_blend))
@@ -1345,6 +1478,7 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         "face_basis_stacking": face_report,
         "zero_weight_bone_cleanup": zero_weight_bone_report,
         "source_bone_limit": bone_limit_report,
+        "vertex_bone_influence_limit": vertex_influence_limit_report,
         "armature_preparation": armature_report,
         "physics_simplification": physics_simplification_report,
         "raw_export": {
