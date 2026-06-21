@@ -4480,10 +4480,13 @@ class ImporterWindow(QtWidgets.QMainWindow):
         so buttons, labels, tab titles, dialog titles and messages all relabel together.
 
         Deliberately CASE-SENSITIVE and brand-token-only: it never touches lowercase path
-        literals ('garrysmod/addons'), output-folder names ('GarrysMod'), the RTX-remix_GMod_Package
-        repo/URL, or internal settings keys (copy_to_gmod_addons, qc_gmod_path, ...). A few strings
-        that intentionally name BOTH games (the game selector's own option label + explainer
-        tooltips) or that describe the GMod-only RTX Remix path are left exactly as authored."""
+        literals ('garrysmod/addons'), output-folder names ('GarrysMod'), or internal settings keys
+        (copy_to_gmod_addons, qc_gmod_path, ...). It also never rewrites inside a URL: the GitHub
+        repo URL contains '.../Gmod-Simple-Character-Model-Importer' and the RTX package URL contains
+        'RTX-remix_GMod_Package', and swapping the token there would send users to a non-existent
+        repo (the actual repo is NOT renamed). A few strings that intentionally name BOTH games (the
+        game selector's own option label + explainer tooltips) or describe the GMod-only RTX Remix
+        path are left exactly as authored."""
         if not text or getattr(self, "selected_game", "gmod") != "l4d2":
             return text
         if (
@@ -4493,11 +4496,18 @@ class ImporterWindow(QtWidgets.QMainWindow):
             or "Garry's Mod is the default" in text
         ):
             return text
-        return (
-            text.replace("Garry's Mod", "Left 4 Dead 2")
-            .replace("GMod", "L4D2")
-            .replace("Gmod", "L4D2")
-        )
+
+        def _swap(segment: str) -> str:
+            return (
+                segment.replace("Garry's Mod", "Left 4 Dead 2")
+                .replace("GMod", "L4D2")
+                .replace("Gmod", "L4D2")
+            )
+
+        # Split on http(s) URLs and rewrite only the text BETWEEN them, so a "Gmod"/"GMod" token
+        # inside a URL (e.g. the GitHub releases/issues link) is preserved verbatim.
+        parts = re.split(r"(https?://\S+)", text)
+        return "".join(part if index % 2 else _swap(part) for index, part in enumerate(parts))
 
     def _flatten_i18n_strings(self, catalog: dict[str, object], prefix: str = "") -> dict[str, str]:
         flattened: dict[str, str] = {}
