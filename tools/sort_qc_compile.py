@@ -3849,18 +3849,38 @@ def package_addon_vpk(addon_dir: Path, output_vpk: Path, gmod: dict[str, Any], l
 
     `vpk.exe <folder>` produces `<folder>.vpk` next to the folder; we then move it
     to the requested output path.
+
+    vpk.exe converts its path argument to the system ANSI codepage internally and fails
+    (prints its usage banner and exits 1) when the path contains characters that don't
+    round-trip in that codepage — e.g. a workspace named with an em dash / fullwidth
+    parentheses. So when the addon folder or the output path is non-ASCII, stage the
+    packaging through an ASCII scratch directory, exactly like package_addon_gma.
     """
     vpk = find_vpk_executable(gmod)
     output_vpk = output_vpk.with_suffix(".vpk")
     output_vpk.parent.mkdir(parents=True, exist_ok=True)
     if output_vpk.exists():
         output_vpk.unlink()
-    returncode, output = run_command([str(vpk), str(addon_dir)], log_path)
-    produced = addon_dir.with_name(addon_dir.name + ".vpk")
-    if returncode != 0 or not produced.exists():
-        raise RuntimeError(f"vpk.exe failed (exit {returncode}) or did not write {produced}. Output:\n{output}")
-    shutil.move(str(produced), str(output_vpk))
-    return output_vpk
+    actual_addon_dir = addon_dir
+    scratch: Path | None = None
+    try:
+        if not path_is_ascii(addon_dir) or not path_is_ascii(output_vpk):
+            scratch = external_safe_dir_for(output_vpk, "vpk")
+            if scratch.exists():
+                shutil.rmtree(scratch)
+            scratch.mkdir(parents=True, exist_ok=True)
+            actual_addon_dir = scratch / safe_name(addon_dir.name, "addon")
+            copytree_clean(addon_dir, actual_addon_dir)
+            emit(f"Staging VPK packaging through ASCII path: {actual_addon_dir}")
+        returncode, output = run_command([str(vpk), str(actual_addon_dir)], log_path, cwd=actual_addon_dir.parent)
+        produced = actual_addon_dir.with_name(actual_addon_dir.name + ".vpk")
+        if returncode != 0 or not produced.exists():
+            raise RuntimeError(f"vpk.exe failed (exit {returncode}) or did not write {produced}. Output:\n{output}")
+        shutil.move(str(produced), str(output_vpk))
+        return output_vpk
+    finally:
+        if scratch is not None and scratch.exists():
+            shutil.rmtree(scratch, ignore_errors=True)
 
 
 def build_carms_qc(plan: dict[str, Any], source_dir: Path, definebones: list[str]) -> Path | None:
