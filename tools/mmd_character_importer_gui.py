@@ -2268,10 +2268,11 @@ class TextureAnalyzeWorker(QtCore.QThread):
     done = QtCore.Signal(dict)
     failed = QtCore.Signal(str)
 
-    def __init__(self, input_path: str, scheme: str = "legacy") -> None:
+    def __init__(self, input_path: str, scheme: str = "legacy", game: str = "gmod") -> None:
         super().__init__()
         self.input_path = input_path
         self.scheme = scheme or "legacy"
+        self.game = game or "gmod"
         self.cancel_requested = False
 
     def cancel(self) -> None:
@@ -2285,7 +2286,7 @@ class TextureAnalyzeWorker(QtCore.QThread):
 
     def run(self) -> None:
         try:
-            result = core.analyze_textures(Path(self.input_path), progress=self._log, cancel_check=self._cancelled, scheme=self.scheme)
+            result = core.analyze_textures(Path(self.input_path), progress=self._log, cancel_check=self._cancelled, scheme=self.scheme, game=self.game)
             self.done.emit(
                 {
                     "input": str(result.input_path),
@@ -2308,10 +2309,11 @@ class TextureProcessWorker(QtCore.QThread):
     done = QtCore.Signal(dict)
     failed = QtCore.Signal(str)
 
-    def __init__(self, input_path: str, plan: dict[str, object]) -> None:
+    def __init__(self, input_path: str, plan: dict[str, object], game: str = "gmod") -> None:
         super().__init__()
         self.input_path = input_path
         self.plan = plan
+        self.game = game or "gmod"
         self.cancel_requested = False
 
     def cancel(self) -> None:
@@ -2325,7 +2327,7 @@ class TextureProcessWorker(QtCore.QThread):
 
     def run(self) -> None:
         try:
-            result = core.process_textures(Path(self.input_path), self.plan, progress=self._log, cancel_check=self._cancelled)
+            result = core.process_textures(Path(self.input_path), self.plan, progress=self._log, cancel_check=self._cancelled, game=self.game)
             self.done.emit(
                 {
                     "input": str(result.input_path),
@@ -2885,8 +2887,8 @@ class FullImportWorker(QtCore.QThread):
             self._optional(11, "Sort VRD", run_vrd)
 
             def run_textures() -> None:
-                textures_analysis = core.analyze_textures(material_apply.materials_json_path, progress=self._log, cancel_check=self._cancelled)
-                textures = core.process_textures(material_apply.materials_json_path, textures_analysis.plan, progress=self._log, cancel_check=self._cancelled)
+                textures_analysis = core.analyze_textures(material_apply.materials_json_path, progress=self._log, cancel_check=self._cancelled, game=self.game)
+                textures = core.process_textures(material_apply.materials_json_path, textures_analysis.plan, progress=self._log, cancel_check=self._cancelled, game=self.game)
                 validation = textures.report.get("validation") if isinstance(textures.report.get("validation"), dict) else {"ok": True}
                 if validation.get("ok") is False:
                     raise RuntimeError("Texture processing validation failed.")
@@ -19419,7 +19421,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
         self.detect_texture_mapping_button.setEnabled(False)
         self.texture_cancel_button.setEnabled(True)
         scheme = self.current_texture_scheme()
-        self.worker = TextureAnalyzeWorker(str(input_path), scheme=scheme)
+        self.worker = TextureAnalyzeWorker(str(input_path), scheme=scheme, game=self.current_selected_game())
         self.worker.log.connect(self.append_texture_log)
         self.worker.done.connect(self.texture_analyze_done)
         self.worker.failed.connect(self.texture_failed)
@@ -19495,7 +19497,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
         self.texture_process_button.setEnabled(False)
         self.detect_texture_mapping_button.setEnabled(False)
         self.texture_cancel_button.setEnabled(True)
-        self.worker = TextureProcessWorker(input_raw, deepcopy(self.current_texture_plan))
+        self.worker = TextureProcessWorker(input_raw, deepcopy(self.current_texture_plan), game=self.current_selected_game())
         self.worker.log.connect(self.append_texture_log)
         self.worker.done.connect(self.texture_process_done)
         self.worker.failed.connect(self.texture_failed)

@@ -38,6 +38,15 @@ BASE_SUFFIXES = (
 )
 NORMAL_SUFFIXES = ("_n", "_normal", "_norm", "_nrm", "_bump", "_hn", "normal", "norm", "nrm", "bump")
 MAX_TEXTURE_EDGE = 4096
+# L4D2's engine crashes on very large textures, so every map (base/normal/phong-exp/selfillum)
+# is clamped to 2048px on its longest edge for L4D2. GMod keeps the 4096 cap. The effective cap
+# is set per-run from the selected game; resize_to_limit and the analyze preview read it.
+L4D2_MAX_TEXTURE_EDGE = 2048
+_ACTIVE_MAX_TEXTURE_EDGE = MAX_TEXTURE_EDGE
+
+
+def max_texture_edge_for_game(game: str | None) -> int:
+    return L4D2_MAX_TEXTURE_EDGE if str(game or "").strip().lower() == "l4d2" else MAX_TEXTURE_EDGE
 GENERATE_NORMAL_MIN_EDGE = 1024
 SMARTNORMAL_BIAS = 85
 NORMAL_REFERENCE_INTENSITY = 85.0
@@ -510,7 +519,9 @@ def image_size(path: Path) -> tuple[int, int]:
         return int(image.width), int(image.height)
 
 
-def resize_to_limit(image: Image.Image, max_edge: int = MAX_TEXTURE_EDGE) -> tuple[Image.Image, bool]:
+def resize_to_limit(image: Image.Image, max_edge: int | None = None) -> tuple[Image.Image, bool]:
+    if max_edge is None:
+        max_edge = _ACTIVE_MAX_TEXTURE_EDGE
     width, height = image.size
     longest = max(width, height)
     if longest <= max_edge:
@@ -518,6 +529,37 @@ def resize_to_limit(image: Image.Image, max_edge: int = MAX_TEXTURE_EDGE) -> tup
     scale = max_edge / float(longest)
     size = (max(1, int(round(width * scale))), max(1, int(round(height * scale))))
     return image.resize(size, Image.Resampling.LANCZOS), True
+
+
+def cap_pngs_to_limit(dirs: list[Path], max_edge: int) -> list[dict[str, Any]]:
+    """Downscale any already-written PNG whose longest edge exceeds max_edge.
+
+    Catches the derived maps (phong-exponent, selfillum, generated/converted normals) that are
+    written at their source resolution rather than through resize_to_limit. Base/normal PNGs are
+    already clamped at write time, so they are skipped here.
+    """
+    capped: list[dict[str, Any]] = []
+    seen: set[Path] = set()
+    for directory in dirs:
+        if not directory or not directory.exists():
+            continue
+        for path in sorted(directory.glob("*.png")):
+            resolved = path.resolve()
+            if resolved in seen:
+                continue
+            seen.add(resolved)
+            try:
+                with Image.open(path) as probe:
+                    width, height = probe.size
+                    if max(width, height) <= max_edge:
+                        continue
+                    converted = probe.convert("RGBA")
+                resized, _ = resize_to_limit(converted, max_edge)
+                resized.save(path)
+                capped.append({"path": str(path), "from": [width, height], "to": list(resized.size)})
+            except Exception as exc:
+                emit(f"[Step12 Textures] WARNING: could not clamp {path.name} to {max_edge}px: {exc}")
+    return capped
 
 
 def normalized_stem(stem: str, suffixes: tuple[str, ...]) -> str:
@@ -871,7 +913,9 @@ def save_normal_png(input_path: Path, output_path: Path) -> tuple[tuple[int, int
     return original_size, image.size, resized
 
 
-def analyze_textures(input_path: Path, analysis_json: Path, plan_json: Path, scheme: str = PBR_SCHEME_LEGACY) -> dict[str, Any]:
+def analyze_textures(input_path: Path, analysis_json: Path, plan_json: Path, scheme: str = PBR_SCHEME_LEGACY, game: str = "gmod") -> dict[str, Any]:
+    global _ACTIVE_MAX_TEXTURE_EDGE
+    _ACTIVE_MAX_TEXTURE_EDGE = max_texture_edge_for_game(game)
     scheme = normalize_scheme(scheme)
     materials, workspace_root, material_dir, materials_json = load_material_entries(input_path)
     output_dir = workspace_root / "12_param_texture_render_materials"
@@ -894,11 +938,11 @@ def analyze_textures(input_path: Path, analysis_json: Path, plan_json: Path, sch
                 width, height = image_size(base_path)
                 base_size = [width, height]
                 longest = max(width, height)
-                if longest > MAX_TEXTURE_EDGE:
-                    scale = MAX_TEXTURE_EDGE / float(longest)
+                if longest > _ACTIVE_MAX_TEXTURE_EDGE:
+                    scale = _ACTIVE_MAX_TEXTURE_EDGE / float(longest)
                     output_size = [max(1, int(round(width * scale))), max(1, int(round(height * scale)))]
                     base_action = "convert_downscale"
-                    warnings.append(f"Base texture will be clamped to {MAX_TEXTURE_EDGE}px max edge.")
+                    warnings.append(f"Base texture will be clamped to {_ACTIVE_MAX_TEXTURE_EDGE}px max edge.")
                 else:
                     output_size = [width, height]
                     base_action = "copy_png" if base_path.suffix.lower() == ".png" else "convert_png"
@@ -1021,8 +1065,12 @@ def analyze_textures(input_path: Path, analysis_json: Path, plan_json: Path, sch
     return analysis
 
 
-def process_textures(input_path: Path, plan_json: Path, report_json: Path, manifest_json: Path, scheme: str | None = None) -> dict[str, Any]:
+def process_textures(input_path: Path, plan_json: Path, report_json: Path, manifest_json: Path, scheme: str | None = None, game: str | None = None) -> dict[str, Any]:
+    global _ACTIVE_MAX_TEXTURE_EDGE
     plan = json.loads(plan_json.read_text(encoding="utf-8"))
+    # L4D2 clamps every texture to 2048px (the game crashes on larger maps); GMod keeps 4096.
+    effective_game = game if game is not None else plan.get("game")
+    _ACTIVE_MAX_TEXTURE_EDGE = max_texture_edge_for_game(effective_game)
     rows = [row for row in plan.get("rows", []) if isinstance(row, dict)]
     output_dir = Path(str(plan.get("output_dir") or report_json.parent))
     png_dir = Path(str(plan.get("png_dir") or output_dir / "png"))
@@ -1203,12 +1251,28 @@ def process_textures(input_path: Path, plan_json: Path, report_json: Path, manif
             + "."
         )
 
+    # L4D2: clamp every written texture (base/normal are already clamped at write time; this
+    # catches the derived phong-exponent / selfillum / generated-normal maps that are saved at
+    # source resolution). GMod keeps the 4096 cap so this is a no-op and the output is unchanged.
+    clamped_textures: list[dict[str, Any]] = []
+    if _ACTIVE_MAX_TEXTURE_EDGE < MAX_TEXTURE_EDGE:
+        clamped_textures = cap_pngs_to_limit(
+            [png_dir, normal_dir, phongexp_dir, selfillum_dir], _ACTIVE_MAX_TEXTURE_EDGE
+        )
+        if clamped_textures:
+            emit(
+                f"[Step12 Textures] Clamped {len(clamped_textures)} texture(s) to "
+                f"{_ACTIVE_MAX_TEXTURE_EDGE}px for L4D2."
+            )
+
     manifest = {
         "version": 1,
         "input": str(input_path.resolve()),
         "output_dir": str(output_dir),
         "png_dir": str(png_dir),
         "normal_dir": str(normal_dir),
+        "max_texture_edge": _ACTIVE_MAX_TEXTURE_EDGE,
+        "clamped_textures": clamped_textures,
         "textures": manifest_rows,
     }
     report = {
@@ -1240,15 +1304,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--report-json", type=Path)
     parser.add_argument("--manifest-json", type=Path)
     parser.add_argument("--scheme", default=None, help="PBR texture scheme (legacy, unreal_wuwa, unity_endfield). Process mode falls back to the plan's stored scheme when omitted.")
+    parser.add_argument("--game", default="gmod", help="Target game; 'l4d2' clamps every texture to 2048px (the game crashes on larger maps). Default 'gmod' keeps the 4096 cap.")
     args = parser.parse_args(argv)
     if args.mode == "analyze":
         if not args.analysis_json:
             parser.error("--analysis-json is required for analyze mode")
-        analyze_textures(args.input, args.analysis_json, args.plan_json, scheme=args.scheme or PBR_SCHEME_LEGACY)
+        analyze_textures(args.input, args.analysis_json, args.plan_json, scheme=args.scheme or PBR_SCHEME_LEGACY, game=args.game)
         return 0
     if not args.report_json or not args.manifest_json:
         parser.error("--report-json and --manifest-json are required for process mode")
-    process_textures(args.input, args.plan_json, args.report_json, args.manifest_json, scheme=args.scheme)
+    process_textures(args.input, args.plan_json, args.report_json, args.manifest_json, scheme=args.scheme, game=args.game)
     return 0
 
 

@@ -4822,6 +4822,7 @@ def analyze_textures(
     progress: ProgressCallback | None = None,
     cancel_check: CancelCheck | None = None,
     scheme: str = "legacy",
+    game: str = "gmod",
 ) -> TextureAnalysisResult:
     input_path = input_path.resolve()
     texture_dir, analysis_path, plan_path, report_path, manifest_path, log_path = texture_paths_for_material_input(input_path)
@@ -4844,6 +4845,9 @@ def analyze_textures(
     # it entirely so the subprocess command stays byte-identical to before.
     if str(scheme or "legacy").strip().lower() != "legacy":
         command += ["--scheme", str(scheme).strip().lower()]
+    # Only L4D2 passes --game (clamps textures to 2048px); GMod stays byte-identical.
+    if str(game or "gmod").strip().lower() == "l4d2":
+        command += ["--game", "l4d2"]
     emit(progress, f"Starting Step 12 texture analysis: {input_path}")
     started = time.monotonic()
     run_process_streamed(command, progress=progress, log_path=log_path, cancel_check=cancel_check)
@@ -4873,6 +4877,7 @@ def process_textures(
     plan: dict[str, object] | Path,
     progress: ProgressCallback | None = None,
     cancel_check: CancelCheck | None = None,
+    game: str = "gmod",
 ) -> TextureProcessResult:
     input_path = input_path.resolve()
     texture_dir, analysis_path, default_plan_path, report_path, manifest_path, log_path = texture_paths_for_material_input(input_path)
@@ -4900,6 +4905,9 @@ def process_textures(
         "--manifest-json",
         str(manifest_path),
     ]
+    # Only L4D2 passes --game (clamps textures to 2048px); GMod stays byte-identical.
+    if str(game or "gmod").strip().lower() == "l4d2":
+        command += ["--game", "l4d2"]
     emit(progress, f"Starting Step 12 texture processing: {input_path}")
     started = time.monotonic()
     run_process_streamed(command, progress=progress, log_path=log_path, cancel_check=cancel_check)

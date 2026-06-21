@@ -2007,6 +2007,7 @@ def base_qc_lines(
     include_hboxes: list[str] | None = None,
     include_collision: bool = False,
     include_flexes: bool = True,
+    for_definebone_capture: bool = False,
 ) -> list[str]:
     l4d2 = normalize_game(plan.get("game")) == "l4d2"
     lines: list[str] = []
@@ -2060,7 +2061,16 @@ def base_qc_lines(
         if attachment_lines:
             lines.extend(attachment_lines)
             lines.append("\n")
-        lines.extend(l4d2_ik_lines(survivor_bones))
+        # IMPORTANT: omit $ikchain/$ikautoplaylock from the `-definebones` capture pass for L4D2.
+        # Our L4D2 base armature is extracted from the base-game survivor's *compiled* .mdl, whose
+        # bind pose is already post-IK-realignment. Declaring $ikchain here makes studiomdl realign
+        # the left leg / hands a SECOND time, snapping the left calf into a 90deg quadrant and
+        # garbling the left foot + right hand. We capture the definebones WITHOUT ik (clean bind),
+        # then re-add the ik chains in the real compile (definebones lock the bind, so the real
+        # compile stays clean). The base-game/gold ports avoid this by using a clean canonical
+        # reference where the realignment is idempotent.
+        if not for_definebone_capture:
+            lines.extend(l4d2_ik_lines(survivor_bones))
     else:
         lines.append('$ikchain "rhand" "ValveBiped.Bip01_R_Hand" knee 0.707 0.707 0 \n')
         lines.append('$ikchain "lhand" "ValveBiped.Bip01_L_Hand" knee 0.707 0.707 0 \n')
@@ -3945,7 +3955,7 @@ def compose(plan_path: Path) -> dict[str, Any]:
     survivor_slot = normalize_survivor(plan.get("survivor"))
 
     initial_qc = source_dir / "compile_initial.qc"
-    write_lines(initial_qc, base_qc_lines(plan, source_dir, pm=False, include_flexes=False))
+    write_lines(initial_qc, base_qc_lines(plan, source_dir, pm=False, include_flexes=False, for_definebone_capture=True))
     define_log = qc_dir / "compile_definebones.log"
     emit("Running studiomdl -definebones.")
     code, define_output = run_command([str(studiomdl), "-game", str(game_dir), "-definebones", "-nop4", "-verbose", str(initial_qc)], define_log, cwd=source_dir)
@@ -4345,6 +4355,21 @@ def compose(plan_path: Path) -> dict[str, Any]:
     if not any(mat_dir.glob("*.vmt")):
         warnings.append("No material VMT files were written.")
 
+    # L4D2 ships as a single .vpk; the unpacked addon folder is not needed in-game. Package the
+    # VPK once here and deliver ONLY that file to the distribution folder and the game addons
+    # (below). GMod keeps copying the unpacked addon folder + a .gma.
+    l4d2_vpk_path: Path | None = None
+    if l4d2:
+        try:
+            emit("Packaging final addon VPK.")
+            l4d2_vpk_path = package_addon_vpk(
+                addon_dir, qc_dir / f"survivor_{survivor_slot}_{model}.vpk", gmod, qc_dir / "vpk_create.log"
+            )
+            generated_files.append(file_row(l4d2_vpk_path, "vpk_package"))
+            emit(f"Wrote VPK package: {l4d2_vpk_path}")
+        except Exception as exc:
+            errors.append(f"Failed to package addon VPK: {exc}")
+
     distribution_output_dir = Path(str(plan.get("distribution_output_dir") or "")).expanduser()
     distribution_addon_dir = Path("")
     distribution_gma = Path("")
@@ -4360,12 +4385,14 @@ def compose(plan_path: Path) -> dict[str, Any]:
             if compile_source_copy_dir.exists() and path_is_inside(distribution_output_dir, compile_source_copy_dir):
                 raise RuntimeError("The selected distribution folder cannot be inside the QC compile source folder.")
             distribution_output_dir.mkdir(parents=True, exist_ok=True)
-            distribution_addon_dir = distribution_output_dir / addon_dir.name
-            if same_resolved_path(distribution_addon_dir, addon_dir):
-                generated_files.append(folder_row(distribution_addon_dir, "distribution_addon_folder", ["Already composed in this folder."]))
-            else:
-                copytree_clean(addon_dir, distribution_addon_dir)
-                generated_files.append(folder_row(distribution_addon_dir, "distribution_addon_folder"))
+            if not l4d2:
+                # L4D2 delivers only the .vpk (below); the unpacked addon folder is not needed.
+                distribution_addon_dir = distribution_output_dir / addon_dir.name
+                if same_resolved_path(distribution_addon_dir, addon_dir):
+                    generated_files.append(folder_row(distribution_addon_dir, "distribution_addon_folder", ["Already composed in this folder."]))
+                else:
+                    copytree_clean(addon_dir, distribution_addon_dir)
+                    generated_files.append(folder_row(distribution_addon_dir, "distribution_addon_folder"))
             if compile_source_copy_dir.exists():
                 distribution_compile_source_dir = distribution_compile_source_copy_dir(distribution_output_dir, model, author)
                 if same_resolved_path(distribution_compile_source_dir, compile_source_copy_dir):
@@ -4374,11 +4401,13 @@ def compose(plan_path: Path) -> dict[str, Any]:
                     copytree_clean(compile_source_copy_dir, distribution_compile_source_dir)
                     generated_files.append(folder_row(distribution_compile_source_dir, "distribution_qc_compile_source"))
             if l4d2:
-                emit("Packaging final addon VPK.")
-                distribution_gma = distribution_output_dir / f"survivor_{survivor_slot}_{model}.vpk"
-                distribution_gma = package_addon_vpk(addon_dir, distribution_gma, gmod, qc_dir / "vpk_create.log")
-                generated_files.append(file_row(distribution_gma, "vpk_package"))
-                emit(f"Wrote VPK package: {distribution_gma}")
+                # Deliver only the .vpk packaged above; the unpacked folder is omitted.
+                if l4d2_vpk_path and l4d2_vpk_path.exists():
+                    distribution_gma = distribution_output_dir / l4d2_vpk_path.name
+                    if not same_resolved_path(distribution_gma, l4d2_vpk_path):
+                        shutil.copyfile(l4d2_vpk_path, distribution_gma)
+                    generated_files.append(file_row(distribution_gma, "vpk_package"))
+                    emit(f"Copied VPK package to distribution folder: {distribution_gma}")
             else:
                 emit("Packaging final addon GMA.")
                 distribution_gma = distribution_output_dir / f"{model}_{author}.gma"
@@ -4389,22 +4418,35 @@ def compose(plan_path: Path) -> dict[str, Any]:
             errors.append(f"Failed to copy/package addon to selected output folder: {exc}")
 
     if bool(plan.get("copy_to_gmod_addons", False)):
-        emit("Installing composed addon folder to detected GMod addons folder.")
         try:
             gmod_game_dir = Path(str(gmod.get("game_dir") or ""))
             if not gmod_game_dir.exists():
-                raise RuntimeError(f"GMod game directory was not found: {gmod_game_dir}")
+                raise RuntimeError(f"Game directory was not found: {gmod_game_dir}")
             gmod_addons_dir = gmod_game_dir / "addons"
             gmod_addons_dir.mkdir(parents=True, exist_ok=True)
-            gmod_addon_dir = gmod_addons_dir / addon_dir.name
-            if same_resolved_path(gmod_addon_dir, addon_dir):
-                generated_files.append(folder_row(gmod_addon_dir, "gmod_addons_folder", ["Already composed in this folder."]))
+            if l4d2:
+                # L4D2 installs the single .vpk into addons/; the unpacked folder is not needed.
+                emit("Installing addon VPK to detected L4D2 addons folder.")
+                if l4d2_vpk_path and l4d2_vpk_path.exists():
+                    installed_vpk = gmod_addons_dir / l4d2_vpk_path.name
+                    if not same_resolved_path(installed_vpk, l4d2_vpk_path):
+                        shutil.copyfile(l4d2_vpk_path, installed_vpk)
+                    generated_files.append(file_row(installed_vpk, "gmod_addons_vpk"))
+                    gmod_addon_dir = gmod_addons_dir  # report/open points at the addons folder
+                    emit(f"Installed addon VPK: {installed_vpk}")
+                else:
+                    errors.append("L4D2 addon VPK was not packaged, so nothing was installed to the addons folder.")
             else:
-                copytree_clean(addon_dir, gmod_addon_dir)
-                generated_files.append(folder_row(gmod_addon_dir, "gmod_addons_folder"))
-            emit(f"Installed composed addon folder: {gmod_addon_dir}")
+                emit("Installing composed addon folder to detected GMod addons folder.")
+                gmod_addon_dir = gmod_addons_dir / addon_dir.name
+                if same_resolved_path(gmod_addon_dir, addon_dir):
+                    generated_files.append(folder_row(gmod_addon_dir, "gmod_addons_folder", ["Already composed in this folder."]))
+                else:
+                    copytree_clean(addon_dir, gmod_addon_dir)
+                    generated_files.append(folder_row(gmod_addon_dir, "gmod_addons_folder"))
+                emit(f"Installed composed addon folder: {gmod_addon_dir}")
         except Exception as exc:
-            errors.append(f"Failed to copy addon folder to GMod addons: {exc}")
+            errors.append(f"Failed to copy addon to {'L4D2' if l4d2 else 'GMod'} addons: {exc}")
 
     files_json = qc_dir / "qc_files.json"
     report_json = qc_dir / "qc_report.json"
