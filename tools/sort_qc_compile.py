@@ -3107,6 +3107,18 @@ def convert_one_vtf(vtfcmd: Path, image_path: Path, output_dir: Path) -> Path:
             shutil.rmtree(scratch, ignore_errors=True)
 
 
+def l4d2_shared_material_root(author: str, model_name: str, game: str) -> str:
+    """Path (under materials/) of the generic shared textures (normal/phong_exp/lightwarp).
+
+    GMod uses an author-level folder (models/<author>/shared). For L4D2 that collides across EVERY
+    addon by the same author -- two enabled addons shipping the same file path are flagged as a
+    conflict in the L4D2 add-ons menu even when they replace different survivors -- so L4D2
+    namespaces it PER-MODEL (models/<author>/<model>/shared) to keep each VPK self-contained."""
+    if normalize_game(game) == "l4d2":
+        return f"models/{author}/{model_name}/shared"
+    return f"models/{author}/shared"
+
+
 def write_vmt(
     path: Path,
     author: str,
@@ -3115,13 +3127,15 @@ def write_vmt(
     has_normal: bool,
     phongexp_texture: str | None = None,
     selfillum_mask: str | None = None,
+    game: str = "gmod",
 ) -> None:
-    bump = f"models/{author}/{model_name}/{material_name}_n" if has_normal else f"models/{author}/shared/normal"
+    shared = l4d2_shared_material_root(author, model_name, game)
+    bump = f"models/{author}/{model_name}/{material_name}_n" if has_normal else f"{shared}/normal"
     # A per-material phong-exponent map (Step 12 PBR scheme) carries gloss in
     # red and metallic in alpha, replacing the shared static exponent. When
     # absent (legacy/auto-port), fall back to the shared texture so the VMT is
     # byte-identical to before.
-    phong = phongexp_texture or f"models/{author}/shared/phong_exp"
+    phong = phongexp_texture or f"{shared}/phong_exp"
     phong_fresnel = "[0.0 1.5 2]" if has_normal else "[0.0 0.5 1]"
     body = (
         "VertexLitGeneric\n"
@@ -3132,7 +3146,7 @@ def write_vmt(
         '\t$alphatest "1"\n'
         "\t$alphatestreference 0.5\n"
         '\t$allowalphatocoverage "1"\n'
-        f'\t$lightwarptexture "models/{author}/shared/lightwarptexture"\n'
+        f'\t$lightwarptexture "{shared}/lightwarptexture"\n'
         '\t$phong "1"\n'
         '\t$phongboost "1"\n'
         '\t$phongalbedotint "1"\n'
@@ -3154,6 +3168,7 @@ def write_vmt(
 def compose_materials(plan: dict[str, Any], addon_dir: Path) -> tuple[list[dict[str, Any]], list[str], list[str]]:
     author = str(plan["author"])
     model = str(plan["model_name"])
+    game = normalize_game(plan.get("game"))
     out_dir = addon_dir / "materials" / "models" / author / model
     out_dir.mkdir(parents=True, exist_ok=True)
     warnings: list[str] = []
@@ -3221,10 +3236,15 @@ def compose_materials(plan: dict[str, Any], addon_dir: Path) -> tuple[list[dict[
         except Exception as exc:
             warnings.append(str(exc))
         vmt = out_dir / f"{material_name}.vmt"
-        write_vmt(vmt, author, model, material_name, has_normal, phongexp_texture, selfillum_mask)
+        write_vmt(vmt, author, model, material_name, has_normal, phongexp_texture, selfillum_mask, game=game)
         files.append(file_row(vmt, "material_vmt"))
     shared_src = ROOT / "reference" / "li_zhiyan_npc" / "a_pack" / "materials" / "models" / "sheepylord" / "shared"
-    shared_dst = addon_dir / "materials" / "models" / author / "shared"
+    # Mirror l4d2_shared_material_root(): per-model for L4D2 (self-contained, no cross-addon
+    # conflict), author-level for GMod (byte-identical).
+    if game == "l4d2":
+        shared_dst = addon_dir / "materials" / "models" / author / model / "shared"
+    else:
+        shared_dst = addon_dir / "materials" / "models" / author / "shared"
     shared_dst.mkdir(parents=True, exist_ok=True)
     for name in ("lightwarptexture.vtf", "normal.vtf", "phong_exp.vtf"):
         src = shared_src / name
@@ -3801,6 +3821,36 @@ def copy_compiled_outputs_l4d2(game_dir: Path, addon_dir: Path, slot: str, has_a
     return files, errors
 
 
+def write_l4d2_addonimage(plan: dict[str, Any], addon_dir: Path) -> Path | None:
+    """Generate the L4D2 add-on thumbnail (addonimage.jpg) from the Step 13 release icon.
+
+    L4D2 shows ``addonimage.jpg`` (a 512x512 JPG, matching the workshop convention) as the add-on's
+    thumbnail in the Add-ons menu; without it the menu falls back to the generic red '4' placeholder.
+    Reuses the Step 13 icon output the user pointed at. Returns None (with the caller warning) if no
+    source icon or PIL is available -- the addon still works, just without a custom thumbnail."""
+    step13 = Path(str(plan.get("inputs", {}).get("step13_dir") or ""))
+    source = next(
+        (step13 / name for name in ("release_icon.png", "SPIC.png", "E.png", "E.jpg") if (step13 / name).exists()),
+        None,
+    )
+    if source is None:
+        return None
+    try:
+        from PIL import Image
+    except Exception:
+        return None
+    target = addon_dir / "addonimage.jpg"
+    try:
+        with Image.open(source) as image:
+            image = image.convert("RGB")
+            if image.size != (512, 512):
+                image = image.resize((512, 512), Image.LANCZOS)
+            image.save(target, "JPEG", quality=90)
+    except Exception:
+        return None
+    return target
+
+
 def write_l4d2_addoninfo(plan: dict[str, Any], addon_dir: Path) -> Path:
     """Write the L4D2 addoninfo.txt (the VPK addon manifest)."""
     slot = normalize_survivor(plan.get("survivor"))
@@ -4342,6 +4392,11 @@ def compose(plan_path: Path) -> dict[str, Any]:
         # MCI metadata / addon.json are skipped.
         addoninfo_path = write_l4d2_addoninfo(plan, addon_dir)
         generated_files.append(file_row(addoninfo_path, "addoninfo"))
+        addonimage_path = write_l4d2_addonimage(plan, addon_dir)
+        if addonimage_path is not None:
+            generated_files.append(file_row(addonimage_path, "addonimage"))
+        else:
+            warnings.append("Step 13 release icon not found; addon ships without addonimage.jpg (L4D2 shows the default thumbnail).")
         warnings.append("L4D2 survivor select-panel images (vgui/s_panel_<slot>*) are not generated yet.")
     else:
         icon_files, icon_warnings = compose_icons(plan, addon_dir)
