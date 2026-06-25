@@ -3723,6 +3723,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
         # defer all of it to the FIRST showEvent (event-driven, so it waits for the real show
         # regardless of machine speed) instead of firing singleShot(0) timers from the constructor.
         self._deferred_startup_started = False
+        self._install_sorting_on_read_only_tables()
         self.statusBar().showMessage(self._t("app.status.ready", "Ready"))
 
     def showEvent(self, event: QtGui.QShowEvent) -> None:
@@ -3762,6 +3763,137 @@ class ImporterWindow(QtWidgets.QMainWindow):
             BlenderSetupDialog(self).exec()
         except Exception:
             pass
+
+    # --- Click-to-sort table headers -------------------------------------------------------------
+    # Tables whose cells embed interactive editors (combo/spin cell widgets) OR whose itemChanged
+    # handler writes back to the underlying data by ROW index are EXCLUDED for now: a QTableWidget
+    # cannot reorder a cell widget without recreating it, and reordering item rows would make a later
+    # edit map to the wrong data row. They will get a proper rebuild-on-sort in a follow-up. Only the
+    # genuinely read-only display tables (the file lists, model manager, etc.) are wired here.
+    _SORT_EXCLUDED_TABLE_ATTRS = (
+        # cell-widget tables
+        "spine_table", "material_table", "texture_group_table",
+        "collision_bone_table", "qc_bone_table", "qc_physics_table",
+        # editable / itemChanged (row-coupled) tables
+        "sort_table", "material_merge_table", "bodygroup_table", "flex_table",
+        "collision_source_table", "collision_table", "vrd_table", "texture_table",
+        "release_translation_table",
+    )
+
+    def _install_sorting_on_read_only_tables(self) -> None:
+        """Enable click-to-sort headers on every read-only QTableWidget (see exclusion note above)."""
+        excluded = {getattr(self, name, None) for name in self._SORT_EXCLUDED_TABLE_ATTRS}
+        for table in self.findChildren(QtWidgets.QTableWidget):
+            if table in excluded:
+                continue
+            self._install_table_sorting(table)
+
+    def _install_table_sorting(self, table: QtWidgets.QTableWidget) -> None:
+        if table.property("_sort_installed"):
+            return
+        table.setProperty("_sort_installed", True)
+        table.setProperty("_sort_col", -1)
+        table.setProperty("_sort_dir", 0)  # 0 unsorted, 1 ascending, 2 descending
+        header = table.horizontalHeader()
+        header.setSectionsClickable(True)
+        header.sectionClicked.connect(lambda col, t=table: self._on_table_header_clicked(t, col))
+
+    def _on_table_header_clicked(self, table: QtWidgets.QTableWidget, col: int) -> None:
+        prev_col = table.property("_sort_col")
+        prev_col = int(prev_col) if prev_col is not None else -1
+        prev_dir = int(table.property("_sort_dir") or 0)
+        # New column -> ascending; same column -> cycle ascending -> descending -> reset.
+        direction = 1 if col != prev_col else {0: 1, 1: 2, 2: 0}[prev_dir]
+        table.setProperty("_sort_col", col)
+        table.setProperty("_sort_dir", direction)
+        self._apply_table_sort(table, col, direction)
+        header = table.horizontalHeader()
+        header.setSortIndicatorShown(direction != 0)
+        if direction == 1:
+            header.setSortIndicator(col, QtCore.Qt.SortOrder.AscendingOrder)
+        elif direction == 2:
+            header.setSortIndicator(col, QtCore.Qt.SortOrder.DescendingOrder)
+
+    @staticmethod
+    def _cell_is_checkbox(item: QtWidgets.QTableWidgetItem | None) -> bool:
+        # ItemIsUserCheckable is set on EVERY default QTableWidgetItem, so it cannot detect a real
+        # checkbox cell. A checkbox is only drawn when CheckStateRole has actually been set.
+        return item is not None and item.data(QtCore.Qt.ItemDataRole.CheckStateRole) is not None
+
+    @classmethod
+    def _table_cell_sort_text(cls, item: QtWidgets.QTableWidgetItem | None) -> str:
+        """Comparable text for a cell: real checkbox cells -> '0'/'1', otherwise the trimmed text."""
+        if item is None:
+            return ""
+        if cls._cell_is_checkbox(item):
+            return "1" if item.checkState() == QtCore.Qt.CheckState.Checked else "0"
+        return item.text().strip()
+
+    def _apply_table_sort(self, table: QtWidgets.QTableWidget, col: int, direction: int) -> None:
+        rows = table.rowCount()
+        cols = table.columnCount()
+        if rows == 0 or col < 0 or col >= cols:
+            return
+        # Cache the ORIGINAL row order (lists of item objects) so 'reset' can restore it. Re-capture
+        # if the cache is stale (table was repopulated -> cached items no longer belong to it).
+        orig = getattr(table, "_sort_original_rows", None)
+        valid = (
+            isinstance(orig, list)
+            and len(orig) == rows
+            and all((orig[r][0] is None) or (orig[r][0].tableWidget() is table) for r in range(rows))
+        )
+        if not valid:
+            orig = [[table.item(r, c) for c in range(cols)] for r in range(rows)]
+            table._sort_original_rows = orig
+
+        if direction == 0:
+            new_rows = list(orig)
+        else:
+            texts = [self._table_cell_sort_text(orig[r][col]) for r in range(rows)]
+
+            def _is_number(value: str) -> bool:
+                try:
+                    float(value.replace(",", ""))
+                    return True
+                except ValueError:
+                    return False
+
+            non_empty = [t for t in texts if t != ""]
+            bool_tokens = {"0", "1", "true", "false", "yes", "no"}
+            is_checkbox_col = any(self._cell_is_checkbox(orig[r][col]) for r in range(rows))
+            if is_checkbox_col or (non_empty and all(t.lower() in bool_tokens for t in non_empty)):
+                def key_of(value: str) -> object:
+                    return 1 if value.lower() in ("1", "true", "yes") else 0
+            elif non_empty and all(_is_number(t) for t in non_empty):
+                def key_of(value: str) -> object:
+                    return float(value.replace(",", ""))
+            else:
+                def key_of(value: str) -> object:
+                    return value.casefold()
+
+            populated = [r for r in range(rows) if texts[r] != ""]
+            blanks = [r for r in range(rows) if texts[r] == ""]
+            # Stable sort keeps equal keys (and ties on reverse) in original order; blanks always last.
+            populated.sort(key=lambda r: key_of(texts[r]), reverse=(direction == 2))
+            new_rows = [orig[r] for r in populated] + [orig[r] for r in blanks]
+
+        # Re-place the item objects in the new order. Block signals so the move does not fire
+        # itemChanged/selectionChanged storms, and re-apply the prior selection by logical item.
+        selected_first = None
+        sel = table.selectedItems()
+        if sel:
+            selected_first = sel[0]
+        blocker = QtCore.QSignalBlocker(table)  # noqa: F841 (unblocks on delete)
+        for r in range(rows):
+            for c in range(cols):
+                table.takeItem(r, c)
+        for new_r, row_items in enumerate(new_rows):
+            for c, item in enumerate(row_items):
+                if item is not None:
+                    table.setItem(new_r, c, item)
+        del blocker
+        if selected_first is not None and selected_first.tableWidget() is table:
+            table.setCurrentItem(selected_first)
 
     def apply_startup_geometry(self) -> None:
         app = QtWidgets.QApplication.instance()
