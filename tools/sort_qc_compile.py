@@ -953,6 +953,39 @@ def is_facial_flex_bone(name: str, node: SmdNode, nodes: dict[int, SmdNode]) -> 
     return essential_ancestor(node, nodes) == "ValveBiped.Bip01_Head1"
 
 
+def is_frontal_head_flex_bone(
+    node: SmdNode,
+    nodes: dict[int, SmdNode],
+    head_pos: tuple[float, float, float] | None,
+    direct_children: int,
+    front_margin: float,
+) -> bool:
+    """A childless bone sitting clearly in front of the head pivot (issue #103).
+
+    Structural counterpart to the name-based is_facial_flex_bone(): flex/
+    expression detail bones (eyes, mouth, teeth, tongue, cheeks and any unnamed
+    or localized facial helpers) live on the face -- in front of the Head1 pivot
+    -- and are leaf bones, because the source drives the face with flexes, not
+    bone chains. They must never become jigglebones, even when their names are
+    unrecognized. This catches the cases the token list misses.
+
+    "Front" is the -Y side of the head pivot in the standardized skeleton frame
+    (matching the $attachment "eyes"/"mouth" offsets and orientation_code()).
+    The caller scales front_margin to ~0.45x the neck->head length so genuine
+    facial bones (~1 head-radius forward) qualify while near-pivot side
+    accessories (earrings, short floating ribbons) do not. The caller also only
+    applies this to non-hinted bones, so named hair/ribbon/cloth (bangs included)
+    stay jiggle-eligible.
+    """
+    if direct_children != 0:
+        return False
+    if head_pos is None:
+        return False
+    if essential_ancestor(node, nodes) != "ValveBiped.Bip01_Head1":
+        return False
+    return node.global_pos[1] < head_pos[1] - front_margin
+
+
 def weighted_stats_from_smds(smds: list[SmdData], nodes: dict[int, SmdNode]) -> dict[str, dict[str, Any]]:
     stats: dict[str, dict[str, Any]] = {
         node.name: {"weighted_vertices": 0, "weight_sum": 0.0, "pos_sum": [0.0, 0.0, 0.0]}
@@ -1103,6 +1136,19 @@ def classify_jigglebones(nodes: dict[int, SmdNode], stats: dict[str, dict[str, A
     else:
         extent = 1.0
     near_threshold = max(0.18, extent * 0.012)
+    # Issue #103: stricter head jigglebone selection (both GMod and L4D2). A
+    # non-hinted childless bone must sit at least this far in front (toward the
+    # face, -Y) of the head pivot to be treated as a flex/expression bone. The
+    # margin scales to ~0.45x the neck->head length so genuine facial bones
+    # (eyes/mouth/teeth ~1 head-radius forward) qualify while near-pivot side
+    # accessories (earrings, short floating ribbons) are spared.
+    head_pos = landmarks.get("ValveBiped.Bip01_Head1")
+    neck_pos = landmarks.get("ValveBiped.Bip01_Neck1")
+    if head_pos is not None and neck_pos is not None:
+        head_scale = math.sqrt(sum((head_pos[i] - neck_pos[i]) ** 2 for i in range(3)))
+    else:
+        head_scale = extent * 0.05
+    front_margin = max(0.5, head_scale * 0.45)
     jiggle_hints = (
         "hair", "cape", "ribbon", "plait", "ear", "tail", "skirt", "sleeve", "cloth", "clothes",
         "coat", "robe", "dress", "collar", "belt", "chain", "boot", "breast", "butt", "chest",
@@ -1173,6 +1219,7 @@ def classify_jigglebones(nodes: dict[int, SmdNode], stats: dict[str, dict[str, A
                 warnings.append("Low-confidence jiggle classification; verify manually.")
             else:
                 confidence = 0.7
+        direct_children = direct_child_counts.get(node.index, 0)
         # Guard rail: flex-driven facial detail bones under Head1 (eyes/brows/
         # nose/tongue/teeth/lips/eyelids/mouth) never jiggle. Excluding
         # jiggle-hinted names (hint_hit) keeps real accessories such as hairclips
@@ -1182,7 +1229,19 @@ def classify_jigglebones(nodes: dict[int, SmdNode], stats: dict[str, dict[str, A
             jiggle_type = "Not Jiggle"
             reason = "flex-driven facial detail bone under Head1; never a jigglebone"
             confidence = 0.95
-        direct_children = direct_child_counts.get(node.index, 0)
+        # Guard rail (issue #103): structural flex-bone filter. A non-hinted
+        # childless bone clearly in front of the head pivot is a flex/expression
+        # helper even when its name is unrecognized or localized -- catches the
+        # cases the FACIAL_FLEX_TOKENS list above misses. Hinted bones (hair/
+        # bangs/ribbon/cloth) also sit in front but stay jiggle-eligible.
+        if (
+            jiggle_type != "Not Jiggle"
+            and not hint_hit
+            and is_frontal_head_flex_bone(node, nodes, head_pos, direct_children, front_margin)
+        ):
+            jiggle_type = "Not Jiggle"
+            reason = "flex-driven facial bone in front of head with no children; never a jigglebone"
+            confidence = 0.93
         if jiggle_type != "Not Jiggle" and direct_children > 4:
             jiggle_type = "Not Jiggle"
             reason = f"hub bone with {direct_children} direct children (more than 4); defaulted to no jiggle"
