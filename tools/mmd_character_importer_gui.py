@@ -99,14 +99,17 @@ LANGUAGE_OPTIONS = [
 ]
 GMOD_ICON_PATH = ROOT_DIR / "tools" / "assets" / "Garry's_Mod_logo.png"
 L4D2_ICON_PATH = ROOT_DIR / "tools" / "assets" / "L4D2_Icon.png"
+SFM_ICON_PATH = ROOT_DIR / "tools" / "assets" / "SFM.png"
 # (code, display, icon_path). Display names are proper nouns and are not translated.
 GAME_OPTIONS = [
     ("gmod", "Garry's Mod", GMOD_ICON_PATH),
     ("l4d2", "Left 4 Dead 2", L4D2_ICON_PATH),
+    ("sfm", "Source Filmmaker", SFM_ICON_PATH),
 ]
 GAME_CODES = {code for code, _display, _icon in GAME_OPTIONS}
 # Per-game Step 4 bone budget; mirrors blender_sort_bones.GAME_BONE_LIMITS.
-GAME_BONE_LIMITS = {"gmod": 254, "l4d2": 126}
+# SFM uses the same skeleton/pipeline as GMod (254-bone budget).
+GAME_BONE_LIMITS = {"gmod": 254, "l4d2": 126, "sfm": 254}
 # L4D2 survivors the model can be ported onto. In L4D2 mode this dropdown
 # replaces the gender selector; the choice drives the Step 9 proportion target.
 # (code = compiled survivor .mdl stem; default Rochelle/producer.)
@@ -2809,6 +2812,7 @@ class FullImportWorker(QtCore.QThread):
         bodygroup_scale_factor: float = float(getattr(core, "DEFAULT_BODYGROUP_SCALE_FACTOR", 40.457)),
         game: str = "gmod",
         survivor: str = "producer",
+        copy_to_sfm_usermod: bool = True,
     ) -> None:
         super().__init__()
         self.pmx_path = Path(pmx_path)
@@ -2826,6 +2830,7 @@ class FullImportWorker(QtCore.QThread):
         self.gender = "male" if str(gender or "").strip().lower() == "male" else "female"
         self.game = normalize_game_code(game)
         self.survivor = normalize_survivor_code(survivor)
+        self.copy_to_sfm_usermod = bool(copy_to_sfm_usermod)
         self.bodygroup_scale_factor = float(bodygroup_scale_factor or getattr(core, "DEFAULT_BODYGROUP_SCALE_FACTOR", 40.457))
         self.cancel_requested = False
         self.step_results: dict[int, dict[str, object]] = {}
@@ -3033,37 +3038,48 @@ class FullImportWorker(QtCore.QThread):
             self._write_marker(7, flex_result.flex_dir, outputs={"blend": str(flex_result.output_blend), "flexes_json": str(flex_result.flexes_json_path)}, report_path=flex_result.report_path)
             self.step_results[7] = {"blend": str(flex_result.output_blend), "report": str(flex_result.report_path), "dir": str(flex_result.flex_dir)}
 
-            self._stage(8, "Sort Collision", str(flex_result.output_blend))
-            collision_analysis = core.analyze_collision_blend(
-                flex_result.output_blend,
-                source_bodygroups=None,
-                quality_preset=self.collision_quality,
-                progress=self._log,
-                cancel_check=self._cancelled,
-            )
-            collision_result = core.sort_collision_blend(flex_result.output_blend, collision_analysis.plan, progress=self._log, cancel_check=self._cancelled)
-            self._require_clean_report(8, collision_result.report, "collision generation")
-            self._write_marker(
-                8,
-                collision_result.collision_dir,
-                outputs={"blend": str(collision_result.output_blend), "physics_smd": str(collision_result.physics_smd_path), "physics_settings": str(collision_result.physics_settings_path)},
-                report_path=collision_result.report_path,
-            )
-            self.step_results[8] = {"blend": str(collision_result.output_blend), "report": str(collision_result.report_path), "dir": str(collision_result.collision_dir)}
+            # Step 8 (collision/physics) is not used for SFM (no ragdoll/physics); Step 9 then
+            # runs directly on the Step 7 flex output.
+            if self.game == "sfm":
+                self._log("Skipping Step 8 (Sort Collision): not required for Source Filmmaker.")
+                step9_input_blend = flex_result.output_blend
+            else:
+                self._stage(8, "Sort Collision", str(flex_result.output_blend))
+                collision_analysis = core.analyze_collision_blend(
+                    flex_result.output_blend,
+                    source_bodygroups=None,
+                    quality_preset=self.collision_quality,
+                    progress=self._log,
+                    cancel_check=self._cancelled,
+                )
+                collision_result = core.sort_collision_blend(flex_result.output_blend, collision_analysis.plan, progress=self._log, cancel_check=self._cancelled)
+                self._require_clean_report(8, collision_result.report, "collision generation")
+                self._write_marker(
+                    8,
+                    collision_result.collision_dir,
+                    outputs={"blend": str(collision_result.output_blend), "physics_smd": str(collision_result.physics_smd_path), "physics_settings": str(collision_result.physics_settings_path)},
+                    report_path=collision_result.report_path,
+                )
+                self.step_results[8] = {"blend": str(collision_result.output_blend), "report": str(collision_result.report_path), "dir": str(collision_result.collision_dir)}
+                step9_input_blend = collision_result.output_blend
 
-            self._stage(9, "Export Proportion Trick", str(collision_result.output_blend))
-            proportion_result = core.run_proportion_export(collision_result.output_blend, remove_zero_weight_bones=True, progress=self._log, cancel_check=self._cancelled, game=self.game, survivor=self.survivor)
+            self._stage(9, "Export Proportion Trick", str(step9_input_blend))
+            proportion_result = core.run_proportion_export(step9_input_blend, remove_zero_weight_bones=True, progress=self._log, cancel_check=self._cancelled, game=self.game, survivor=self.survivor)
             self._require_clean_report(9, proportion_result.report, "proportion export")
             self._write_marker(9, proportion_result.proportion_dir, outputs={"final_dir": str(proportion_result.final_dir), "files": str(proportion_result.files_path)}, report_path=proportion_result.report_path)
             self.step_results[9] = {"final_dir": str(proportion_result.final_dir), "report": str(proportion_result.report_path), "dir": str(proportion_result.proportion_dir)}
 
-            def run_carms() -> None:
-                carms = core.run_carms_sort(proportion_result.final_dir, progress=self._log, cancel_check=self._cancelled)
-                self._require_clean_report(10, carms.report, "c_arms sort")
-                self._write_marker(10, carms.carms_dir, outputs={"files": str(carms.files_path)}, report_path=carms.report_path)
-                self.step_results[10] = {"dir": str(carms.carms_dir), "report": str(carms.report_path), "files": str(carms.files_path)}
+            # Step 10 (c_arms) is not used for SFM (no first-person view arms).
+            if self.game == "sfm":
+                self._log("Skipping Step 10 (Sort c_arms): not required for Source Filmmaker.")
+            else:
+                def run_carms() -> None:
+                    carms = core.run_carms_sort(proportion_result.final_dir, progress=self._log, cancel_check=self._cancelled)
+                    self._require_clean_report(10, carms.report, "c_arms sort")
+                    self._write_marker(10, carms.carms_dir, outputs={"files": str(carms.files_path)}, report_path=carms.report_path)
+                    self.step_results[10] = {"dir": str(carms.carms_dir), "report": str(carms.report_path), "files": str(carms.files_path)}
 
-            self._optional(10, "Sort c_arms", run_carms)
+                self._optional(10, "Sort c_arms", run_carms)
 
             def run_vrd() -> None:
                 vrd_analysis = core.analyze_vrd(proportion_result.final_dir, progress=self._log, cancel_check=self._cancelled)
@@ -3121,6 +3137,7 @@ class FullImportWorker(QtCore.QThread):
             qc_plan["category_readable"] = self.category_display_name
             qc_plan["display_name"] = self.model_display_name
             qc_plan["copy_to_gmod_addons"] = True
+            qc_plan["copy_to_sfm_usermod"] = bool(self.copy_to_sfm_usermod)
             qc_plan["distribution_output_dir"] = self.distribution_output_dir
             qc_result = core.compile_and_compose_qc(proportion_result.final_dir, qc_plan, progress=self._log, cancel_check=self._cancelled)
             validation = qc_result.report.get("validation") if isinstance(qc_result.report.get("validation"), dict) else {}
@@ -4058,7 +4075,8 @@ class ImporterWindow(QtWidgets.QMainWindow):
             combo.addItem(game_icon(icon_path), display, code)
         combo.setToolTip(
             "Target game for porting. Garry's Mod is the default pipeline; "
-            "Left 4 Dead 2 retargets the bone limit and StudioMDL detection."
+            "Left 4 Dead 2 retargets the bone limit and StudioMDL detection; "
+            "Source Filmmaker compiles a posed SFM model with loose usermod files + a .vpk."
         )
         index = combo.findData(self.selected_game)
         if index >= 0:
@@ -4123,29 +4141,65 @@ class ImporterWindow(QtWidgets.QMainWindow):
             self._load_studiomdl_paths_for_game()
 
     def _refresh_gmod_only_visibility(self) -> None:
-        """Hide GMod-only surfaces when L4D2 is the target: the RTX Remix vertex-limit option
-        (a GMod-only rendering path) and the Model Manager tab (which manages garrysmod/addons
-        folders; L4D2 ports ship as a single .vpk with no such folder to scan)."""
-        l4d2 = getattr(self, "selected_game", "gmod") == "l4d2"
+        """Hide surfaces that don't apply to the selected target game.
+
+        GMod-only (hidden for L4D2 and SFM): the RTX Remix vertex-limit option (a GMod-only
+        rendering path) and the Model Manager tab (manages garrysmod/addons folders; L4D2 ships
+        a single .vpk and SFM ships loose usermod files -- neither has such a folder to scan).
+        SFM additionally skips Step 8 (collision/physics) and Step 10 (c_arms), so those tabs are
+        hidden in SFM mode."""
+        game = getattr(self, "selected_game", "gmod")
+        gmod = game == "gmod"
+        sfm = game == "sfm"
         for attr in ("main_rtx_bodygroup_limit_check", "bodygroup_rtx_limit_check", "release_rtx_link_edit"):
             widget = getattr(self, attr, None)
             if isinstance(widget, QtWidgets.QWidget):
-                widget.setVisible(not l4d2)
+                widget.setVisible(gmod)
         rtx_label = (getattr(self, "main_form_labels", {}) or {}).get("rtx_vertex_limit")
         if isinstance(rtx_label, QtWidgets.QWidget):
-            rtx_label.setVisible(not l4d2)
+            rtx_label.setVisible(gmod)
         tabs = getattr(self, "tabs", None)
-        manager_tab = getattr(self, "model_manager_tab", None)
-        if tabs is not None and manager_tab is not None:
-            manager_index = self.tab_index_for_content_widget(manager_tab)
-            if manager_index is not None and manager_index >= 0:
+        # (content widget attr, visible-for-this-game predicate)
+        conditional_tabs = [
+            (getattr(self, "model_manager_tab", None), gmod),   # GMod-only
+            (getattr(self, "collision_tab", None), not sfm),    # Step 8: not run for SFM
+            (getattr(self, "carms_tab", None), not sfm),        # Step 10: not run for SFM
+        ]
+        if tabs is not None:
+            for content_widget, visible in conditional_tabs:
+                if content_widget is None:
+                    continue
+                index = self.tab_index_for_content_widget(content_widget)
+                if index is None or index < 0:
+                    continue
                 try:
-                    tabs.setTabVisible(manager_index, not l4d2)
+                    tabs.setTabVisible(index, visible)
                 except AttributeError:
-                    tabs.tabBar().setTabVisible(manager_index, not l4d2)
-                if l4d2 and tabs.currentIndex() == manager_index:
+                    tabs.tabBar().setTabVisible(index, visible)
+                if not visible and tabs.currentIndex() == index:
                     main_index = self.tab_index_for_content_widget(getattr(self, "main_tab", None))
                     tabs.setCurrentIndex(max(0, main_index))
+        # Show exactly one post-compile install row for the selected game: the addons-install
+        # checkbox for GMod/L4D2, the usermod-install checkbox for SFM.
+        install_form = getattr(self, "qc_install_form", None)
+        if install_form is not None:
+            for check, visible in (
+                (getattr(self, "qc_copy_to_gmod_addons_check", None), not sfm),
+                (getattr(self, "qc_copy_to_sfm_usermod_check", None), sfm),
+            ):
+                if check is None:
+                    continue
+                check.setVisible(visible)
+                label = install_form.labelForField(check)
+                if label is not None:
+                    label.setVisible(visible)
+        # Mirror the same one-row-per-game rule on the main (auto-port) tab.
+        main_sfm_check = getattr(self, "main_copy_to_sfm_usermod_check", None)
+        if isinstance(main_sfm_check, QtWidgets.QWidget):
+            main_sfm_check.setVisible(sfm)
+        main_sfm_label = getattr(self, "main_copy_to_sfm_usermod_label", None)
+        if isinstance(main_sfm_label, QtWidgets.QWidget):
+            main_sfm_label.setVisible(sfm)
 
     def _studiomdl_setting_key(self, base: str, game: str | None = None) -> str:
         """Per-game QSettings key for a studiomdl/install path. GMod keeps the legacy key for
@@ -4606,10 +4660,11 @@ class ImporterWindow(QtWidgets.QMainWindow):
         return self._apply_game_brand(text)
 
     def _apply_game_brand(self, text: str) -> str:
-        """In L4D2 mode, relabel the GMod / Garry's Mod brand tokens in user-visible text to
-        L4D2 / Left 4 Dead 2 so the interface matches the selected target game. Applied centrally
-        to every string that flows through _t()/translate_static_text()/translate_runtime_text(),
-        so buttons, labels, tab titles, dialog titles and messages all relabel together.
+        """In L4D2/SFM mode, relabel the GMod / Garry's Mod brand tokens in user-visible text to
+        the selected target game (L4D2 / Left 4 Dead 2, or SFM / Source Filmmaker) so the interface
+        matches it. Applied centrally to every string that flows through
+        _t()/translate_static_text()/translate_runtime_text(), so buttons, labels, tab titles,
+        dialog titles and messages all relabel together.
 
         Deliberately CASE-SENSITIVE and brand-token-only: it never touches lowercase path
         literals ('garrysmod/addons'), output-folder names ('GarrysMod'), or internal settings keys
@@ -4619,7 +4674,8 @@ class ImporterWindow(QtWidgets.QMainWindow):
         repo (the actual repo is NOT renamed). A few strings that intentionally name BOTH games (the
         game selector's own option label + explainer tooltips) or describe the GMod-only RTX Remix
         path are left exactly as authored."""
-        if not text or getattr(self, "selected_game", "gmod") != "l4d2":
+        game = getattr(self, "selected_game", "gmod")
+        if not text or game not in ("l4d2", "sfm"):
             return text
         if (
             text == "Garry's Mod"
@@ -4628,12 +4684,13 @@ class ImporterWindow(QtWidgets.QMainWindow):
             or "Garry's Mod is the default" in text
         ):
             return text
+        full_name, short_name = ("Source Filmmaker", "SFM") if game == "sfm" else ("Left 4 Dead 2", "L4D2")
 
         def _swap(segment: str) -> str:
             return (
-                segment.replace("Garry's Mod", "Left 4 Dead 2")
-                .replace("GMod", "L4D2")
-                .replace("Gmod", "L4D2")
+                segment.replace("Garry's Mod", full_name)
+                .replace("GMod", short_name)
+                .replace("Gmod", short_name)
             )
 
         # Split on http(s) URLs and rewrite only the text BETWEEN them, so a "Gmod"/"GMod" token
@@ -6013,6 +6070,16 @@ class ImporterWindow(QtWidgets.QMainWindow):
         main_clear_custom_normals_layout.addWidget(self.main_clear_custom_normals_check)
         main_clear_custom_normals_layout.addWidget(self.main_clear_custom_normals_hint)
         form.addRow(self.main_form_labels["clear_custom_normals"], main_clear_custom_normals_box)
+        # SFM-only auto-port option (shown only in SFM mode by _refresh_gmod_only_visibility).
+        self.main_copy_to_sfm_usermod_check = QtWidgets.QCheckBox("Put into SFM usermod (loose files)")
+        self.main_copy_to_sfm_usermod_check.setChecked(True)
+        self.main_copy_to_sfm_usermod_check.setToolTip(
+            "Default on. After the auto-port compile, copy the loose model + materials into the detected "
+            "Source Filmmaker game/usermod folder. A distribution folder and a .vpk are always also written."
+        )
+        self.main_copy_to_sfm_usermod_label = QtWidgets.QLabel("SFM usermod install")
+        form.addRow(self.main_copy_to_sfm_usermod_label, self.main_copy_to_sfm_usermod_check)
+        self.main_copy_to_sfm_usermod_check.toggled.connect(lambda _value: self.save_settings())
         layout.addLayout(form)
         layout.addWidget(self.main_gmod_row)
 
@@ -8536,6 +8603,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
         self.collision_outputs_toggle.toggled.connect(self.set_collision_outputs_visible)
         self.collision_log_toggle.toggled.connect(self.set_collision_log_visible)
 
+        self.collision_tab = tab
         self.tabs.addTab(tab, "8 Sort Collision")
 
     def _build_proportion_tab(self) -> None:
@@ -9581,6 +9649,12 @@ class ImporterWindow(QtWidgets.QMainWindow):
         self.qc_copy_to_gmod_addons_check.setToolTip(
             "Default on. After compile, mirror the composed addon folder into garrysmod/addons under the detected GMod install."
         )
+        self.qc_copy_to_sfm_usermod_check = QtWidgets.QCheckBox("Put into SFM usermod (loose files)")
+        self.qc_copy_to_sfm_usermod_check.setChecked(True)
+        self.qc_copy_to_sfm_usermod_check.setToolTip(
+            "Default on. After compile, copy the loose model + materials into the detected Source Filmmaker "
+            "game/usermod folder. A distribution folder and a .vpk are always also written to the output folder."
+        )
         self.qc_include_mci_metadata_check = QtWidgets.QCheckBox("Include MMD Character Importer metadata JSON")
         self.qc_include_mci_metadata_check.setChecked(True)
         self.qc_include_mci_metadata_check.setToolTip(
@@ -9597,7 +9671,10 @@ class ImporterWindow(QtWidgets.QMainWindow):
         settings.addRow(self.qc_character_label, self._make_character_field(self.qc_character_label))
         settings.addRow("Jiggle direction", self.qc_invert_jiggle_check)
         settings.addRow("GMod addons install", self.qc_copy_to_gmod_addons_check)
+        settings.addRow("SFM usermod install", self.qc_copy_to_sfm_usermod_check)
         settings.addRow("MCI metadata JSON", self.qc_include_mci_metadata_check)
+        # Stored so _refresh_gmod_only_visibility() can show exactly one install row per game.
+        self.qc_install_form = settings
         settings.addRow("Output folder", self._output_folder_row(self.qc_output_edit))
         detect_row = QtWidgets.QHBoxLayout()
         self.detect_qc_outputs_button = QtWidgets.QPushButton("Detect Step Outputs")
@@ -9938,6 +10015,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
         self.qc_model_display_edit.textChanged.connect(lambda _value: self.save_settings())
         self.qc_invert_jiggle_check.toggled.connect(self.on_qc_invert_jiggle_toggled)
         self.qc_copy_to_gmod_addons_check.toggled.connect(lambda _value: self.save_settings())
+        self.qc_copy_to_sfm_usermod_check.toggled.connect(lambda _value: self.save_settings())
         self.qc_include_mci_metadata_check.toggled.connect(self.on_qc_include_mci_metadata_toggled)
         self.detect_qc_outputs_button.clicked.connect(self.detect_qc_step_outputs)
         self.detect_qc_gmod_button.clicked.connect(self.detect_gmod_for_qc)
@@ -10294,6 +10372,13 @@ class ImporterWindow(QtWidgets.QMainWindow):
             main_gmod = str(self.settings_store.value(self._studiomdl_setting_key("qc_gmod_path"), "", str) or "")
         if main_gmod and hasattr(self, "main_gmod_row"):
             self.main_gmod_row.set_value(main_gmod)
+        if hasattr(self, "main_copy_to_sfm_usermod_check"):
+            raw_main_sfm = self.settings_store.value("main_copy_to_sfm_usermod", True)
+            self.main_copy_to_sfm_usermod_check.setChecked(
+                raw_main_sfm.strip().lower() not in {"0", "false", "no", "off"}
+                if isinstance(raw_main_sfm, str)
+                else bool(raw_main_sfm)
+            )
         # Model Manager is GMod-only, so it always reads the GMod (legacy) studiomdl path.
         model_manager_gmod = str(self.settings_store.value("model_manager_gmod_path", "", str) or "")
         if not model_manager_gmod:
@@ -10415,6 +10500,13 @@ class ImporterWindow(QtWidgets.QMainWindow):
             else:
                 copy_to_addons = bool(raw_copy)
             self.qc_copy_to_gmod_addons_check.setChecked(copy_to_addons)
+        if hasattr(self, "qc_copy_to_sfm_usermod_check"):
+            raw_sfm = self.settings_store.value("qc_copy_to_sfm_usermod", True)
+            if isinstance(raw_sfm, str):
+                copy_to_usermod = raw_sfm.strip().lower() not in {"0", "false", "no", "off"}
+            else:
+                copy_to_usermod = bool(raw_sfm)
+            self.qc_copy_to_sfm_usermod_check.setChecked(copy_to_usermod)
         if hasattr(self, "qc_include_mci_metadata_check"):
             raw_metadata = self.settings_store.value("qc_include_mci_metadata_json", True)
             if isinstance(raw_metadata, str):
@@ -10564,6 +10656,8 @@ class ImporterWindow(QtWidgets.QMainWindow):
                 self.settings_store.setValue("main_pmx_path", str(pmx))
         if hasattr(self, "main_gmod_row"):
             self.settings_store.setValue(self._studiomdl_setting_key("main_gmod_path"), self.main_gmod_row.value())
+        if hasattr(self, "main_copy_to_sfm_usermod_check"):
+            self.settings_store.setValue("main_copy_to_sfm_usermod", self.main_copy_to_sfm_usermod_check.isChecked())
         if hasattr(self, "model_manager_gmod_row"):
             self.settings_store.setValue("model_manager_gmod_path", self.model_manager_gmod_row.value())
         if hasattr(self, "main_model_name_edit"):
@@ -10665,6 +10759,8 @@ class ImporterWindow(QtWidgets.QMainWindow):
             self.settings_store.setValue("qc_invert_jiggle_direction", self.qc_invert_jiggle_check.isChecked())
         if hasattr(self, "qc_copy_to_gmod_addons_check"):
             self.settings_store.setValue("qc_copy_to_gmod_addons", self.qc_copy_to_gmod_addons_check.isChecked())
+        if hasattr(self, "qc_copy_to_sfm_usermod_check"):
+            self.settings_store.setValue("qc_copy_to_sfm_usermod", self.qc_copy_to_sfm_usermod_check.isChecked())
         if hasattr(self, "qc_include_mci_metadata_check"):
             self.settings_store.setValue("qc_include_mci_metadata_json", self.qc_include_mci_metadata_check.isChecked())
         if hasattr(self, "release_input_row"):
@@ -11211,27 +11307,83 @@ class ImporterWindow(QtWidgets.QMainWindow):
                 return str(resolved.get("display") or candidate)
         return ""
 
+    def find_sfm_candidate(self) -> str:
+        candidates: list[Path] = []
+        raw = (
+            os.environ.get("STUDIOMDL", "")
+            or os.environ.get("SFM_PATH", "")
+            or os.environ.get("SOURCEFILMMAKER_PATH", "")
+        )
+        if raw:
+            path = Path(raw)
+            candidates.append(path)
+            if path.is_dir():
+                candidates.append(path / "game" / "bin" / "studiomdl.exe")
+                candidates.append(path / "bin" / "studiomdl.exe")
+        steam_dir = core._find_steam_dir()
+        if steam_dir:
+            for lib in core._find_steam_library_folders(steam_dir):
+                base = lib / "steamapps" / "common" / "SourceFilmmaker"
+                candidates.append(base / "game" / "bin" / "studiomdl.exe")
+        candidates.append(Path("C:/Program Files (x86)/Steam/steamapps/common/SourceFilmmaker/game/bin/studiomdl.exe"))
+        seen: set[Path] = set()
+        for candidate in candidates:
+            candidate = safe_resolve_path(candidate)
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            resolved = resolve_gmod_path_input(str(candidate))
+            if resolved.get("ok"):
+                return str(resolved.get("display") or candidate)
+        return ""
+
     def find_game_studiomdl_candidate(self) -> str:
         """Auto-find the StudioMDL for the currently selected target game."""
-        if getattr(self, "selected_game", "gmod") == "l4d2":
+        game = getattr(self, "selected_game", "gmod")
+        if game == "l4d2":
             return self.find_l4d2_candidate()
+        if game == "sfm":
+            return self.find_sfm_candidate()
         return self.find_gmod_candidate()
 
+    # Folder-name markers that identify each target game's install, used to spot a
+    # studiomdl path saved for a DIFFERENT game than the one currently selected.
+    _GAME_PATH_MARKERS = {
+        "gmod": ("garrysmod",),
+        "l4d2": ("left 4 dead 2", "left4dead2"),
+        "sfm": ("sourcefilmmaker", "source filmmaker"),
+    }
+
+    def _selected_game_studiomdl_label(self) -> str:
+        return {"l4d2": "Left 4 Dead 2", "sfm": "Source Filmmaker"}.get(
+            getattr(self, "selected_game", "gmod"), "GMod"
+        )
+
+    def _selected_game_browse_hint(self) -> str:
+        return {
+            "l4d2": "Browse to 'Left 4 Dead 2/bin/studiomdl.exe'",
+            "sfm": "Browse to 'SourceFilmmaker/game/bin/studiomdl.exe'",
+        }.get(getattr(self, "selected_game", "gmod"), "Browse to garrysmod/bin/studiomdl.exe")
+
     def _studiomdl_path_is_wrong_game(self, resolved: dict[str, object]) -> bool:
-        """True when an already-resolved studiomdl/install path clearly belongs to the
-        OTHER target game than the one currently selected. Used so the Detect button
+        """True when an already-resolved studiomdl/install path clearly belongs to a
+        DIFFERENT target game than the one currently selected. Used so the Detect button
         re-finds the correct game's studiomdl instead of silently keeping a stale path
-        from the other game (e.g. a saved Garry's Mod path while L4D2 is selected).
-        Custom/ambiguous paths that match neither game's folder are left untouched."""
+        from another game (e.g. a saved Garry's Mod path while L4D2/SFM is selected).
+        Custom/ambiguous paths that match no game's folder are left untouched."""
         blob = " ".join(
             str(resolved.get(key) or "") for key in ("display", "studiomdl", "gmod_root", "input")
         ).lower()
-        if getattr(self, "selected_game", "gmod") == "l4d2":
-            return "garrysmod" in blob
-        return "left 4 dead 2" in blob or "left4dead2" in blob
+        game = getattr(self, "selected_game", "gmod")
+        for other, markers in self._GAME_PATH_MARKERS.items():
+            if other == game:
+                continue
+            if any(marker in blob for marker in markers):
+                return True
+        return False
 
     def detect_gmod_for_main(self) -> None:
-        game_label = "Left 4 Dead 2" if self.selected_game == "l4d2" else "GMod"
+        game_label = self._selected_game_studiomdl_label()
         current = resolve_gmod_path_input(self.main_gmod_row.value() if hasattr(self, "main_gmod_row") else "")
         if current.get("ok") and not self._studiomdl_path_is_wrong_game(current):
             found = str(current.get("display") or "")
@@ -11248,11 +11400,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
         detail = str(current.get("error") or "").strip()
         if detail and self.main_gmod_row.value().strip():
             detail = "\n\nCurrent path is not usable:\n" + detail
-        browse_hint = (
-            "Browse to 'Left 4 Dead 2/bin/studiomdl.exe'"
-            if self.selected_game == "l4d2"
-            else "Browse to garrysmod/bin/studiomdl.exe"
-        )
+        browse_hint = self._selected_game_browse_hint()
         self.show_error(
             f"Detect {game_label}",
             f"Could not find {game_label} StudioMDL. {browse_hint} or set STUDIOMDL." + detail,
@@ -11739,6 +11887,11 @@ class ImporterWindow(QtWidgets.QMainWindow):
             bodygroup_scale_factor=self.main_effective_bodygroup_scale(),
             game=self.selected_game,
             survivor=self.current_selected_survivor(),
+            copy_to_sfm_usermod=(
+                self.main_copy_to_sfm_usermod_check.isChecked()
+                if hasattr(self, "main_copy_to_sfm_usermod_check")
+                else True
+            ),
         )
         self.worker.log.connect(self.append_main_log)
         self.worker.progress.connect(self.set_main_progress)
@@ -21681,7 +21834,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
         self.show_error("Detect Step Outputs", "No Step 9 proportion export folder was found. Run Step 9 or browse to 2_proportion_export.")
 
     def detect_gmod_for_qc(self) -> None:
-        game_label = "Left 4 Dead 2" if self.selected_game == "l4d2" else "GMod"
+        game_label = self._selected_game_studiomdl_label()
         current = resolve_gmod_path_input(self.qc_gmod_row.value() if hasattr(self, "qc_gmod_row") else "")
         if current.get("ok") and not self._studiomdl_path_is_wrong_game(current):
             found = str(current.get("display") or "")
@@ -21698,11 +21851,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
         detail = str(current.get("error") or "").strip()
         if detail and self.qc_gmod_row.value().strip():
             detail = "\n\nCurrent path is not usable:\n" + detail
-        browse_hint = (
-            "Browse to 'Left 4 Dead 2/bin/studiomdl.exe'"
-            if self.selected_game == "l4d2"
-            else "Browse to garrysmod/bin/studiomdl.exe"
-        )
+        browse_hint = self._selected_game_browse_hint()
         self.show_error(
             f"Detect {game_label}",
             f"Could not find {game_label} StudioMDL. {browse_hint} or set STUDIOMDL." + detail,
@@ -22240,6 +22389,9 @@ class ImporterWindow(QtWidgets.QMainWindow):
         plan["copy_to_gmod_addons"] = (
             bool(self.qc_copy_to_gmod_addons_check.isChecked()) if hasattr(self, "qc_copy_to_gmod_addons_check") else False
         )
+        plan["copy_to_sfm_usermod"] = (
+            bool(self.qc_copy_to_sfm_usermod_check.isChecked()) if hasattr(self, "qc_copy_to_sfm_usermod_check") else True
+        )
         plan["include_mci_metadata_json"] = (
             bool(self.qc_include_mci_metadata_check.isChecked()) if hasattr(self, "qc_include_mci_metadata_check") else True
         )
@@ -22290,6 +22442,9 @@ class ImporterWindow(QtWidgets.QMainWindow):
             plan["distribution_output_dir"] = selected_output
             plan["copy_to_gmod_addons"] = (
                 bool(self.qc_copy_to_gmod_addons_check.isChecked()) if hasattr(self, "qc_copy_to_gmod_addons_check") else False
+            )
+            plan["copy_to_sfm_usermod"] = (
+                bool(self.qc_copy_to_sfm_usermod_check.isChecked()) if hasattr(self, "qc_copy_to_sfm_usermod_check") else True
             )
             plan["include_mci_metadata_json"] = (
                 bool(self.qc_include_mci_metadata_check.isChecked()) if hasattr(self, "qc_include_mci_metadata_check") else True

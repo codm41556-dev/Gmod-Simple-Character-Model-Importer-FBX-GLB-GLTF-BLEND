@@ -3461,7 +3461,7 @@ def analyze_sort_bones_blend(
         str(_resolve_sort_bones_limit(limit, game)),
     ]
     # Only L4D2 adds --game so the GMod command line stays byte-identical.
-    if game != "gmod":
+    if game == "l4d2":
         command += ["--game", game]
     emit(progress, f"Starting Blender sort bones analysis: {input_blend}")
     started = time.monotonic()
@@ -3544,7 +3544,7 @@ def sort_bones_blend(
         str(_resolve_sort_bones_limit(limit, game)),
     ]
     # Only L4D2 adds --game so the GMod command line stays byte-identical.
-    if game != "gmod":
+    if game == "l4d2":
         command += ["--game", game]
     emit(progress, f"Starting Blender sort bones step: {input_blend}")
     started = time.monotonic()
@@ -4006,7 +4006,7 @@ def analyze_flexes_blend(
         str(plan_path),
     ]
     # Only L4D2 adds --game so the GMod flex-analyze command stays byte-identical.
-    if game != "gmod":
+    if game == "l4d2":
         command += ["--game", game]
     emit(progress, f"Starting Blender flex analysis: {input_blend}")
     started = time.monotonic()
@@ -5366,9 +5366,13 @@ def analyze_qc(
         command.extend(["--studiomdl", studiomdl_path])
     if str(gender or "").strip().lower() == "male":
         command.extend(["--gender", "male"])
-    # Only L4D2 adds --game/--survivor so the GMod analyze command stays byte-identical.
-    if str(game or "").strip().lower() == "l4d2":
+    # Only L4D2/SFM add --game so the GMod analyze command stays byte-identical;
+    # L4D2 also adds --survivor (SFM has no survivor slot).
+    target_game = str(game or "").strip().lower()
+    if target_game == "l4d2":
         command.extend(["--game", "l4d2", "--survivor", str(survivor or DEFAULT_L4D2_SURVIVOR)])
+    elif target_game == "sfm":
+        command.extend(["--game", "sfm"])
     emit(progress, f"Starting Step 14 QC analysis: {final_dir}")
     started = time.monotonic()
     run_process_streamed(command, progress=progress, log_path=log_path, cancel_check=cancel_check)
@@ -5637,14 +5641,14 @@ def main(argv: list[str] | None = None) -> int:
     sort_analyze_parser = subparsers.add_parser("sort-bones-analyze", help="analyze and propose bone merges for the Source bone limit")
     sort_analyze_parser.add_argument("spine_fixed_blend", type=Path)
     sort_analyze_parser.add_argument("--limit", type=int, default=None)
-    sort_analyze_parser.add_argument("--game", choices=("gmod", "l4d2"), default="gmod")
+    sort_analyze_parser.add_argument("--game", choices=("gmod", "l4d2", "sfm"), default="gmod")
 
     sort_parser = subparsers.add_parser("sort-bones", help="apply a proposed bone merge plan")
     sort_parser.add_argument("spine_fixed_blend", type=Path)
     sort_parser.add_argument("--plan-json", type=Path, required=True)
     sort_parser.add_argument("--output-blend", type=Path)
     sort_parser.add_argument("--limit", type=int, default=None)
-    sort_parser.add_argument("--game", choices=("gmod", "l4d2"), default="gmod")
+    sort_parser.add_argument("--game", choices=("gmod", "l4d2", "sfm"), default="gmod")
 
     material_scan_parser = subparsers.add_parser("materials-scan", help="scan materials and propose cleanup/combine plan")
     material_scan_parser.add_argument("bones_sorted_blend", type=Path)
@@ -5685,7 +5689,7 @@ def main(argv: list[str] | None = None) -> int:
 
     flex_analyze_parser = subparsers.add_parser("flexes-analyze", help="analyze and propose facial/body flex sorting")
     flex_analyze_parser.add_argument("bodygroups_sorted_blend", type=Path)
-    flex_analyze_parser.add_argument("--game", choices=("gmod", "l4d2"), default="gmod")
+    flex_analyze_parser.add_argument("--game", choices=("gmod", "l4d2", "sfm"), default="gmod")
 
     flex_apply_parser = subparsers.add_parser("flexes-apply", help="apply a flex sorting plan")
     flex_apply_parser.add_argument("bodygroups_sorted_blend", type=Path)
@@ -5714,7 +5718,7 @@ def main(argv: list[str] | None = None) -> int:
     proportion_parser.add_argument("collision_sorted_blend", type=Path)
     proportion_parser.add_argument("--remove-zero-weight-bones", dest="remove_zero_weight_bones", action="store_true", default=True)
     proportion_parser.add_argument("--keep-zero-weight-bones", dest="remove_zero_weight_bones", action="store_false")
-    proportion_parser.add_argument("--game", choices=("gmod", "l4d2"), default="gmod")
+    proportion_parser.add_argument("--game", choices=("gmod", "l4d2", "sfm"), default="gmod")
     proportion_parser.add_argument("--survivor", choices=tuple(L4D2_SURVIVORS), default=DEFAULT_L4D2_SURVIVOR)
 
     carms_parser = subparsers.add_parser("carms-run", help="create c_arms SMD files from the proportion export")
@@ -5759,6 +5763,8 @@ def main(argv: list[str] | None = None) -> int:
     qc_analyze_parser.add_argument("--character-category", default="")
     qc_analyze_parser.add_argument("--model-name", default="")
     qc_analyze_parser.add_argument("--gender", choices=("female", "male"), default="female")
+    qc_analyze_parser.add_argument("--game", choices=("gmod", "l4d2", "sfm"), default="gmod")
+    qc_analyze_parser.add_argument("--survivor", choices=tuple(L4D2_SURVIVORS), default=DEFAULT_L4D2_SURVIVOR)
     qc_analyze_parser.add_argument("--gmod-root", default="")
     qc_analyze_parser.add_argument("--studiomdl", default="")
 
@@ -6304,6 +6310,8 @@ def main(argv: list[str] | None = None) -> int:
             studiomdl_path=args.studiomdl,
             progress=print_progress,
             gender=args.gender,
+            game=args.game,
+            survivor=args.survivor,
         )
         print(
             json.dumps(

@@ -47,7 +47,7 @@ BAD_OPEN_BRACE_RE = re.compile(r"\((?P<line>\d+)\):\s*-\s*bad command\s+\{", re.
 
 ESSENTIAL_EXACT = {"ZArmTwist_L", "ZArmTwist_R", "ZHandTwist_L", "ZHandTwist_R", "Eye_L", "Eye_R"}
 GENDER_CHOICES = ("female", "male")
-GAME_CHOICES = ("gmod", "l4d2")
+GAME_CHOICES = ("gmod", "l4d2", "sfm")
 GENDER_ANIMATION_INCLUDES = {
     "female": {
         # Playermodel QC needs ONLY the standard GMod player animation packs.
@@ -669,10 +669,76 @@ def detect_l4d2(explicit_root: str = "", explicit_studiomdl: str = "") -> dict[s
     return {"install_root": "", "game_dir": "", "studiomdl_path": "", "source": "not_found", "checked": checked}
 
 
+def validate_sfm_root(root: Path) -> dict[str, str] | None:
+    # Source Filmmaker layout: <SourceFilmmaker>/game/bin/studiomdl.exe (+ vpk.exe)
+    # and <SourceFilmmaker>/game/usermod/gameinfo.txt (the loose-file content mod dir).
+    # Accept the SourceFilmmaker root, its "game" folder, or the "usermod" folder.
+    name = root.name.lower()
+    if name == "usermod" and (root / "gameinfo.txt").exists():
+        install_root = root.parent
+        game_dir = root
+    elif name == "game" and (root / "bin" / "studiomdl.exe").exists():
+        install_root = root
+        game_dir = root / "usermod"
+    elif (root / "game" / "bin" / "studiomdl.exe").exists():
+        install_root = root / "game"
+        game_dir = install_root / "usermod"
+    else:
+        install_root = root
+        game_dir = root / "usermod"
+    studiomdl = install_root / "bin" / "studiomdl.exe"
+    if studiomdl.exists() and (game_dir / "gameinfo.txt").exists():
+        return {"install_root": str(install_root), "game_dir": str(game_dir), "studiomdl_path": str(studiomdl)}
+    return None
+
+
+def detect_sfm(explicit_root: str = "", explicit_studiomdl: str = "") -> dict[str, Any]:
+    candidates: list[Path] = []
+    if explicit_studiomdl:
+        exe = Path(explicit_studiomdl)
+        if exe.exists():
+            # studiomdl lives in <game>/bin, so its grandparent is the <game> install root.
+            hit = validate_sfm_root(exe.parent.parent)
+            if hit:
+                hit["source"] = "explicit_studiomdl"
+                return hit
+    for raw in [explicit_root, os.environ.get("SFM_PATH", ""), os.environ.get("SOURCEFILMMAKER_PATH", "")]:
+        if raw:
+            candidates.append(Path(raw))
+    env_studiomdl = os.environ.get("STUDIOMDL", "")
+    if env_studiomdl:
+        exe = Path(env_studiomdl)
+        if exe.exists():
+            candidates.append(exe.parent.parent)
+    for library in steam_library_roots():
+        candidates.append(library / "steamapps" / "common" / "SourceFilmmaker")
+    seen: set[str] = set()
+    checked: list[str] = []
+    for candidate in candidates:
+        try:
+            candidate = candidate.resolve()
+        except Exception:
+            pass
+        key = str(candidate).lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        checked.append(str(candidate))
+        hit = validate_sfm_root(candidate)
+        if hit:
+            hit["source"] = "detected"
+            hit["checked"] = checked
+            return hit
+    return {"install_root": "", "game_dir": "", "studiomdl_path": "", "source": "not_found", "checked": checked}
+
+
 def detect_game(game: str, explicit_root: str = "", explicit_studiomdl: str = "") -> dict[str, Any]:
     """Detect the Source install (studiomdl + game dir) for the target game."""
-    if normalize_game(game) == "l4d2":
+    target = normalize_game(game)
+    if target == "l4d2":
         return detect_l4d2(explicit_root, explicit_studiomdl)
+    if target == "sfm":
+        return detect_sfm(explicit_root, explicit_studiomdl)
     return detect_gmod(explicit_root, explicit_studiomdl)
 
 
@@ -2057,6 +2123,28 @@ def validate_texturegroups(plan: dict[str, Any]) -> list[str]:
     return warnings
 
 
+def sfm_idle_sequence(source_dir: Path) -> tuple[str, bool]:
+    """Pick the SFM static-idle source; returns (path_without_or_with_name, is_anim_smd).
+
+    SFM uses a single static idle (no proportion subtract/autoplay). The model's
+    bind pose (captured `$definebone`) is the MMD-proportioned pose, so the idle
+    just needs to hold that pose. Prefer the skeleton-only proportioned animation
+    `anims/proportions.smd`: it carries the proportioned pose (idempotent with the
+    bind) AND studiomdl reliably loads it as a 1-frame idle even alongside
+    `$definebone`. A mesh bodygroup SMD (which has `triangles`) can be read as
+    geometry under `$definebone`, making studiomdl report "no animations found",
+    so it is only a last-resort fallback.
+    """
+    if (source_dir / "anims" / "proportions.smd").exists():
+        return ("anims/proportions", True)
+    if (source_dir / "Body.smd").exists():
+        return ("Body.smd", False)
+    for smd in sorted(source_dir.glob("*.smd"), key=lambda p: natural_key(p.name)):
+        if smd.name.lower() != "physics.smd":
+            return (smd.name, False)
+    return ("anims/proportions", True)
+
+
 def base_qc_lines(
     plan: dict[str, Any],
     source_dir: Path,
@@ -2068,10 +2156,16 @@ def base_qc_lines(
     include_flexes: bool = True,
     for_definebone_capture: bool = False,
 ) -> list[str]:
-    l4d2 = normalize_game(plan.get("game")) == "l4d2"
+    target = normalize_game(plan.get("game"))
+    l4d2 = target == "l4d2"
+    sfm = target == "sfm"
     lines: list[str] = []
     lines.append('// Created by MMD Character Importer Step 14\n\n')
     lines.extend(qc_model_header(plan, pm=pm))
+    if sfm:
+        # SFM's older studiomdl needs $maxverts raised to accept the new model
+        # format (the "single number" the SFM expert described).
+        lines.append("$maxverts 65530 \n\n")
     bodygroups = plan.get("bodygroups") if isinstance(plan.get("bodygroups"), list) else None
     lines.extend(bodygroup_qc_blocks(source_dir, include_flexes=include_flexes, bodygroups=bodygroups))
     lines.append('$surfaceprop "flesh" \n\n')
@@ -2130,6 +2224,9 @@ def base_qc_lines(
         # reference where the realignment is idempotent.
         if not for_definebone_capture:
             lines.extend(l4d2_ik_lines(survivor_bones))
+    elif sfm:
+        # SFM models are posed in the SFM timeline; no IK chains/locks.
+        pass
     else:
         lines.append('$ikchain "rhand" "ValveBiped.Bip01_R_Hand" knee 0.707 0.707 0 \n')
         lines.append('$ikchain "lhand" "ValveBiped.Bip01_L_Hand" knee 0.707 0.707 0 \n')
@@ -2137,6 +2234,19 @@ def base_qc_lines(
         lines.append('$ikchain "lfoot" "ValveBiped.Bip01_L_Foot" knee 0.707 -0.707 0 \n\n')
         lines.append('$ikautoplaylock "rfoot" 0.7 0.1 \n')
         lines.append('$ikautoplaylock "lfoot" 0.7 0.1 \n\n')
+    if sfm:
+        # SFM: a single static idle holding the proportioned pose. No proportion
+        # subtract/autoplay, no ragdoll, no $includemodel, no collision -- per the
+        # expert's example QC. The idle source is the skeleton-only proportioned
+        # animation (studiomdl-safe under $definebone); see sfm_idle_sequence().
+        idle_src, is_anim = sfm_idle_sequence(source_dir)
+        if is_anim:
+            lines.append(f'$sequence "idle" "{idle_src}" fps 1 \n\n')
+        else:
+            lines.append('$sequence "idle" \n{\n')
+            lines.append(f'\t"{idle_src}"\n')
+            lines.append('}\n\n')
+        return lines
     reference_name = gendered_reference_name(plan, source_dir / "anims")
     lines.append(f'$sequence reference "anims/{reference_name}" fps 1 \n')
     lines.append('$origin 0 0 -2.50 \n\n')
@@ -3178,6 +3288,23 @@ def l4d2_shared_material_root(author: str, model_name: str, game: str) -> str:
     return f"models/{author}/shared"
 
 
+# Material-name tokens that keep alpha-test transparency in SFM. The SFM expert
+# removes transparency from almost every material (it disables the in-editor
+# outline/"Lines" feature, turning the model fully transparent) EXCEPT materials
+# used for eyes, effects, or those with a background texture (black background) --
+# where the alpha is actually load-bearing. We keep $alphatest for materials whose
+# name matches one of these, and drop it for the rest.
+SFM_ALPHATEST_KEEP_HINTS = (
+    "eye", "effect", "fx", "glass", "tear", "cornea", "highlight",
+    "halo", "glow", "star", "transparent", "alpha", "decal", "screen",
+)
+
+
+def sfm_material_keeps_alphatest(material_name: str) -> bool:
+    lname = str(material_name or "").strip().lower()
+    return any(token in lname for token in SFM_ALPHATEST_KEEP_HINTS)
+
+
 def write_vmt(
     path: Path,
     author: str,
@@ -3188,6 +3315,8 @@ def write_vmt(
     selfillum_mask: str | None = None,
     game: str = "gmod",
 ) -> None:
+    target = normalize_game(game)
+    sfm = target == "sfm"
     shared = l4d2_shared_material_root(author, model_name, game)
     bump = f"models/{author}/{model_name}/{material_name}_n" if has_normal else f"{shared}/normal"
     # A per-material phong-exponent map (Step 12 PBR scheme) carries gloss in
@@ -3196,14 +3325,22 @@ def write_vmt(
     # byte-identical to before.
     phong = phongexp_texture or f"{shared}/phong_exp"
     phong_fresnel = "[0.0 1.5 2]" if has_normal else "[0.0 0.5 1]"
+    # SFM keeps alpha-test only for eye/effect/transparent materials; GMod/L4D2
+    # keep it on every material (unchanged, byte-identical).
+    include_alphatest = (not sfm) or sfm_material_keeps_alphatest(material_name)
     body = (
         "VertexLitGeneric\n"
         "{\n"
         f'\t$basetexture "models/{author}/{model_name}/{material_name}"\n'
         f'\t$bumpmap "{bump}"\n'
         '\t$nocull "1"\n'
-        '\t$alphatest "1"\n'
-        "\t$alphatestreference 0.5\n"
+    )
+    if include_alphatest:
+        body += (
+            '\t$alphatest "1"\n'
+            "\t$alphatestreference 0.5\n"
+        )
+    body += (
         '\t$allowalphatocoverage "1"\n'
         f'\t$lightwarptexture "{shared}/lightwarptexture"\n'
         '\t$phong "1"\n'
@@ -3211,10 +3348,15 @@ def write_vmt(
         '\t$phongalbedotint "1"\n'
         f'\t$phongexponenttexture "{phong}"\n'
         f'\t$phongfresnelranges "{phong_fresnel}"\n'
-        '\t$rimlight "1"\n'
-        '\t$rimlightexponent "2"\n'
-        '\t$rimlightboost "2"\n'
     )
+    # SFM drops rim light ("re-lighting" / raylight): unnecessary for SFM (it is
+    # not a game), per the expert. GMod/L4D2 keep it (unchanged).
+    if not sfm:
+        body += (
+            '\t$rimlight "1"\n'
+            '\t$rimlightexponent "2"\n'
+            '\t$rimlightboost "2"\n'
+        )
     if selfillum_mask:
         body += (
             '\t$selfillum "1"\n'
@@ -3797,6 +3939,23 @@ def find_gmad_executable(gmod: dict[str, Any]) -> Path:
     raise FileNotFoundError(f"gmad.exe was not found. Searched: {searched or 'PATH'}")
 
 
+def addon_tree_has_long_paths(addon_dir: Path, limit: int = 250) -> bool:
+    """True if any file under addon_dir has a full path at/over `limit` chars.
+
+    vpk.exe and gmad.exe are not long-path aware: past Windows MAX_PATH (260) they
+    silently fail (exit 1, no output, no archive). Such trees must be packaged through
+    a short staging directory. `limit` is below 260 to leave margin for the staged
+    name. Mirrors the non-ASCII staging trigger.
+    """
+    try:
+        for item in addon_dir.rglob("*"):
+            if item.is_file() and len(str(item)) >= limit:
+                return True
+    except OSError:
+        return True
+    return False
+
+
 def package_addon_gma(addon_dir: Path, output_gma: Path, gmod: dict[str, Any], log_path: Path) -> Path:
     gmad = find_gmad_executable(gmod)
     output_gma = output_gma.with_suffix(".gma")
@@ -3808,7 +3967,7 @@ def package_addon_gma(addon_dir: Path, output_gma: Path, gmod: dict[str, Any], l
     staged_output: Path | None = None
     scratch: Path | None = None
     try:
-        if not path_is_ascii(addon_dir) or not path_is_ascii(output_gma):
+        if not path_is_ascii(addon_dir) or not path_is_ascii(output_gma) or addon_tree_has_long_paths(addon_dir):
             scratch = external_safe_dir_for(output_gma, "gmad")
             if scratch.exists():
                 shutil.rmtree(scratch)
@@ -3973,7 +4132,7 @@ def package_addon_vpk(addon_dir: Path, output_vpk: Path, gmod: dict[str, Any], l
     actual_addon_dir = addon_dir
     scratch: Path | None = None
     try:
-        if not path_is_ascii(addon_dir) or not path_is_ascii(output_vpk):
+        if not path_is_ascii(addon_dir) or not path_is_ascii(output_vpk) or addon_tree_has_long_paths(addon_dir):
             scratch = external_safe_dir_for(output_vpk, "vpk")
             if scratch.exists():
                 shutil.rmtree(scratch)
@@ -4081,6 +4240,8 @@ def compose(plan_path: Path) -> dict[str, Any]:
     category = str(plan["character_category"])
     model = str(plan["model_name"])
     l4d2 = normalize_game(plan.get("game")) == "l4d2"
+    sfm = normalize_game(plan.get("game")) == "sfm"
+    single_model = l4d2 or sfm  # no GMod-style "_pm" playermodel variant
     survivor_slot = normalize_survivor(plan.get("survivor"))
 
     initial_qc = source_dir / "compile_initial.qc"
@@ -4271,8 +4432,8 @@ def compose(plan_path: Path) -> dict[str, Any]:
             raise RuntimeError(f"StudioMDL missing parent definebone retry did not clear warnings for {qc_path.name}. See {retry_log}")
         return retry_output, True
 
-    # L4D2 compiles a single survivor model (no GMod-style "_pm" playermodel).
-    stems = [model] if l4d2 else [model, f"{model}_pm"]
+    # L4D2 + SFM compile a single model (no GMod-style "_pm" playermodel).
+    stems = [model] if single_model else [model, f"{model}_pm"]
     if carms_qc:
         stems.append(f"{model}_arms")
 
@@ -4288,7 +4449,7 @@ def compose(plan_path: Path) -> dict[str, Any]:
             compile_log_path("compile_main", log_suffix),
         )
         pm_repaired = False
-        if not l4d2:
+        if not single_model:
             emit("Compiling player model.")
             _pm_output, pm_repaired = compile_with_definebone_repair(
                 f"player{('_' + log_suffix) if log_suffix else ''}",
@@ -4316,7 +4477,7 @@ def compose(plan_path: Path) -> dict[str, Any]:
                     main_qc,
                     compile_log_path("compile_main_after_carms_definebone_repair", log_suffix),
                 )
-                if not l4d2:
+                if not single_model:
                     _pm_output, _ = compile_with_definebone_repair(
                         f"player_after_carms_repair{('_' + log_suffix) if log_suffix else ''}",
                         pm_qc,
@@ -4457,6 +4618,10 @@ def compose(plan_path: Path) -> dict[str, Any]:
         else:
             warnings.append("Step 13 release icon not found; addon ships without addonimage.jpg (L4D2 shows the default thumbnail).")
         warnings.append("L4D2 survivor select-panel images (vgui/s_panel_<slot>*) are not generated yet.")
+    elif sfm:
+        # SFM ships loose models + materials only: no GMod lua/spawn-icons/MCI
+        # metadata/addon.json and no L4D2 addoninfo.
+        emit("SFM: composing loose model + materials only (no GMod lua/spawn-icons/metadata).")
     else:
         icon_files, icon_warnings = compose_icons(plan, addon_dir)
         generated_files.extend(icon_files)
@@ -4478,6 +4643,10 @@ def compose(plan_path: Path) -> dict[str, Any]:
         for rel in l4d2_compiled_relpaths(survivor_slot, carms_qc is not None):
             if not (addon_dir / "models" / f"{rel}.mdl").exists():
                 errors.append(f"L4D2 compiled .mdl missing from addon folder: models/{rel}.mdl")
+    elif sfm:
+        model_dir = addon_dir / "models" / author / category
+        if not (model_dir / f"{model}.mdl").exists():
+            errors.append("Main .mdl output is missing from the final SFM model folder.")
     else:
         required_lua = addon_dir / "lua" / "autorun" / f"{model}_{author}.lua"
         if not required_lua.exists():
@@ -4489,20 +4658,30 @@ def compose(plan_path: Path) -> dict[str, Any]:
     if not any(mat_dir.glob("*.vmt")):
         warnings.append("No material VMT files were written.")
 
-    # L4D2 ships as a single .vpk; the unpacked addon folder is not needed in-game. Package the
-    # VPK once here and deliver ONLY that file to the distribution folder and the game addons
-    # (below). GMod keeps copying the unpacked addon folder + a .gma.
-    l4d2_vpk_path: Path | None = None
+    # L4D2 ships as a single .vpk; the unpacked addon folder is not needed in-game. SFM always
+    # also gets a .vpk (alongside the loose distribution folder, per the user's choice). Package
+    # the VPK once here and deliver it below. GMod keeps copying the unpacked addon folder + a .gma.
+    packaged_vpk_path: Path | None = None
     if l4d2:
         try:
             emit("Packaging final addon VPK.")
-            l4d2_vpk_path = package_addon_vpk(
+            packaged_vpk_path = package_addon_vpk(
                 addon_dir, qc_dir / f"survivor_{survivor_slot}_{model}.vpk", gmod, qc_dir / "vpk_create.log"
             )
-            generated_files.append(file_row(l4d2_vpk_path, "vpk_package"))
-            emit(f"Wrote VPK package: {l4d2_vpk_path}")
+            generated_files.append(file_row(packaged_vpk_path, "vpk_package"))
+            emit(f"Wrote VPK package: {packaged_vpk_path}")
         except Exception as exc:
             errors.append(f"Failed to package addon VPK: {exc}")
+    elif sfm:
+        try:
+            emit("Packaging SFM addon VPK.")
+            packaged_vpk_path = package_addon_vpk(
+                addon_dir, qc_dir / f"{model}_{author}.vpk", gmod, qc_dir / "vpk_create.log"
+            )
+            generated_files.append(file_row(packaged_vpk_path, "vpk_package"))
+            emit(f"Wrote VPK package: {packaged_vpk_path}")
+        except Exception as exc:
+            errors.append(f"Failed to package SFM addon VPK: {exc}")
 
     distribution_output_dir = Path(str(plan.get("distribution_output_dir") or "")).expanduser()
     distribution_addon_dir = Path("")
@@ -4521,6 +4700,7 @@ def compose(plan_path: Path) -> dict[str, Any]:
             distribution_output_dir.mkdir(parents=True, exist_ok=True)
             if not l4d2:
                 # L4D2 delivers only the .vpk (below); the unpacked addon folder is not needed.
+                # GMod and SFM both copy the unpacked folder (SFM: loose model + materials).
                 distribution_addon_dir = distribution_output_dir / addon_dir.name
                 if same_resolved_path(distribution_addon_dir, addon_dir):
                     generated_files.append(folder_row(distribution_addon_dir, "distribution_addon_folder", ["Already composed in this folder."]))
@@ -4534,12 +4714,13 @@ def compose(plan_path: Path) -> dict[str, Any]:
                 else:
                     copytree_clean(compile_source_copy_dir, distribution_compile_source_dir)
                     generated_files.append(folder_row(distribution_compile_source_dir, "distribution_qc_compile_source"))
-            if l4d2:
-                # Deliver only the .vpk packaged above; the unpacked folder is omitted.
-                if l4d2_vpk_path and l4d2_vpk_path.exists():
-                    distribution_gma = distribution_output_dir / l4d2_vpk_path.name
-                    if not same_resolved_path(distribution_gma, l4d2_vpk_path):
-                        shutil.copyfile(l4d2_vpk_path, distribution_gma)
+            if l4d2 or sfm:
+                # Deliver the packaged .vpk. L4D2 ships only the vpk; SFM also keeps the
+                # loose folder copied above.
+                if packaged_vpk_path and packaged_vpk_path.exists():
+                    distribution_gma = distribution_output_dir / packaged_vpk_path.name
+                    if not same_resolved_path(distribution_gma, packaged_vpk_path):
+                        shutil.copyfile(packaged_vpk_path, distribution_gma)
                     generated_files.append(file_row(distribution_gma, "vpk_package"))
                     emit(f"Copied VPK package to distribution folder: {distribution_gma}")
             else:
@@ -4551,36 +4732,58 @@ def compose(plan_path: Path) -> dict[str, Any]:
         except Exception as exc:
             errors.append(f"Failed to copy/package addon to selected output folder: {exc}")
 
-    if bool(plan.get("copy_to_gmod_addons", False)):
+    # SFM uses its own "put into usermod" toggle (default on); GMod/L4D2 use copy_to_gmod_addons.
+    install_to_game = bool(plan.get("copy_to_sfm_usermod", True)) if sfm else bool(plan.get("copy_to_gmod_addons", False))
+    if install_to_game:
         try:
-            gmod_game_dir = Path(str(gmod.get("game_dir") or ""))
-            if not gmod_game_dir.exists():
-                raise RuntimeError(f"Game directory was not found: {gmod_game_dir}")
-            gmod_addons_dir = gmod_game_dir / "addons"
-            gmod_addons_dir.mkdir(parents=True, exist_ok=True)
-            if l4d2:
-                # L4D2 installs the single .vpk into addons/; the unpacked folder is not needed.
-                emit("Installing addon VPK to detected L4D2 addons folder.")
-                if l4d2_vpk_path and l4d2_vpk_path.exists():
-                    installed_vpk = gmod_addons_dir / l4d2_vpk_path.name
-                    if not same_resolved_path(installed_vpk, l4d2_vpk_path):
-                        shutil.copyfile(l4d2_vpk_path, installed_vpk)
-                    generated_files.append(file_row(installed_vpk, "gmod_addons_vpk"))
-                    gmod_addon_dir = gmod_addons_dir  # report/open points at the addons folder
-                    emit(f"Installed addon VPK: {installed_vpk}")
+            target_game_dir = Path(str(gmod.get("game_dir") or ""))
+            if not target_game_dir.exists():
+                raise RuntimeError(f"Game directory was not found: {target_game_dir}")
+            if sfm:
+                # SFM uses loose files in the usermod content dir (game_dir = usermod):
+                # overlay models/ + materials/ without disturbing other SFM content.
+                emit("Installing loose model + materials into SFM usermod.")
+                installed_any = False
+                for sub in ("models", "materials"):
+                    src = addon_dir / sub
+                    if src.exists():
+                        dst = target_game_dir / sub
+                        shutil.copytree(src, dst, dirs_exist_ok=True)
+                        generated_files.append(folder_row(dst, "sfm_usermod_folder"))
+                        installed_any = True
+                gmod_addons_dir = target_game_dir
+                gmod_addon_dir = target_game_dir  # report/open points at the usermod folder
+                if installed_any:
+                    emit(f"Installed loose SFM content into: {target_game_dir}")
                 else:
-                    errors.append("L4D2 addon VPK was not packaged, so nothing was installed to the addons folder.")
+                    errors.append("SFM composed folder had no models/ or materials/ to install into usermod.")
             else:
-                emit("Installing composed addon folder to detected GMod addons folder.")
-                gmod_addon_dir = gmod_addons_dir / addon_dir.name
-                if same_resolved_path(gmod_addon_dir, addon_dir):
-                    generated_files.append(folder_row(gmod_addon_dir, "gmod_addons_folder", ["Already composed in this folder."]))
+                gmod_addons_dir = target_game_dir / "addons"
+                gmod_addons_dir.mkdir(parents=True, exist_ok=True)
+                if l4d2:
+                    # L4D2 installs the single .vpk into addons/; the unpacked folder is not needed.
+                    emit("Installing addon VPK to detected L4D2 addons folder.")
+                    if packaged_vpk_path and packaged_vpk_path.exists():
+                        installed_vpk = gmod_addons_dir / packaged_vpk_path.name
+                        if not same_resolved_path(installed_vpk, packaged_vpk_path):
+                            shutil.copyfile(packaged_vpk_path, installed_vpk)
+                        generated_files.append(file_row(installed_vpk, "gmod_addons_vpk"))
+                        gmod_addon_dir = gmod_addons_dir  # report/open points at the addons folder
+                        emit(f"Installed addon VPK: {installed_vpk}")
+                    else:
+                        errors.append("L4D2 addon VPK was not packaged, so nothing was installed to the addons folder.")
                 else:
-                    copytree_clean(addon_dir, gmod_addon_dir)
-                    generated_files.append(folder_row(gmod_addon_dir, "gmod_addons_folder"))
-                emit(f"Installed composed addon folder: {gmod_addon_dir}")
+                    emit("Installing composed addon folder to detected GMod addons folder.")
+                    gmod_addon_dir = gmod_addons_dir / addon_dir.name
+                    if same_resolved_path(gmod_addon_dir, addon_dir):
+                        generated_files.append(folder_row(gmod_addon_dir, "gmod_addons_folder", ["Already composed in this folder."]))
+                    else:
+                        copytree_clean(addon_dir, gmod_addon_dir)
+                        generated_files.append(folder_row(gmod_addon_dir, "gmod_addons_folder"))
+                    emit(f"Installed composed addon folder: {gmod_addon_dir}")
         except Exception as exc:
-            errors.append(f"Failed to copy addon to {'L4D2' if l4d2 else 'GMod'} addons: {exc}")
+            label = "SFM usermod" if sfm else ("L4D2" if l4d2 else "GMod")
+            errors.append(f"Failed to copy addon to {label}: {exc}")
 
     files_json = qc_dir / "qc_files.json"
     report_json = qc_dir / "qc_report.json"
@@ -4615,6 +4818,7 @@ def compose(plan_path: Path) -> dict[str, Any]:
         "compile_source_copy_dir": str(compile_source_copy_dir),
         "distribution_compile_source_dir": str(distribution_compile_source_dir) if str(distribution_compile_source_dir) != "." else "",
         "copy_to_gmod_addons": bool(plan.get("copy_to_gmod_addons", False)),
+        "copy_to_sfm_usermod": bool(plan.get("copy_to_sfm_usermod", True)),
         "include_mci_metadata_json": include_mci_metadata_json,
         "studiomdl_logs": studiomdl_logs,
         "flex_compile_enabled": flex_compile_enabled,
