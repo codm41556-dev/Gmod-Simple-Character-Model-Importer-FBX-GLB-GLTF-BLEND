@@ -3101,15 +3101,19 @@ class FullImportWorker(QtCore.QThread):
 
             self._optional(12, "Param Texture", run_textures)
 
-            def run_icons() -> None:
-                icons = core.run_icons(workspace.root, icon_basename=self.model_name, progress=self._log, cancel_check=self._cancelled)
-                validation = icons.report.get("validation") if isinstance(icons.report.get("validation"), dict) else {"ok": str(icons.report.get("status") or "").lower() == "complete"}
-                if validation.get("ok") is False:
-                    raise RuntimeError("Icon generation validation failed.")
-                self._write_marker(13, icons.icon_dir, outputs={"files": str(icons.files_path), "release_icon": str(icons.icon_dir / "release_icon.png")}, report_path=icons.report_path, validation=validation)
-                self.step_results[13] = {"dir": str(icons.icon_dir), "report": str(icons.report_path), "files": str(icons.files_path)}
+            # SFM ships loose models + materials only; GMod spawn-menu icons (Step 13) are not used.
+            if self.game == "sfm":
+                self._log("Skipping Step 13 (Sort Icons and Arts): not used for Source Filmmaker.")
+            else:
+                def run_icons() -> None:
+                    icons = core.run_icons(workspace.root, icon_basename=self.model_name, progress=self._log, cancel_check=self._cancelled)
+                    validation = icons.report.get("validation") if isinstance(icons.report.get("validation"), dict) else {"ok": str(icons.report.get("status") or "").lower() == "complete"}
+                    if validation.get("ok") is False:
+                        raise RuntimeError("Icon generation validation failed.")
+                    self._write_marker(13, icons.icon_dir, outputs={"files": str(icons.files_path), "release_icon": str(icons.icon_dir / "release_icon.png")}, report_path=icons.report_path, validation=validation)
+                    self.step_results[13] = {"dir": str(icons.icon_dir), "report": str(icons.report_path), "files": str(icons.files_path)}
 
-            self._optional(13, "Sort Icons and Arts", run_icons)
+                self._optional(13, "Sort Icons and Arts", run_icons)
 
             self._stage(14, "Sort QC and Compile", str(proportion_result.final_dir))
             qc_analysis = core.analyze_qc(
@@ -4139,6 +4143,11 @@ class ImporterWindow(QtWidgets.QMainWindow):
         if getattr(self, "_i18n_initialized", False):
             self.apply_i18n()
             self._load_studiomdl_paths_for_game()
+        # Step 9's input button: SFM pulls from Step 7 (Step 8 collision is skipped).
+        if hasattr(self, "detect_collision_blend_button"):
+            self.detect_collision_blend_button.setText(
+                "1. Detect Step 7 Output" if self.selected_game == "sfm" else "1. Detect Step 8 Output"
+            )
 
     def _refresh_gmod_only_visibility(self) -> None:
         """Hide surfaces that don't apply to the selected target game.
@@ -5592,10 +5601,32 @@ class ImporterWindow(QtWidgets.QMainWindow):
             return True
         return self.try_backfill_step_completion(step)
 
+    def steps_skipped_for_game(self) -> set[int]:
+        """Pipeline steps not produced for the selected game, so downstream steps must
+        not block on their completion. SFM skips Step 8 (collision) and Step 10 (c_arms)."""
+        if getattr(self, "selected_game", "gmod") == "sfm":
+            return {8, 10}
+        return set()
+
     def first_missing_dependency(self, step: int) -> int | None:
         spec = self.workflow_specs.get(step, {})
-        for required in spec.get("requires", []):
-            required_step = int(required)
+        skipped = self.steps_skipped_for_game()
+        # Expand requirements, replacing any skipped step with its OWN requirements
+        # (transitively) so e.g. Step 9 depends directly on Step 7 when Step 8 is
+        # skipped for SFM, instead of staying locked on a step that never runs.
+        pending = [int(value) for value in spec.get("requires", [])]
+        seen: set[int] = set()
+        resolved: list[int] = []
+        while pending:
+            required_step = pending.pop()
+            if required_step in seen:
+                continue
+            seen.add(required_step)
+            if required_step in skipped:
+                pending.extend(int(value) for value in self.workflow_specs.get(required_step, {}).get("requires", []))
+            else:
+                resolved.append(required_step)
+        for required_step in resolved:
             if self.step_is_complete(required_step):
                 continue
             if self.dependency_complete_from_selected_input(step, required_step):
@@ -5770,6 +5801,11 @@ class ImporterWindow(QtWidgets.QMainWindow):
     def jump_to_next_step(self, step: int) -> None:
         spec = self.workflow_specs.get(step, {})
         next_step = spec.get("next")
+        # Skip steps not produced for the selected game (SFM: 8 collision, 10 c_arms),
+        # so "next" advances Step 7 -> 9 and Step 9 -> 11 instead of landing on a hidden tab.
+        skipped = self.steps_skipped_for_game()
+        while isinstance(next_step, int) and next_step in skipped:
+            next_step = self.workflow_specs.get(next_step, {}).get("next")
         if not isinstance(next_step, int):
             return
         self.switch_to_step(next_step)
@@ -18256,6 +18292,35 @@ class ImporterWindow(QtWidgets.QMainWindow):
             except Exception:
                 return
             candidates.extend(matches)
+
+        # SFM skips Step 8 (collision), so Step 9 runs on the Step 7 flex-sorted blend.
+        if getattr(self, "selected_game", "gmod") == "sfm":
+            for raw in (
+                self.proportion_input_row.value() if hasattr(self, "proportion_input_row") else "",
+                self.settings_store.value("flex_input_blend", "", str),
+                self.flex_sorted_blend_path if hasattr(self, "flex_sorted_blend_path") else "",
+                self.flex_blend_label.text() if hasattr(self, "flex_blend_label") else "",
+            ):
+                add_candidate(raw)
+            workspace_text = self.workspace_edit.text().strip() if hasattr(self, "workspace_edit") else ""
+            if workspace_text:
+                add_sorted_glob(Path(workspace_text), "7_sort_flexes/*_flexes_sorted.blend")
+            add_sorted_glob(core.workspaces_root(), "*/7_sort_flexes/*_flexes_sorted.blend")
+            seen_sfm: set[Path] = set()
+            for candidate in candidates:
+                try:
+                    candidate = candidate.resolve()
+                except Exception:
+                    candidate = candidate.absolute()
+                if candidate in seen_sfm:
+                    continue
+                seen_sfm.add(candidate)
+                if candidate.exists() and candidate.name.endswith(".blend"):
+                    self.proportion_input_row.set_value(str(candidate))
+                    self.switch_to_step(9)
+                    return
+            self.show_error("Detect Step 7 Output", "No Step 7 .blend output was found. Run Step 7 or browse to the flex-sorted blend.")
+            return
 
         for raw in (
             self.proportion_input_row.value() if hasattr(self, "proportion_input_row") else "",

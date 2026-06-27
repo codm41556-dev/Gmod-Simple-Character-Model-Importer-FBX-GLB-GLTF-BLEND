@@ -2907,14 +2907,23 @@ def collision_bone_selection_path_for_flex_blend(input_blend: Path) -> Path:
 
 def proportion_paths_for_collision_blend(input_blend: Path) -> tuple[Path, Path, Path, Path, Path, Path, Path, Path, Path]:
     input_blend = input_blend.resolve()
-    workspace_root = input_blend.parent.parent if input_blend.parent.name == "8_sort_collision" else input_blend.parent
+    # Step 9 normally runs on the Step 8 collision blend (in 8_sort_collision). SFM skips Step 8,
+    # so it runs on the Step 7 flex blend (in 7_sort_flexes). In both cases the export folder must
+    # land at the WORKSPACE ROOT, not nested inside the step dir.
+    workspace_root = (
+        input_blend.parent.parent
+        if input_blend.parent.name in ("8_sort_collision", "7_sort_flexes")
+        else input_blend.parent
+    )
     proportion_dir = workspace_root / "9_export_proportion_trick"
     raw_dir = proportion_dir / "0_pre_proportion_raw_export"
     workspace_dir = proportion_dir / "1_proportion_workspace"
     final_dir = proportion_dir / "2_proportion_export"
     stem = input_blend.stem
-    if stem.endswith("_collision_sorted"):
-        stem = stem[: -len("_collision_sorted")]
+    for suffix in ("_collision_sorted", "_flexes_sorted"):
+        if stem.endswith(suffix):
+            stem = stem[: -len(suffix)]
+            break
     stem = slugify(stem)
     pre_blend = workspace_dir / f"{stem}_pre_proportion.blend"
     processed_blend = workspace_dir / f"{stem}_proportion_processed.blend"

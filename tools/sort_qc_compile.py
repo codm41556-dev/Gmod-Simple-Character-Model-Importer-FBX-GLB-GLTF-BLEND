@@ -1593,9 +1593,15 @@ def refresh_input_availability_warnings(plan: dict[str, Any], warnings: list[str
     (and must warn when an input vanished after the analyze).
     """
     inputs = plan.get("inputs", {}) if isinstance(plan.get("inputs"), dict) else {}
+    # SFM ships loose models + materials only (no GMod spawn-menu icons), so a missing
+    # Step 13 icon dir is expected and must not warn.
+    sfm = normalize_game(plan.get("game")) == "sfm"
+    skip_keys = {"step13_dir"} if sfm else set()
     messages = {message for _key, message in INPUT_AVAILABILITY_WARNINGS}
     warnings[:] = [warning for warning in warnings if str(warning) not in messages]
     for key, message in INPUT_AVAILABILITY_WARNINGS:
+        if key in skip_keys:
+            continue
         path_text = str(inputs.get(key) or "")
         if not path_text or not Path(path_text).exists():
             warnings.append(message)
@@ -4484,7 +4490,8 @@ def compose(plan_path: Path) -> dict[str, Any]:
                         compile_log_path("compile_pm_after_carms_definebone_repair", log_suffix),
                     )
 
-    if not carms_qc:
+    if not carms_qc and not sfm:
+        # SFM does not use c_arms (Step 10 is skipped), so its absence is expected -- no warning.
         warnings.append("Step 10 c_arms output was not found; c_arms QC and Lua hands registration were skipped.")
     fallback_compile_used = False
     oversized_smd_split_applied = False
