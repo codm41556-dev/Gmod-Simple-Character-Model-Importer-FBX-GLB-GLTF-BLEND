@@ -1806,6 +1806,7 @@ def analyze(input_path: Path, author: str = "", category: str = "", model_name: 
         "physics_collision_text_lines": physics_collision_text_lines,
         "invert_jiggle_direction": False,
         "include_mci_metadata_json": True,
+        "nodecal": normalize_game(game) == "l4d2",
         "material_rows": material_rows,
         "texturegroups": texturegroups,
         "warnings": warnings,
@@ -3430,6 +3431,7 @@ def write_vmt(
     phongexp_texture: str | None = None,
     selfillum_mask: str | None = None,
     game: str = "gmod",
+    nodecal: bool = False,
 ) -> None:
     target = normalize_game(game)
     sfm = target == "sfm"
@@ -3451,6 +3453,11 @@ def write_vmt(
         f'\t$bumpmap "{bump}"\n'
         '\t$nocull "1"\n'
     )
+    # $nodecal stops decals (bullet/blood marks) from sticking to the material. Default off keeps
+    # GMod/SFM output byte-identical; the Step 12 / main-interface toggle turns it on (default on
+    # for L4D2 survivors, where decals on a custom anime mesh look wrong).
+    if nodecal:
+        body += '\t$nodecal "1"\n'
     if include_alphatest:
         body += (
             '\t$alphatest "1"\n'
@@ -3486,6 +3493,9 @@ def compose_materials(plan: dict[str, Any], addon_dir: Path) -> tuple[list[dict[
     author = str(plan["author"])
     model = str(plan["model_name"])
     game = normalize_game(plan.get("game"))
+    # $nodecal toggle (set by the GUI); falls back to the game default (on for L4D2) when the plan
+    # predates the key, so old/external plans still get the expected behavior.
+    nodecal = bool(plan.get("nodecal", game == "l4d2"))
     out_dir = addon_dir / "materials" / "models" / author / model
     out_dir.mkdir(parents=True, exist_ok=True)
     warnings: list[str] = []
@@ -3553,7 +3563,7 @@ def compose_materials(plan: dict[str, Any], addon_dir: Path) -> tuple[list[dict[
         except Exception as exc:
             warnings.append(str(exc))
         vmt = out_dir / f"{material_name}.vmt"
-        write_vmt(vmt, author, model, material_name, has_normal, phongexp_texture, selfillum_mask, game=game)
+        write_vmt(vmt, author, model, material_name, has_normal, phongexp_texture, selfillum_mask, game=game, nodecal=nodecal)
         files.append(file_row(vmt, "material_vmt"))
     shared_src = ROOT / "reference" / "li_zhiyan_npc" / "a_pack" / "materials" / "models" / "sheepylord" / "shared"
     # Mirror l4d2_shared_material_root(): per-model for L4D2 (self-contained, no cross-addon
@@ -4734,7 +4744,6 @@ def compose(plan_path: Path) -> dict[str, Any]:
             generated_files.append(file_row(addonimage_path, "addonimage"))
         else:
             warnings.append("Step 13 release icon not found; addon ships without addonimage.jpg (L4D2 shows the default thumbnail).")
-        warnings.append("L4D2 survivor select-panel images (vgui/s_panel_<slot>*) are not generated yet.")
     elif sfm:
         # SFM ships loose models + materials only: no GMod lua/spawn-icons/MCI
         # metadata/addon.json and no L4D2 addoninfo.

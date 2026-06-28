@@ -2813,6 +2813,7 @@ class FullImportWorker(QtCore.QThread):
         game: str = "gmod",
         survivor: str = "producer",
         copy_to_sfm_usermod: bool = True,
+        nodecal: bool = False,
     ) -> None:
         super().__init__()
         self.pmx_path = Path(pmx_path)
@@ -2831,6 +2832,7 @@ class FullImportWorker(QtCore.QThread):
         self.game = normalize_game_code(game)
         self.survivor = normalize_survivor_code(survivor)
         self.copy_to_sfm_usermod = bool(copy_to_sfm_usermod)
+        self.nodecal = bool(nodecal)
         self.bodygroup_scale_factor = float(bodygroup_scale_factor or getattr(core, "DEFAULT_BODYGROUP_SCALE_FACTOR", 40.457))
         self.cancel_requested = False
         self.step_results: dict[int, dict[str, object]] = {}
@@ -3142,6 +3144,7 @@ class FullImportWorker(QtCore.QThread):
             qc_plan["display_name"] = self.model_display_name
             qc_plan["copy_to_gmod_addons"] = True
             qc_plan["copy_to_sfm_usermod"] = bool(self.copy_to_sfm_usermod)
+            qc_plan["nodecal"] = bool(self.nodecal)
             qc_plan["distribution_output_dir"] = self.distribution_output_dir
             qc_result = core.compile_and_compose_qc(proportion_result.final_dir, qc_plan, progress=self._log, cancel_check=self._cancelled)
             validation = qc_result.report.get("validation") if isinstance(qc_result.report.get("validation"), dict) else {}
@@ -4138,6 +4141,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
                 del blocker
         self._refresh_character_selectors()
         self._refresh_gmod_only_visibility()
+        self._refresh_nodecal_checks_for_game()
         # On a live target-game switch (not during initial construction): relabel all
         # GMod<->L4D2 brand text and load the studiomdl path saved for the now-selected game.
         if getattr(self, "_i18n_initialized", False):
@@ -4209,6 +4213,52 @@ class ImporterWindow(QtWidgets.QMainWindow):
         main_sfm_label = getattr(self, "main_copy_to_sfm_usermod_label", None)
         if isinstance(main_sfm_label, QtWidgets.QWidget):
             main_sfm_label.setVisible(sfm)
+        # The $nodecal toggle applies to GMod and L4D2 only; hide it in SFM mode.
+        for attr in ("main_nodecal_check", "texture_nodecal_check"):
+            check = getattr(self, attr, None)
+            if isinstance(check, QtWidgets.QWidget):
+                check.setVisible(not sfm)
+
+    def nodecal_default_for_game(self, game: str | None = None) -> bool:
+        """$nodecal (disable material decals) default: on for L4D2 (bullet/blood decals look wrong
+        on a custom anime survivor mesh), off for Garry's Mod and SFM (the legacy behavior)."""
+        return normalize_game_code(game or getattr(self, "selected_game", "gmod")) == "l4d2"
+
+    def _nodecal_setting_key(self, game: str | None = None) -> str:
+        """Per-game QSettings key, so each target remembers its own $nodecal choice."""
+        return f"material_nodecal_{normalize_game_code(game or getattr(self, 'selected_game', 'gmod'))}"
+
+    def current_nodecal_enabled(self) -> bool:
+        """Effective $nodecal toggle for the selected game (remembered per game, game default otherwise)."""
+        default = self.nodecal_default_for_game()
+        return self.settings_bool(self.settings_store.value(self._nodecal_setting_key(), default), default)
+
+    def _refresh_nodecal_checks_for_game(self) -> None:
+        """Sync both $nodecal checkboxes (main tab + Step 12) to the value remembered for the current game."""
+        value = self.current_nodecal_enabled()
+        for attr in ("main_nodecal_check", "texture_nodecal_check"):
+            check = getattr(self, attr, None)
+            if isinstance(check, QtWidgets.QCheckBox):
+                blocker = QtCore.QSignalBlocker(check)
+                try:
+                    check.setChecked(value)
+                finally:
+                    del blocker
+
+    def on_nodecal_toggled(self, checked: bool) -> None:
+        """Keep the two $nodecal checkboxes in sync, remember the choice per game, and update the live plan."""
+        checked = bool(checked)
+        for attr in ("main_nodecal_check", "texture_nodecal_check"):
+            check = getattr(self, attr, None)
+            if isinstance(check, QtWidgets.QCheckBox) and check.isChecked() != checked:
+                blocker = QtCore.QSignalBlocker(check)
+                try:
+                    check.setChecked(checked)
+                finally:
+                    del blocker
+        self.settings_store.setValue(self._nodecal_setting_key(), checked)
+        if getattr(self, "current_qc_plan", None):
+            self.current_qc_plan["nodecal"] = checked
 
     def _studiomdl_setting_key(self, base: str, game: str | None = None) -> str:
         """Per-game QSettings key for a studiomdl/install path. GMod keeps the legacy key for
@@ -6062,6 +6112,12 @@ class ImporterWindow(QtWidgets.QMainWindow):
         )
         self.main_clear_custom_normals_hint.setObjectName("fieldHint")
         self.main_clear_custom_normals_hint.setWordWrap(True)
+        self.main_nodecal_check = QtWidgets.QCheckBox("Disable decals on materials ($nodecal)")
+        self.main_nodecal_check.setToolTip(
+            "Adds $nodecal 1 to every material VMT, so bullet/blood decals do not stick to the model. "
+            "Default on for Left 4 Dead 2 (decals look wrong on a custom anime survivor), off for Garry's Mod. "
+            "Mirrors the same checkbox on the Step 12 texture tab."
+        )
         self.main_scale_spin = QtWidgets.QDoubleSpinBox()
         self.main_scale_spin.setRange(0.01, 10.0)
         self.main_scale_spin.setDecimals(3)
@@ -6106,6 +6162,9 @@ class ImporterWindow(QtWidgets.QMainWindow):
         main_clear_custom_normals_layout.addWidget(self.main_clear_custom_normals_check)
         main_clear_custom_normals_layout.addWidget(self.main_clear_custom_normals_hint)
         form.addRow(self.main_form_labels["clear_custom_normals"], main_clear_custom_normals_box)
+        # Spanning row (no separate label) so hiding the checkbox collapses the whole row for SFM.
+        form.addRow(self.main_nodecal_check)
+        self.main_nodecal_check.toggled.connect(self.on_nodecal_toggled)
         # SFM-only auto-port option (shown only in SFM mode by _refresh_gmod_only_visibility).
         self.main_copy_to_sfm_usermod_check = QtWidgets.QCheckBox("Put into SFM usermod (loose files)")
         self.main_copy_to_sfm_usermod_check.setChecked(True)
@@ -9227,6 +9286,13 @@ class ImporterWindow(QtWidgets.QMainWindow):
         self.texture_scheme_hint.setObjectName("fieldHint")
         self.texture_scheme_hint.setWordWrap(True)
         settings.addRow("", self.texture_scheme_hint)
+        self.texture_nodecal_check = QtWidgets.QCheckBox("Disable decals on materials ($nodecal)")
+        self.texture_nodecal_check.setToolTip(
+            "Adds $nodecal 1 to every material VMT, so bullet/blood decals do not stick to the model. "
+            "Default on for Left 4 Dead 2, off for Garry's Mod. Mirrors the same checkbox on the main tab."
+        )
+        settings.addRow(self.texture_nodecal_check)
+        self.texture_nodecal_check.toggled.connect(self.on_nodecal_toggled)
         self.detect_texture_mapping_button = QtWidgets.QPushButton("Detect Material Mapping")
         self.detect_texture_mapping_button.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_FileDialogContentsView))
         settings.addRow("", self.detect_texture_mapping_button)
@@ -10550,6 +10616,8 @@ class ImporterWindow(QtWidgets.QMainWindow):
             else:
                 include_metadata = bool(raw_metadata)
             self.qc_include_mci_metadata_check.setChecked(include_metadata)
+        # $nodecal checkboxes are remembered per game; sync both to the current game's stored value.
+        self._refresh_nodecal_checks_for_game()
         release_input = str(self.settings_store.value("release_input_dir", "", str) or "")
         if release_input and hasattr(self, "release_input_row"):
             self.release_input_row.set_value(release_input)
@@ -11928,6 +11996,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
                 if hasattr(self, "main_copy_to_sfm_usermod_check")
                 else True
             ),
+            nodecal=self.current_nodecal_enabled(),
         )
         self.worker.log.connect(self.append_main_log)
         self.worker.progress.connect(self.set_main_progress)
@@ -22008,6 +22077,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
             self.current_qc_plan["include_mci_metadata_json"] = (
                 bool(self.qc_include_mci_metadata_check.isChecked()) if hasattr(self, "qc_include_mci_metadata_check") else True
             )
+            self.current_qc_plan["nodecal"] = self.current_nodecal_enabled()
             self.sync_qc_fields_from_plan(self.current_qc_plan)
             self.populate_qc_bone_table()
         self.refresh_qc_preview()
@@ -22460,6 +22530,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
         plan["include_mci_metadata_json"] = (
             bool(self.qc_include_mci_metadata_check.isChecked()) if hasattr(self, "qc_include_mci_metadata_check") else True
         )
+        plan["nodecal"] = self.current_nodecal_enabled()
         qc_dir = Path(str(plan.get("qc_dir") or self.qc_output_edit.text().strip() or ""))
         if qc_dir:
             plan["addon_dir"] = str(qc_dir / model)
