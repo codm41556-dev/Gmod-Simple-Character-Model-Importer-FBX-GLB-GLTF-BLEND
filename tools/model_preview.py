@@ -2965,8 +2965,9 @@ class MaterialPreviewWidget(QOpenGLWidget):
         if GL:
             try:
                 self.makeCurrent()
-            except Exception:
-                pass
+            except Exception as exc:
+                self._gl_error = str(exc)
+                return
             try:
                 GL.glClearColor(0.08, 0.09, 0.10, 1.0)
                 GL.glEnable(GL.GL_DEPTH_TEST)
