@@ -1173,9 +1173,24 @@ class StaticModelPreviewWidget(QOpenGLWidget):
         self._texture_ids = {}
         self._gl_ready = False
         if GL:
-            GL.glClearColor(0.08, 0.09, 0.10, 1.0)
-            GL.glEnable(GL.GL_DEPTH_TEST)
-            GL.glDisable(GL.GL_CULL_FACE)
+            # Guard these initial GL calls. initializeGL is normally invoked with
+            # the context already current, but under some drivers / on context
+            # recreation during docking/reparenting the context is not yet current
+            # here, and an unguarded GL call raises GLError 1282 (invalid
+            # operation) which crashes the whole app. Ensure the context is
+            # current and swallow transient failures.
+            try:
+                self.makeCurrent()
+            except Exception:
+                pass
+            try:
+                GL.glClearColor(0.08, 0.09, 0.10, 1.0)
+                GL.glEnable(GL.GL_DEPTH_TEST)
+                GL.glDisable(GL.GL_CULL_FACE)
+            except Exception as exc:
+                # Defer real initialization to the first paintGL, which runs with
+                # a guaranteed-current context and is already exception-guarded.
+                self._gl_error = str(exc)
 
     def _on_context_about_to_be_destroyed(self) -> None:
         try:
@@ -2947,9 +2962,16 @@ class MaterialPreviewWidget(QOpenGLWidget):
         # A fresh context invalidates previously created texture names.
         self._material_texture_ids = {}
         if GL:
-            GL.glClearColor(0.08, 0.09, 0.10, 1.0)
-            GL.glEnable(GL.GL_DEPTH_TEST)
-            GL.glDisable(GL.GL_CULL_FACE)
+            try:
+                self.makeCurrent()
+            except Exception:
+                pass
+            try:
+                GL.glClearColor(0.08, 0.09, 0.10, 1.0)
+                GL.glEnable(GL.GL_DEPTH_TEST)
+                GL.glDisable(GL.GL_CULL_FACE)
+            except Exception as exc:
+                self._gl_error = str(exc)
 
     def _delete_gl_material_textures(self) -> None:
         """Delete GL texture objects; the GL context must be current."""
