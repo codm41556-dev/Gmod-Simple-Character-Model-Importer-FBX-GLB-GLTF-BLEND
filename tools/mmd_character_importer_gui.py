@@ -23556,13 +23556,13 @@ def main() -> int:
     try:
         _gl_format = QtGui.QSurfaceFormat()
         _gl_format.setRenderableType(QtGui.QSurfaceFormat.RenderableType.OpenGL)
+        _gl_format.setVersion(3, 3)
+        _gl_format.setProfile(QtGui.QSurfaceFormat.OpenGLContextProfile.CompatibilityProfile)
         _gl_format.setDepthBufferSize(24)
         _gl_format.setStencilBufferSize(8)
         QtGui.QSurfaceFormat.setDefaultFormat(_gl_format)
     except Exception:
         pass
-    # Sharing one GL context across the app's two QOpenGLWidgets (model + material preview) is good
-    # practice and harmless; set before QApplication as Qt requires.
     QtCore.QCoreApplication.setAttribute(QtCore.Qt.ApplicationAttribute.AA_ShareOpenGLContexts, True)
     app = QtWidgets.QApplication(sys.argv)
     app.setApplicationName("MMD Character Importer")
