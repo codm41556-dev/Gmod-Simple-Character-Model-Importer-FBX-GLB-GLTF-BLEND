@@ -329,6 +329,101 @@ def gendered_reference_name(plan: dict, anims_dir: Path, warnings: list | None =
             )
         return "reference_female"
     return reference
+
+
+# Stock GMod c_arms standard skeleton (decompiled weapons/c_arms.mdl). The first-person c_arms
+# bonemerge onto the weapon viewmodel, whose arm bones use the STOCK c_arms proportions
+# (UpperArm 6.028 / Forearm 11.693 / Hand 11.481) -- which match the MALE player reference but NOT
+# the female one. So the proportion-trick subtract MUST go against the stock c_arms arm proportions,
+# not the gendered player reference; otherwise non-male characters' first-person arms are displaced
+# (issue #121). build_carms_proportion_reference() builds a c_arms-specific reference for the GMod
+# proportion-driven c_arms.
+CARMS_STOCK_REFERENCE_SMD = Path(__file__).resolve().parent / "assets" / "std_c_arms_skeleton" / "c_arms_stock_reference.smd"
+# Override only the arm chain; the spine/neck/head roots keep the character pose (zero delta).
+CARMS_REFERENCE_ROOT_BONES = {"ValveBiped.Bip01_Spine4", "ValveBiped.Bip01_Neck1", "ValveBiped.Bip01_Head1"}
+
+
+def _read_smd_frame0_poses(smd_path: Path) -> dict[str, str]:
+    """Return {bone_name: 'px py pz rx ry rz'} from an SMD's skeleton frame 0."""
+    text = smd_path.read_text(encoding="utf-8", errors="replace").splitlines()
+    nodes_start = next(i for i, ln in enumerate(text) if ln.strip() == "nodes")
+    id_to_name: dict[int, str] = {}
+    i = nodes_start + 1
+    while i < len(text) and text[i].strip() != "end":
+        m = re.match(r'\s*(\d+)\s+"([^"]+)"', text[i])
+        if m:
+            id_to_name[int(m.group(1))] = m.group(2)
+        i += 1
+    skel_start = next(j for j in range(i, len(text)) if text[j].strip() == "skeleton")
+    j = skel_start + 1
+    while j < len(text) and not text[j].strip().startswith("time"):
+        j += 1
+    j += 1
+    poses: dict[str, str] = {}
+    while j < len(text) and text[j].strip() != "end":
+        parts = text[j].split()
+        if parts and parts[0].lstrip("-").isdigit() and len(parts) >= 7 and int(parts[0]) in id_to_name:
+            poses[id_to_name[int(parts[0])]] = " ".join(parts[1:7])
+        j += 1
+    return poses
+
+
+def build_carms_proportion_reference(carms_work: Path) -> str | None:
+    """Write anims/c_arms_reference.smd = the character's proportions.smd with the ARM-CHAIN bones'
+    frame-0 poses overridden to the stock c_arms standard, so the proportion-trick subtract delta is
+    (character - c_arms_standard) for the arms (the value the runtime viewmodel bonemerge expects --
+    this is what makes non-male first-person arms land correctly, issue #121) and ZERO for every
+    other bone (they are not rendered or merged). Returns "c_arms_reference", or None when
+    proportions.smd / the stock reference is unavailable so the caller can fall back to the gendered
+    reference (preserving the old behaviour rather than failing the compile)."""
+    proportions = carms_work / "anims" / "proportions.smd"
+    if not proportions.exists() or not CARMS_STOCK_REFERENCE_SMD.exists():
+        return None
+    try:
+        stock_poses = _read_smd_frame0_poses(CARMS_STOCK_REFERENCE_SMD)
+    except Exception as exc:
+        emit(f"c_arms reference: could not read the stock c_arms poses ({exc}); using the gendered reference.")
+        return None
+    override = {name: pose for name, pose in stock_poses.items() if name not in CARMS_REFERENCE_ROOT_BONES}
+    if not override:
+        return None
+    text = proportions.read_text(encoding="utf-8", errors="replace").splitlines()
+    try:
+        nodes_start = next(i for i, ln in enumerate(text) if ln.strip() == "nodes")
+    except StopIteration:
+        return None
+    id_to_name: dict[int, str] = {}
+    i = nodes_start + 1
+    while i < len(text) and text[i].strip() != "end":
+        m = re.match(r'\s*(\d+)\s+"([^"]+)"', text[i])
+        if m:
+            id_to_name[int(m.group(1))] = m.group(2)
+        i += 1
+    out = list(text)
+    j = next((k for k in range(i, len(out)) if out[k].strip() == "skeleton"), None)
+    if j is None:
+        return None
+    j += 1
+    while j < len(out) and not out[j].strip().startswith("time"):
+        j += 1
+    j += 1
+    replaced = 0
+    while j < len(out) and out[j].strip() != "end":
+        parts = out[j].split()
+        if parts and parts[0].lstrip("-").isdigit() and len(parts) >= 7:
+            name = id_to_name.get(int(parts[0]))
+            if name in override:
+                lead = re.match(r"(\s*)", out[j]).group(1)
+                out[j] = f"{lead}{parts[0]} {override[name]}"
+                replaced += 1
+        j += 1
+    if replaced == 0:
+        return None
+    (carms_work / "anims" / "c_arms_reference.smd").write_text("\n".join(out) + "\n", encoding="utf-8")
+    emit(f"c_arms proportion reference: overrode {replaced} arm-chain bone(s) onto the stock c_arms standard.")
+    return "c_arms_reference"
+
+
 HBOX_GROUPS = {
     "ValveBiped.Bip01_Pelvis": 3,
     "ValveBiped.Bip01_L_Thigh": 6,
@@ -4428,7 +4523,14 @@ def build_carms_qc(plan: dict[str, Any], source_dir: Path, definebones: list[str
         lines.append('$ikchain "lfoot" "ValveBiped.Bip01_L_Foot" knee 0.707 -0.707 0 \n\n')
         lines.append('$ikautoplaylock "rfoot" 0.7 0.1 \n')
         lines.append('$ikautoplaylock "lfoot" 0.7 0.1 \n\n')
-        carms_reference = gendered_reference_name(plan, carms_work / "anims")
+        # GMod: subtract against the STOCK c_arms arm proportions (issue #121 -- the c_arms bonemerge
+        # uses the stock/male arm lengths, so the female player reference displaces the arms). L4D2
+        # keeps its survivor-specific gendered reference unchanged.
+        carms_reference = None
+        if game == "gmod":
+            carms_reference = build_carms_proportion_reference(carms_work)
+        if not carms_reference:
+            carms_reference = gendered_reference_name(plan, carms_work / "anims")
         lines.append(f'$sequence reference "anims/{carms_reference}" fps 1 \n')
         lines.append('$origin 0 0 -2.40 \n\n')
         lines.append('$animation a_proportions "anims/proportions" subtract reference 0 \n\n')
