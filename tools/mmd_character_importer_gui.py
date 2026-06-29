@@ -1,4 +1,3 @@
-#!/usr/bin/env python3
 """PySide6 launcher for the MMD Character Importer workflow."""
 
 from __future__ import annotations
@@ -23544,8 +23543,24 @@ def main() -> int:
     if dispatched_exit_code is not None:
         return dispatched_exit_code
     crash_log_path = enable_crash_logging()
-    # Sharing one GL context across the app's two QOpenGLWidgets (model + material preview) is good
-    # practice and harmless; set before QApplication as Qt requires.
+    # Establish an explicit default OpenGL surface format BEFORE enabling context
+    # sharing and BEFORE creating the QApplication. Without this, the two
+    # QOpenGLWidgets (model + material preview) share contexts whose format is
+    # whatever the platform/driver picks by default; on some drivers that default
+    # produces a context that is invalid when initializeGL() runs, so the first
+    # glClearColor raises GLError 1282 and crashes. Requesting a plain, widely
+    # supported compatibility-profile context (the same kind ordinary desktop GL
+    # apps get) avoids the rejected/invalid context. Per Qt, calling
+    # setDefaultFormat() before constructing QApplication is the supported way to
+    # make all shared contexts use a consistent, known format.
+    try:
+        _gl_format = QtGui.QSurfaceFormat()
+        _gl_format.setRenderableType(QtGui.QSurfaceFormat.RenderableType.OpenGL)
+        _gl_format.setDepthBufferSize(24)
+        _gl_format.setStencilBufferSize(8)
+        QtGui.QSurfaceFormat.setDefaultFormat(_gl_format)
+    except Exception:
+        pass
     QtCore.QCoreApplication.setAttribute(QtCore.Qt.ApplicationAttribute.AA_ShareOpenGLContexts, True)
     app = QtWidgets.QApplication(sys.argv)
     app.setApplicationName("MMD Character Importer")
