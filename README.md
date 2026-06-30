@@ -3,6 +3,9 @@
 
 To developers: This repo can be directly ran from the source without downloading the .exe binary in the release. Please refer to the following instruction:
 
+Gmod / SFM Steam Workshop Addon: https://steamcommunity.com/sharedfiles/filedetails/?id=3738916298
+L4D2 Steam Addon: https://steamcommunity.com/sharedfiles/filedetails/?id=3748993892
+
 ## Requirements
 
 - Windows 10/11, 64-bit.
