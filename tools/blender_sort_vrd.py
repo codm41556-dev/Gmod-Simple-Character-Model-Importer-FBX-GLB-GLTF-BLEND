@@ -809,47 +809,6 @@ def score_bone_candidate(armature: bpy.types.Object, bone: bpy.types.Bone, stats
     return confidence, side, warnings
 
 
-def vrd_front_offset(centroid: Vector | None, axes: dict[str, object]) -> float | None:
-    """Signed forward distance of a weighted centroid from the pelvis.
-
-    Positive points toward the character's front (the +forward_axis direction);
-    negative means the centroid sits behind the hips (a rear garment panel).
-    Returns ``None`` when the centroid or axes are unavailable.
-    """
-    if not isinstance(centroid, Vector):
-        return None
-    pelvis = axes.get("pelvis")
-    forward_axis = axes.get("forward_axis")
-    if not isinstance(pelvis, Vector) or not isinstance(forward_axis, Vector):
-        return None
-    return float((centroid - pelvis).dot(forward_axis))
-
-
-def vrd_rear_margin(axes: dict[str, object]) -> float:
-    """How far behind the hips a centroid must sit to count as a rear panel.
-
-    Tied to the pelvis-region lateral scale (the hip-width proxy already used for
-    side classification): a garment's front-back depth at the hip is comparable
-    to its side-to-side width, so the threshold stays proportional to the model
-    and never trips on front/side panels that merely straddle the hip plane.
-    """
-    return max(0.6, float(axes.get("center_threshold", 1.0) or 1.0) * 1.5)
-
-
-def is_rear_garment_bone(centroid: Vector | None, axes: dict[str, object]) -> bool:
-    """True when a candidate's weighted geometry sits clearly behind the hips.
-
-    The thigh helpers only push cloth out of the way of legs that swing *forward*,
-    so back panels gain nothing from being driven and tend to flap incorrectly
-    in game when they are. Such bones are kept visible for review but left out of
-    the automatic selection (see ``infer_vrd_rows``).
-    """
-    front_offset = vrd_front_offset(centroid, axes)
-    if front_offset is None:
-        return False
-    return front_offset < -vrd_rear_margin(axes)
-
-
 def infer_vrd_rows(armature: bpy.types.Object) -> tuple[list[dict[str, object]], list[dict[str, object]], dict[str, object]]:
     axes = landmark_axes(armature)
     raw_candidates: list[dict[str, object]] = []
@@ -865,16 +824,12 @@ def infer_vrd_rows(armature: bpy.types.Object) -> tuple[list[dict[str, object]],
         default_enabled, essential_parent, direct_parent, root_warning = default_vrd_root_status(bone)
         if root_warning:
             warnings = list(warnings) + [root_warning]
-        rear_panel = is_rear_garment_bone(stats.get("centroid"), axes)
-        front_offset = vrd_front_offset(stats.get("centroid"), axes)
         entry = {
             "bone": bone.name,
             "parent": bone.parent.name if bone.parent else "",
             "essential_parent": essential_parent,
             "direct_parent": direct_parent,
             "default_enabled": default_enabled,
-            "rear_panel": rear_panel,
-            "front_offset": round(front_offset, 4) if front_offset is not None else None,
             "confidence": round(confidence, 3),
             "side": side,
             "weighted_vertices": int(stats.get("weighted_vertices", 0) or 0),
@@ -934,8 +889,7 @@ def infer_vrd_rows(armature: bpy.types.Object) -> tuple[list[dict[str, object]],
             drivers = ["ValveBiped.Bip01_L_Thigh", "ValveBiped.Bip01_R_Thigh"]
         for driver in drivers:
             confidence = float(candidate.get("confidence", 0.0) or 0.0)
-            rear_panel = bool(candidate.get("rear_panel"))
-            enabled = bool(candidate.get("default_enabled", True)) and confidence >= 0.78 and not rear_panel
+            enabled = bool(candidate.get("default_enabled", True)) and confidence >= 0.78
             row = {
                 "uid": f"vrd_{len(rows) + 1:03d}_{safe_fragment(candidate['bone'])}_{'l' if driver.endswith('_L_Thigh') else 'r'}",
                 "enabled": enabled,
@@ -945,8 +899,6 @@ def infer_vrd_rows(armature: bpy.types.Object) -> tuple[list[dict[str, object]],
                 "side": side if len(drivers) == 1 else "center",
                 "essential_parent": candidate.get("essential_parent", ""),
                 "direct_parent": candidate.get("direct_parent", ""),
-                "rear_panel": rear_panel,
-                "front_offset": candidate.get("front_offset"),
                 "confidence": round(confidence, 3),
                 "weighted_vertices": candidate.get("weighted_vertices", 0),
                 "source_faces": candidate.get("source_faces", 0),
@@ -959,8 +911,6 @@ def infer_vrd_rows(armature: bpy.types.Object) -> tuple[list[dict[str, object]],
             if not enabled:
                 if not bool(candidate.get("default_enabled", True)):
                     row["warnings"].append("Candidate is visible for review but disabled because it is not directly parented to an eligible ValveBiped pelvis/spine bone.")
-                elif rear_panel:
-                    row["warnings"].append("Disabled by default: this bone sits behind the hips (a rear garment panel). The thigh helpers only push front and side cloth clear of the legs, so back panels are left off automatically to avoid odd skirt motion. Enable it manually if you want it driven.")
                 else:
                     row["warnings"].append("Medium-confidence VRD candidate; review before enabling.")
             rows.append(row)
@@ -981,7 +931,6 @@ def infer_vrd_rows(armature: bpy.types.Object) -> tuple[list[dict[str, object]],
             for item in sorted(suppressed_descendants, key=lambda item: natural_key(item.get("bone", "")))
         ],
         "enabled_row_count": sum(1 for row in rows if row.get("enabled")),
-        "rear_panel_count": sum(1 for candidate in filtered if candidate.get("rear_panel")),
         "axes": {
             "pelvis": v3(axes["pelvis"]),
             "left_thigh": v3(axes["left_thigh"]),

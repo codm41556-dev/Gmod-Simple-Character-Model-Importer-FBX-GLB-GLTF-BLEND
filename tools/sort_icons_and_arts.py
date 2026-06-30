@@ -120,7 +120,7 @@ def find_workspace_root(input_path: Path) -> Path:
     return path
 
 
-MODEL_SUFFIXES = (".pmx", ".vrm")
+MODEL_SUFFIXES = (".pmx", ".vrm", ".fbx", ".glb", ".gltf")
 
 
 def pmx_candidates(input_path: Path, workspace_root: Path) -> list[Path]:
@@ -137,7 +137,7 @@ def pmx_candidates(input_path: Path, workspace_root: Path) -> list[Path]:
     if path.is_file() and path.suffix.lower() == ".blend":
         search_dirs.append(path.parent)
     for folder in search_dirs:
-        for pattern in ("*.pmx", "*.vrm"):
+        for pattern in ("*.pmx", "*.vrm", "*.fbx", "*.glb", "*.gltf"):
             try:
                 candidates.extend(folder.rglob(pattern))
             except Exception:
@@ -158,8 +158,11 @@ def pmx_candidates(input_path: Path, workspace_root: Path) -> list[Path]:
 def step1_imported_model_path(workspace_root: Path) -> Path | None:
     """The model Step 1 actually imported, from its report (authoritative).
 
-    A source folder can contain several PMX/VRM files; scanning alone can pick
-    a sibling model that was never imported.
+    A source folder can contain several PMX/VRM/FBX/GLB files; scanning alone
+    can pick a sibling model that was never imported.
+
+    Also handles generic (FBX/GLB/GLTF) imports whose report stores
+    ``"model_name"`` + ``"source_extension"`` instead of a full path.
     """
     report_path = workspace_root / "1_import_mmd_model" / "blender_import_report.json"
     if not report_path.exists():
@@ -168,12 +171,36 @@ def step1_imported_model_path(workspace_root: Path) -> Path | None:
         report = json.loads(report_path.read_text(encoding="utf-8"))
     except Exception:
         return None
+
+    # PMX / VRM reports store the full source path directly.
     raw = str(report.get("pmx_path") or report.get("vrm_path") or "")
-    if not raw:
-        return None
-    candidate = Path(raw)
-    if candidate.exists() and candidate.suffix.lower() in MODEL_SUFFIXES:
-        return candidate
+    if raw:
+        candidate = Path(raw)
+        if candidate.exists() and candidate.suffix.lower() in MODEL_SUFFIXES:
+            return candidate
+
+    # Generic (FBX/GLB/GLTF) reports store model_name + source_extension
+    # instead of a full path.  Reconstruct by searching the source-assets folder.
+    model_name = str(report.get("model_name") or "")
+    source_ext = str(report.get("source_extension") or "")
+    if model_name and source_ext:
+        ext = source_ext if source_ext.startswith(".") else f".{source_ext}"
+        if ext.lower() in MODEL_SUFFIXES:
+            source_assets = workspace_root / "0_source_mmd_assets"
+            for folder in (source_assets, workspace_root):
+                if not folder.exists():
+                    continue
+                try:
+                    # Prefer an exact stem match first.
+                    for found in folder.rglob(f"*{ext}"):
+                        if found.stem.lower() == model_name.lower():
+                            return found.resolve()
+                    # Looser fallback: first file with the matching extension.
+                    for found in folder.rglob(f"*{ext}"):
+                        return found.resolve()
+                except Exception:
+                    pass
+
     return None
 
 

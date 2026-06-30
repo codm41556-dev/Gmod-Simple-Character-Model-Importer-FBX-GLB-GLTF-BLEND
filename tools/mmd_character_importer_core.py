@@ -49,6 +49,7 @@ BLENDER_SETUP_SCRIPT = TOOLS_DIR / "blender_setup_addons.py"
 SETUP_REQUIREMENTS_VERSION = 8
 BLENDER_IMPORT_SCRIPT = TOOLS_DIR / "blender_import_mmd_model.py"
 BLENDER_VRM_IMPORT_SCRIPT = TOOLS_DIR / "blender_import_vrm_model.py"
+BLENDER_GENERIC_IMPORT_SCRIPT = TOOLS_DIR / "blender_import_generic_model.py"
 BLENDER_FIX_SCRIPT = TOOLS_DIR / "blender_fix_mmd_model.py"
 BLENDER_SPINE_SCRIPT = TOOLS_DIR / "blender_fix_spine_bones.py"
 BLENDER_SORT_BONES_SCRIPT = TOOLS_DIR / "blender_sort_bones.py"
@@ -2697,13 +2698,35 @@ def analyze_vrm(vrm_path: Path, source_dir: Path | None = None) -> PmxAnalysis:
         warnings.append(f"High morph/shapekey count: {analysis.morph_count:,}; later flex work may be slow.")
     analysis.warnings = warnings
     return analysis
+    
+def analyze_generic(path: Path, source_dir: Path | None = None) -> PmxAnalysis:
+    """Create a minimal analysis stub for FBX/GLB/GLTF/blend models.
+
+    The real validation happens inside Blender. This just gives the workspace
+    builder a valid PmxAnalysis container so it can construct folder paths.
+    """
+    path = path.resolve()
+    source_dir = (source_dir or path.parent).resolve()
+    analysis = PmxAnalysis(pmx_path=str(path), source_dir=str(source_dir))
+    analysis.model_name = path.stem
+    analysis.model_name_english = path.stem
+    analysis.version = 0.0
+    analysis.encoding = "generic"
+    analysis.vertex_count = 0  # We'll count it in Blender
+    analysis.bone_count = 0
+    analysis.warnings = [
+        "Generic FBX/GLB/GLTF/blend format detected. "
+        "Skeleton validation is skipped; relying on heuristic bone mapping."
+    ]
+    return analysis
 
 
 def analyze_model_file(path: Path, source_dir: Path | None = None) -> PmxAnalysis:
-    """Analyze a supported model file (.pmx or .vrm) by extension."""
-
+    """Analyze a supported model file by extension."""
     if path.suffix.lower() == ".vrm":
         return analyze_vrm(path, source_dir)
+    if path.suffix.lower() in {".fbx", ".glb", ".gltf", ".blend"}:
+        return analyze_generic(path, source_dir)
     return analyze_pmx(path, source_dir)
 
 
@@ -2907,23 +2930,14 @@ def collision_bone_selection_path_for_flex_blend(input_blend: Path) -> Path:
 
 def proportion_paths_for_collision_blend(input_blend: Path) -> tuple[Path, Path, Path, Path, Path, Path, Path, Path, Path]:
     input_blend = input_blend.resolve()
-    # Step 9 normally runs on the Step 8 collision blend (in 8_sort_collision). SFM skips Step 8,
-    # so it runs on the Step 7 flex blend (in 7_sort_flexes). In both cases the export folder must
-    # land at the WORKSPACE ROOT, not nested inside the step dir.
-    workspace_root = (
-        input_blend.parent.parent
-        if input_blend.parent.name in ("8_sort_collision", "7_sort_flexes")
-        else input_blend.parent
-    )
+    workspace_root = input_blend.parent.parent if input_blend.parent.name == "8_sort_collision" else input_blend.parent
     proportion_dir = workspace_root / "9_export_proportion_trick"
     raw_dir = proportion_dir / "0_pre_proportion_raw_export"
     workspace_dir = proportion_dir / "1_proportion_workspace"
     final_dir = proportion_dir / "2_proportion_export"
     stem = input_blend.stem
-    for suffix in ("_collision_sorted", "_flexes_sorted"):
-        if stem.endswith(suffix):
-            stem = stem[: -len(suffix)]
-            break
+    if stem.endswith("_collision_sorted"):
+        stem = stem[: -len("_collision_sorted")]
     stem = slugify(stem)
     pre_blend = workspace_dir / f"{stem}_pre_proportion.blend"
     processed_blend = workspace_dir / f"{stem}_proportion_processed.blend"
@@ -3166,8 +3180,8 @@ def import_pmx_to_blender(
     source_dir = source_dir.resolve()
     if not path_is_under(pmx_path, source_dir):
         raise RuntimeError(
-            f"The PMX file {pmx_path} is not inside the selected model folder {source_dir}. "
-            "Select the folder that contains the PMX file as the source directory."
+            f"The file {pmx_path} is not inside the selected model folder {source_dir}. "
+            "Select the folder that contains the model file as the source directory."
         )
     if analysis is None:
         analysis = analyze_model_file(pmx_path, source_dir)
@@ -3177,29 +3191,72 @@ def import_pmx_to_blender(
 
     copy_asset_tree(source_dir, workspace.source_assets_dir, progress)
     if not workspace.copied_pmx.exists():
-        raise FileNotFoundError(f"copied PMX was not found: {workspace.copied_pmx}")
+        raise FileNotFoundError(f"copied model was not found: {workspace.copied_pmx}")
 
     setup = ensure_portable_blender(progress, cancel_check=cancel_check)
-    is_vrm = pmx_path.suffix.lower() == ".vrm"
-    import_script = BLENDER_VRM_IMPORT_SCRIPT if is_vrm else BLENDER_IMPORT_SCRIPT
-    command = [
-        str(setup.blender_exe),
-        "--background",
-        "--factory-startup",
-        "--python-exit-code",
-        "1",
-        "--python",
-        str(import_script),
-        "--",
-        "--vrm" if is_vrm else "--pmx",
-        str(workspace.copied_pmx),
-        "--output-blend",
-        str(workspace.blend_path),
-        "--report-json",
-        str(workspace.import_report_path),
-    ]
-    if is_vrm:
-        command += ["--textures-dir", str(workspace.source_assets_dir / "vrm_textures")]
+    ext = pmx_path.suffix.lower()
+    is_vrm = ext == ".vrm"
+    is_generic = ext in {".fbx", ".glb", ".gltf", ".blend"}
+
+    if is_generic:
+        import_script = BLENDER_GENERIC_IMPORT_SCRIPT
+        command = [
+            str(setup.blender_exe),
+            "--background",
+            "--factory-startup",
+            "--python-exit-code",
+            "1",
+            "--python",
+            str(import_script),
+            "--",
+            "--input",
+            str(workspace.copied_pmx),
+            "--output-blend",
+            str(workspace.blend_path),
+            "--report-json",
+            str(workspace.import_report_path),
+            "--source-dir",
+            str(workspace.source_assets_dir),
+        ]
+    elif is_vrm:
+        import_script = BLENDER_VRM_IMPORT_SCRIPT
+        command = [
+            str(setup.blender_exe),
+            "--background",
+            "--factory-startup",
+            "--python-exit-code",
+            "1",
+            "--python",
+            str(import_script),
+            "--",
+            "--vrm",
+            str(workspace.copied_pmx),
+            "--output-blend",
+            str(workspace.blend_path),
+            "--report-json",
+            str(workspace.import_report_path),
+            "--textures-dir",
+            str(workspace.source_assets_dir / "vrm_textures"),
+        ]
+    else:  # PMX
+        import_script = BLENDER_IMPORT_SCRIPT
+        command = [
+            str(setup.blender_exe),
+            "--background",
+            "--factory-startup",
+            "--python-exit-code",
+            "1",
+            "--python",
+            str(import_script),
+            "--",
+            "--pmx",
+            str(workspace.copied_pmx),
+            "--output-blend",
+            str(workspace.blend_path),
+            "--report-json",
+            str(workspace.import_report_path),
+        ]
+
     emit(progress, f"Starting Blender import: {workspace.copied_pmx}")
     started = time.monotonic()
     run_process_streamed(
@@ -3254,9 +3311,20 @@ def fix_imported_blend(
         str(fix_report_path),
     ]
     command.append("--clear-custom-normals" if clear_custom_normals else "--keep-custom-normals")
-    if workspace_model_format(input_blend) == "vrm":
+    model_format = workspace_model_format(input_blend)
+    if model_format == "vrm":
         command.append("--vrm-spine-merge")
         emit(progress, "VRM model detected: Spine2 will be merged into Spine1 after the ValveBiped conversion.")
+    elif model_format == "generic":
+        # Generic FBX/GLB/blend imports may carry non-MMD rig structures
+        # (e.g. Rigify control/mechanism/deform bone layers) that CATS'
+        # fix_armature_warning operator explicitly refuses to process
+        # ("Rigify and Metarig armatures are not supported"). Skip CATS'
+        # MMD-specific armature fix pass for these; our own heuristic bone
+        # mapping (Step 1) and spine fix (Step 3) already handle the
+        # ValveBiped conversion without needing CATS here.
+        command.append("--skip-cats-fix")
+        emit(progress, "Generic model detected: skipping CATS armature fix (handled by heuristic bone mapping instead).")
     emit(progress, f"Starting Blender fix step: {input_blend}")
     started = time.monotonic()
     run_process_streamed(
@@ -3470,7 +3538,7 @@ def analyze_sort_bones_blend(
         str(_resolve_sort_bones_limit(limit, game)),
     ]
     # Only L4D2 adds --game so the GMod command line stays byte-identical.
-    if game == "l4d2":
+    if game != "gmod":
         command += ["--game", game]
     emit(progress, f"Starting Blender sort bones analysis: {input_blend}")
     started = time.monotonic()
@@ -3553,7 +3621,7 @@ def sort_bones_blend(
         str(_resolve_sort_bones_limit(limit, game)),
     ]
     # Only L4D2 adds --game so the GMod command line stays byte-identical.
-    if game == "l4d2":
+    if game != "gmod":
         command += ["--game", game]
     emit(progress, f"Starting Blender sort bones step: {input_blend}")
     started = time.monotonic()
@@ -4015,7 +4083,7 @@ def analyze_flexes_blend(
         str(plan_path),
     ]
     # Only L4D2 adds --game so the GMod flex-analyze command stays byte-identical.
-    if game == "l4d2":
+    if game != "gmod":
         command += ["--game", game]
     emit(progress, f"Starting Blender flex analysis: {input_blend}")
     started = time.monotonic()
@@ -4733,8 +4801,6 @@ def run_carms_sort(
     weight_threshold: float = 0.12,
     progress: ProgressCallback | None = None,
     cancel_check: CancelCheck | None = None,
-    game: str = "gmod",
-    experimental_arms: bool = False,
 ) -> CArmsResult:
     input_dir = input_dir.resolve()
     final_dir, carms_dir, workspace_blend, report_path, files_path = carms_paths_for_proportion_export(input_dir)
@@ -4766,10 +4832,6 @@ def run_carms_sort(
         str(files_path),
         "--weight-threshold",
         str(float(weight_threshold)),
-        "--game",
-        (str(game or "gmod").strip().lower() or "gmod"),
-        "--experimental-arms",
-        ("1" if experimental_arms else "0"),
     ]
     emit(progress, f"Starting Blender c_arms sorting: {final_dir}")
     started = time.monotonic()
@@ -5381,13 +5443,9 @@ def analyze_qc(
         command.extend(["--studiomdl", studiomdl_path])
     if str(gender or "").strip().lower() == "male":
         command.extend(["--gender", "male"])
-    # Only L4D2/SFM add --game so the GMod analyze command stays byte-identical;
-    # L4D2 also adds --survivor (SFM has no survivor slot).
-    target_game = str(game or "").strip().lower()
-    if target_game == "l4d2":
+    # Only L4D2 adds --game/--survivor so the GMod analyze command stays byte-identical.
+    if str(game or "").strip().lower() == "l4d2":
         command.extend(["--game", "l4d2", "--survivor", str(survivor or DEFAULT_L4D2_SURVIVOR)])
-    elif target_game == "sfm":
-        command.extend(["--game", "sfm"])
     emit(progress, f"Starting Step 14 QC analysis: {final_dir}")
     started = time.monotonic()
     run_process_streamed(command, progress=progress, log_path=log_path, cancel_check=cancel_check)
@@ -5610,7 +5668,14 @@ def generate_release_description(
 def find_model_files(folder: Path) -> list[Path]:
     if not folder.exists() or not folder.is_dir():
         return []
-    matches = list(folder.rglob("*.pmx")) + list(folder.rglob("*.vrm"))
+    matches = (
+        list(folder.rglob("*.pmx")) +
+        list(folder.rglob("*.vrm")) +
+        list(folder.rglob("*.fbx")) +
+        list(folder.rglob("*.glb")) +
+        list(folder.rglob("*.gltf")) +
+        list(folder.rglob("*.blend"))
+    )
     return sorted(matches, key=lambda path: (-path.stat().st_size, str(path).lower()))
 
 
@@ -5656,14 +5721,14 @@ def main(argv: list[str] | None = None) -> int:
     sort_analyze_parser = subparsers.add_parser("sort-bones-analyze", help="analyze and propose bone merges for the Source bone limit")
     sort_analyze_parser.add_argument("spine_fixed_blend", type=Path)
     sort_analyze_parser.add_argument("--limit", type=int, default=None)
-    sort_analyze_parser.add_argument("--game", choices=("gmod", "l4d2", "sfm"), default="gmod")
+    sort_analyze_parser.add_argument("--game", choices=("gmod", "l4d2"), default="gmod")
 
     sort_parser = subparsers.add_parser("sort-bones", help="apply a proposed bone merge plan")
     sort_parser.add_argument("spine_fixed_blend", type=Path)
     sort_parser.add_argument("--plan-json", type=Path, required=True)
     sort_parser.add_argument("--output-blend", type=Path)
     sort_parser.add_argument("--limit", type=int, default=None)
-    sort_parser.add_argument("--game", choices=("gmod", "l4d2", "sfm"), default="gmod")
+    sort_parser.add_argument("--game", choices=("gmod", "l4d2"), default="gmod")
 
     material_scan_parser = subparsers.add_parser("materials-scan", help="scan materials and propose cleanup/combine plan")
     material_scan_parser.add_argument("bones_sorted_blend", type=Path)
@@ -5704,7 +5769,7 @@ def main(argv: list[str] | None = None) -> int:
 
     flex_analyze_parser = subparsers.add_parser("flexes-analyze", help="analyze and propose facial/body flex sorting")
     flex_analyze_parser.add_argument("bodygroups_sorted_blend", type=Path)
-    flex_analyze_parser.add_argument("--game", choices=("gmod", "l4d2", "sfm"), default="gmod")
+    flex_analyze_parser.add_argument("--game", choices=("gmod", "l4d2"), default="gmod")
 
     flex_apply_parser = subparsers.add_parser("flexes-apply", help="apply a flex sorting plan")
     flex_apply_parser.add_argument("bodygroups_sorted_blend", type=Path)
@@ -5733,13 +5798,12 @@ def main(argv: list[str] | None = None) -> int:
     proportion_parser.add_argument("collision_sorted_blend", type=Path)
     proportion_parser.add_argument("--remove-zero-weight-bones", dest="remove_zero_weight_bones", action="store_true", default=True)
     proportion_parser.add_argument("--keep-zero-weight-bones", dest="remove_zero_weight_bones", action="store_false")
-    proportion_parser.add_argument("--game", choices=("gmod", "l4d2", "sfm"), default="gmod")
+    proportion_parser.add_argument("--game", choices=("gmod", "l4d2"), default="gmod")
     proportion_parser.add_argument("--survivor", choices=tuple(L4D2_SURVIVORS), default=DEFAULT_L4D2_SURVIVOR)
 
     carms_parser = subparsers.add_parser("carms-run", help="create c_arms SMD files from the proportion export")
     carms_parser.add_argument("proportion_export_dir", type=Path)
     carms_parser.add_argument("--weight-threshold", type=float, default=0.12)
-    carms_parser.add_argument("--game", default="gmod")
 
     vrd_analyze_parser = subparsers.add_parser("vrd-analyze", help="analyze Step 9 SMD files and propose VRD skirt helpers")
     vrd_analyze_parser.add_argument("proportion_export_dir", type=Path)
@@ -5779,8 +5843,6 @@ def main(argv: list[str] | None = None) -> int:
     qc_analyze_parser.add_argument("--character-category", default="")
     qc_analyze_parser.add_argument("--model-name", default="")
     qc_analyze_parser.add_argument("--gender", choices=("female", "male"), default="female")
-    qc_analyze_parser.add_argument("--game", choices=("gmod", "l4d2", "sfm"), default="gmod")
-    qc_analyze_parser.add_argument("--survivor", choices=tuple(L4D2_SURVIVORS), default=DEFAULT_L4D2_SURVIVOR)
     qc_analyze_parser.add_argument("--gmod-root", default="")
     qc_analyze_parser.add_argument("--studiomdl", default="")
 
@@ -6165,7 +6227,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         return 0
     if args.command == "carms-run":
-        result = run_carms_sort(args.proportion_export_dir, args.weight_threshold, progress=print_progress, game=args.game)
+        result = run_carms_sort(args.proportion_export_dir, args.weight_threshold, progress=print_progress)
         print(
             json.dumps(
                 {
@@ -6326,8 +6388,6 @@ def main(argv: list[str] | None = None) -> int:
             studiomdl_path=args.studiomdl,
             progress=print_progress,
             gender=args.gender,
-            game=args.game,
-            survivor=args.survivor,
         )
         print(
             json.dumps(

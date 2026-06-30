@@ -441,11 +441,53 @@ def _read_bone(reader: core.PmxReader, encoding: str, bone_index_size: int) -> P
 
 
 def load_static_preview_model(model_path: Path) -> StaticPreviewModel:
-    """Load a static preview model, dispatching on the file suffix (.pmx/.vrm)."""
+    """Load a static preview model, dispatching on the file suffix (.pmx/.vrm/.glb/.gltf/.fbx)."""
     model_path = model_path.resolve()
-    if model_path.suffix.lower() == ".vrm":
+    ext = model_path.suffix.lower()
+    if ext == ".vrm":
         return _load_vrm_preview_model(model_path)
+    if ext in {".glb", ".gltf"}:
+        return _load_vrm_preview_model(model_path)  # GLB/GLTF uses the same parser
+    if ext == ".fbx":
+        return _load_fbx_preview_stub(model_path)
     return _load_pmx_preview_model(model_path)
+
+
+def _load_fbx_preview_stub(model_path: Path) -> StaticPreviewModel:
+    """Return a minimal placeholder model for FBX files.
+
+    FBX is a proprietary binary format that requires Blender to parse.
+    The preview widget cannot render it natively, so we return an empty
+    model with a clear warning rather than crashing with a cryptic
+    'invalid signature' error.  The Step 9 export always produces SMDs
+    that the 3-D preview in Step 14 can show; this stub covers only the
+    initial file-selection preview.
+    """
+    # Try to find a companion GLB/GLTF if one was exported alongside the FBX.
+    for ext in (".glb", ".gltf"):
+        companion = model_path.with_suffix(ext)
+        if companion.exists():
+            try:
+                return _load_vrm_preview_model(companion)
+            except Exception:
+                pass
+    # Return an empty-geometry placeholder so the widget shows a message
+    # instead of a traceback.
+    return StaticPreviewModel(
+        path=model_path,
+        name=model_path.stem,
+        english_name=model_path.stem,
+        positions=np.zeros((0, 3), dtype=np.float32),
+        normals=np.zeros((0, 3), dtype=np.float32),
+        uvs=np.zeros((0, 2), dtype=np.float32),
+        indices=np.zeros((0,), dtype=np.uint32),
+        materials=[],
+        bones=[],
+        morph_count=0,
+        texture_count=0,
+        warnings=["FBX preview is not supported in the built-in viewer. "
+                  "The model will still import and compile correctly."],
+    )
 
 
 def _load_pmx_preview_model(model_path: Path) -> StaticPreviewModel:
@@ -1173,25 +1215,9 @@ class StaticModelPreviewWidget(QOpenGLWidget):
         self._texture_ids = {}
         self._gl_ready = False
         if GL:
-            # Guard these initial GL calls. initializeGL is normally invoked with
-            # the context already current, but under some drivers / on context
-            # recreation during docking/reparenting the context is not yet current
-            # here, and an unguarded GL call raises GLError 1282 (invalid
-            # operation) which crashes the whole app. Ensure the context is
-            # current and swallow transient failures, matching how paintGL and
-            # the texture-delete paths already protect their GL calls.
-            try:
-                self.makeCurrent()
-            except Exception:
-                pass
-            try:
-                GL.glClearColor(0.08, 0.09, 0.10, 1.0)
-                GL.glEnable(GL.GL_DEPTH_TEST)
-                GL.glDisable(GL.GL_CULL_FACE)
-            except Exception as exc:
-                # Defer real initialization to the first paintGL, which runs with
-                # a guaranteed-current context and is already exception-guarded.
-                self._gl_error = str(exc)
+            GL.glClearColor(0.08, 0.09, 0.10, 1.0)
+            GL.glEnable(GL.GL_DEPTH_TEST)
+            GL.glDisable(GL.GL_CULL_FACE)
 
     def _on_context_about_to_be_destroyed(self) -> None:
         try:
@@ -2963,17 +2989,9 @@ class MaterialPreviewWidget(QOpenGLWidget):
         # A fresh context invalidates previously created texture names.
         self._material_texture_ids = {}
         if GL:
-            try:
-                self.makeCurrent()
-            except Exception as exc:
-                self._gl_error = str(exc)
-                return
-            try:
-                GL.glClearColor(0.08, 0.09, 0.10, 1.0)
-                GL.glEnable(GL.GL_DEPTH_TEST)
-                GL.glDisable(GL.GL_CULL_FACE)
-            except Exception as exc:
-                self._gl_error = str(exc)
+            GL.glClearColor(0.08, 0.09, 0.10, 1.0)
+            GL.glEnable(GL.GL_DEPTH_TEST)
+            GL.glDisable(GL.GL_CULL_FACE)
 
     def _delete_gl_material_textures(self) -> None:
         """Delete GL texture objects; the GL context must be current."""

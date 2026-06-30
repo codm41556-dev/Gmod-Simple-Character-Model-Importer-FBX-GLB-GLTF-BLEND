@@ -43,7 +43,7 @@ TARGET_PARENTS = {
     R_CLAVICLE: SPINE4,
     L_CLAVICLE: SPINE4,
 }
-ADDABLE_TARGETS = {SPINE, SPINE2}
+ADDABLE_TARGETS = {SPINE, SPINE2, SPINE4}  # SPINE4 may be missing on 2-spine FBX rigs
 SIDE_LANDMARKS = [R_CLAVICLE, L_CLAVICLE, R_UPPER_ARM, L_UPPER_ARM, R_THIGH, L_THIGH]
 SAFE_BONE_NAME_PATTERN = re.compile(r"^[A-Za-z0-9_]+$")
 SOURCE_BONE_NAME_PATTERN = re.compile(r"^ValveBiped\.Bip01_[A-Za-z0-9_]+$")
@@ -374,7 +374,12 @@ def score_spine1_candidate(
 
 
 def added_spine_position(target: str, selected: dict[str, str | None], bones: dict[str, bpy.types.Bone]) -> dict[str, object]:
-    if target == SPINE2:
+    if target == SPINE4:
+        # Spine4 is the upper-chest anchor (just below neck/clavicles).
+        # Place it above whatever upper spine bone we have, below Neck if present.
+        lower_name = selected.get(SPINE2) or selected.get(SPINE1) or selected.get(SPINE)
+        upper_name = selected.get(NECK) or selected.get(R_CLAVICLE) or selected.get(L_CLAVICLE)
+    elif target == SPINE2:
         lower_name = selected.get(SPINE1)
         upper_name = selected.get(SPINE4)
     else:
@@ -1123,6 +1128,14 @@ def normalize_added_spine_positions(armature: bpy.types.Object, added: set[str])
             before = {"head": v3(edit_bones[SPINE].head), "tail": v3(edit_bones[SPINE].tail)}
             place_bone_between(edit_bones[SPINE], edit_bones[PELVIS].head, edit_bones[SPINE1].head, 0.45, 0.82)
             changes.append({"bone": SPINE, "before": before, "after": {"head": v3(edit_bones[SPINE].head), "tail": v3(edit_bones[SPINE].tail)}})
+        if SPINE4 in added and SPINE1 in edit_bones and SPINE4 in edit_bones:
+            # Find the best upper landmark (Neck or a clavicle) to anchor Spine4.
+            upper_name = next((n for n in (NECK, R_CLAVICLE, L_CLAVICLE) if n in edit_bones), None)
+            if upper_name:
+                before = {"head": v3(edit_bones[SPINE4].head), "tail": v3(edit_bones[SPINE4].tail)}
+                lower_ref = edit_bones.get(SPINE2) or edit_bones.get(SPINE1)
+                place_bone_between(edit_bones[SPINE4], lower_ref.head, edit_bones[upper_name].head, 0.65, 0.90)
+                changes.append({"bone": SPINE4, "before": before, "after": {"head": v3(edit_bones[SPINE4].head), "tail": v3(edit_bones[SPINE4].tail)}})
         if SPINE2 in added and SPINE1 in edit_bones and SPINE4 in edit_bones and SPINE2 in edit_bones:
             before = {"head": v3(edit_bones[SPINE2].head), "tail": v3(edit_bones[SPINE2].tail)}
             place_bone_between(edit_bones[SPINE2], edit_bones[SPINE1].head, edit_bones[SPINE4].head, 0.55, 0.82)

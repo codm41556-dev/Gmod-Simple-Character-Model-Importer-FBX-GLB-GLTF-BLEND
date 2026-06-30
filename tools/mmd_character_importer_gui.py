@@ -1,3 +1,4 @@
+#!/usr/bin/env python3
 """PySide6 launcher for the MMD Character Importer workflow."""
 
 from __future__ import annotations
@@ -98,17 +99,14 @@ LANGUAGE_OPTIONS = [
 ]
 GMOD_ICON_PATH = ROOT_DIR / "tools" / "assets" / "Garry's_Mod_logo.png"
 L4D2_ICON_PATH = ROOT_DIR / "tools" / "assets" / "L4D2_Icon.png"
-SFM_ICON_PATH = ROOT_DIR / "tools" / "assets" / "SFM.png"
 # (code, display, icon_path). Display names are proper nouns and are not translated.
 GAME_OPTIONS = [
     ("gmod", "Garry's Mod", GMOD_ICON_PATH),
     ("l4d2", "Left 4 Dead 2", L4D2_ICON_PATH),
-    ("sfm", "Source Filmmaker", SFM_ICON_PATH),
 ]
 GAME_CODES = {code for code, _display, _icon in GAME_OPTIONS}
 # Per-game Step 4 bone budget; mirrors blender_sort_bones.GAME_BONE_LIMITS.
-# SFM uses the same skeleton/pipeline as GMod (254-bone budget).
-GAME_BONE_LIMITS = {"gmod": 254, "l4d2": 126, "sfm": 254}
+GAME_BONE_LIMITS = {"gmod": 254, "l4d2": 126}
 # L4D2 survivors the model can be ported onto. In L4D2 mode this dropdown
 # replaces the gender selector; the choice drives the Step 9 proportion target.
 # (code = compiled survivor .mdl stem; default Rochelle/producer.)
@@ -2262,12 +2260,10 @@ class CArmsRunWorker(QtCore.QThread):
     done = QtCore.Signal(dict)
     failed = QtCore.Signal(str)
 
-    def __init__(self, input_dir: str, weight_threshold: float, game: str = "gmod", experimental_arms: bool = False) -> None:
+    def __init__(self, input_dir: str, weight_threshold: float) -> None:
         super().__init__()
         self.input_dir = input_dir
         self.weight_threshold = weight_threshold
-        self.game = normalize_game_code(game)
-        self.experimental_arms = bool(experimental_arms)
         self.cancel_requested = False
 
     def cancel(self) -> None:
@@ -2286,8 +2282,6 @@ class CArmsRunWorker(QtCore.QThread):
                 self.weight_threshold,
                 progress=self._log,
                 cancel_check=self._cancelled,
-                game=self.game,
-                experimental_arms=self.experimental_arms,
             )
             self.done.emit(
                 {
@@ -2815,9 +2809,6 @@ class FullImportWorker(QtCore.QThread):
         bodygroup_scale_factor: float = float(getattr(core, "DEFAULT_BODYGROUP_SCALE_FACTOR", 40.457)),
         game: str = "gmod",
         survivor: str = "producer",
-        copy_to_sfm_usermod: bool = True,
-        nodecal: bool = False,
-        generate_vrd: bool = True,
     ) -> None:
         super().__init__()
         self.pmx_path = Path(pmx_path)
@@ -2835,9 +2826,6 @@ class FullImportWorker(QtCore.QThread):
         self.gender = "male" if str(gender or "").strip().lower() == "male" else "female"
         self.game = normalize_game_code(game)
         self.survivor = normalize_survivor_code(survivor)
-        self.copy_to_sfm_usermod = bool(copy_to_sfm_usermod)
-        self.nodecal = bool(nodecal)
-        self.generate_vrd = bool(generate_vrd)
         self.bodygroup_scale_factor = float(bodygroup_scale_factor or getattr(core, "DEFAULT_BODYGROUP_SCALE_FACTOR", 40.457))
         self.cancel_requested = False
         self.step_results: dict[int, dict[str, object]] = {}
@@ -3045,67 +3033,46 @@ class FullImportWorker(QtCore.QThread):
             self._write_marker(7, flex_result.flex_dir, outputs={"blend": str(flex_result.output_blend), "flexes_json": str(flex_result.flexes_json_path)}, report_path=flex_result.report_path)
             self.step_results[7] = {"blend": str(flex_result.output_blend), "report": str(flex_result.report_path), "dir": str(flex_result.flex_dir)}
 
-            # Step 8 (collision/physics) is not used for SFM (no ragdoll/physics); Step 9 then
-            # runs directly on the Step 7 flex output.
-            if self.game == "sfm":
-                self._log("Skipping Step 8 (Sort Collision): not required for Source Filmmaker.")
-                step9_input_blend = flex_result.output_blend
-            else:
-                self._stage(8, "Sort Collision", str(flex_result.output_blend))
-                collision_analysis = core.analyze_collision_blend(
-                    flex_result.output_blend,
-                    source_bodygroups=None,
-                    quality_preset=self.collision_quality,
-                    progress=self._log,
-                    cancel_check=self._cancelled,
-                )
-                collision_result = core.sort_collision_blend(flex_result.output_blend, collision_analysis.plan, progress=self._log, cancel_check=self._cancelled)
-                self._require_clean_report(8, collision_result.report, "collision generation")
-                self._write_marker(
-                    8,
-                    collision_result.collision_dir,
-                    outputs={"blend": str(collision_result.output_blend), "physics_smd": str(collision_result.physics_smd_path), "physics_settings": str(collision_result.physics_settings_path)},
-                    report_path=collision_result.report_path,
-                )
-                self.step_results[8] = {"blend": str(collision_result.output_blend), "report": str(collision_result.report_path), "dir": str(collision_result.collision_dir)}
-                step9_input_blend = collision_result.output_blend
+            self._stage(8, "Sort Collision", str(flex_result.output_blend))
+            collision_analysis = core.analyze_collision_blend(
+                flex_result.output_blend,
+                source_bodygroups=None,
+                quality_preset=self.collision_quality,
+                progress=self._log,
+                cancel_check=self._cancelled,
+            )
+            collision_result = core.sort_collision_blend(flex_result.output_blend, collision_analysis.plan, progress=self._log, cancel_check=self._cancelled)
+            self._require_clean_report(8, collision_result.report, "collision generation")
+            self._write_marker(
+                8,
+                collision_result.collision_dir,
+                outputs={"blend": str(collision_result.output_blend), "physics_smd": str(collision_result.physics_smd_path), "physics_settings": str(collision_result.physics_settings_path)},
+                report_path=collision_result.report_path,
+            )
+            self.step_results[8] = {"blend": str(collision_result.output_blend), "report": str(collision_result.report_path), "dir": str(collision_result.collision_dir)}
 
-            self._stage(9, "Export Proportion Trick", str(step9_input_blend))
-            proportion_result = core.run_proportion_export(step9_input_blend, remove_zero_weight_bones=True, progress=self._log, cancel_check=self._cancelled, game=self.game, survivor=self.survivor)
+            self._stage(9, "Export Proportion Trick", str(collision_result.output_blend))
+            proportion_result = core.run_proportion_export(collision_result.output_blend, remove_zero_weight_bones=True, progress=self._log, cancel_check=self._cancelled, game=self.game, survivor=self.survivor)
             self._require_clean_report(9, proportion_result.report, "proportion export")
             self._write_marker(9, proportion_result.proportion_dir, outputs={"final_dir": str(proportion_result.final_dir), "files": str(proportion_result.files_path)}, report_path=proportion_result.report_path)
             self.step_results[9] = {"final_dir": str(proportion_result.final_dir), "report": str(proportion_result.report_path), "dir": str(proportion_result.proportion_dir)}
 
-            # Step 10 (c_arms) is not used for SFM (no first-person view arms).
-            if self.game == "sfm":
-                self._log("Skipping Step 10 (Sort c_arms): not required for Source Filmmaker.")
-            else:
-                def run_carms() -> None:
-                    carms = core.run_carms_sort(proportion_result.final_dir, progress=self._log, cancel_check=self._cancelled, game=self.game)
-                    self._require_clean_report(10, carms.report, "c_arms sort")
-                    self._write_marker(10, carms.carms_dir, outputs={"files": str(carms.files_path)}, report_path=carms.report_path)
-                    self.step_results[10] = {"dir": str(carms.carms_dir), "report": str(carms.report_path), "files": str(carms.files_path)}
+            def run_carms() -> None:
+                carms = core.run_carms_sort(proportion_result.final_dir, progress=self._log, cancel_check=self._cancelled)
+                self._require_clean_report(10, carms.report, "c_arms sort")
+                self._write_marker(10, carms.carms_dir, outputs={"files": str(carms.files_path)}, report_path=carms.report_path)
+                self.step_results[10] = {"dir": str(carms.carms_dir), "report": str(carms.report_path), "files": str(carms.files_path)}
 
-                self._optional(10, "Sort c_arms", run_carms)
+            self._optional(10, "Sort c_arms", run_carms)
 
             def run_vrd() -> None:
                 vrd_analysis = core.analyze_vrd(proportion_result.final_dir, progress=self._log, cancel_check=self._cancelled)
-                vrd_plan = vrd_analysis.plan
-                if self.game == "sfm" and isinstance(vrd_plan, dict):
-                    # SFM auto-port uses gentler skirt follow-through than the in-game targets:
-                    # front / front-side / side (driver frames 10/20/30) intensity = 0.6 / 0.3 / 0.15.
-                    vrd_plan["intensity_multipliers"] = {"10": 0.6, "20": 0.3, "30": 0.15}
-                vrd = core.apply_vrd(proportion_result.final_dir, vrd_plan, progress=self._log, cancel_check=self._cancelled)
+                vrd = core.apply_vrd(proportion_result.final_dir, vrd_analysis.plan, progress=self._log, cancel_check=self._cancelled)
                 self._require_clean_report(11, vrd.report, "VRD export")
                 self._write_marker(11, vrd.vrd_dir, outputs={"vrd": str(vrd.vrd_path)}, report_path=vrd.report_path)
                 self.step_results[11] = {"dir": str(vrd.vrd_dir), "report": str(vrd.report_path), "vrd": str(vrd.vrd_path)}
 
-            if self.game == "sfm" and not self.generate_vrd:
-                # SFM: VRD ($proceduralbones skirt helpers) is opt-in and off by default. Skip Step 11
-                # entirely so no VRD is generated or compiled; Step 14 will not warn about its absence.
-                self._log("Skipping Step 11 (Sort VRD): disabled for Source Filmmaker (enable 'Generate VRD' to include it).")
-            else:
-                self._optional(11, "Sort VRD", run_vrd)
+            self._optional(11, "Sort VRD", run_vrd)
 
             def run_textures() -> None:
                 textures_analysis = core.analyze_textures(material_apply.materials_json_path, progress=self._log, cancel_check=self._cancelled, game=self.game)
@@ -3118,19 +3085,15 @@ class FullImportWorker(QtCore.QThread):
 
             self._optional(12, "Param Texture", run_textures)
 
-            # SFM ships loose models + materials only; GMod spawn-menu icons (Step 13) are not used.
-            if self.game == "sfm":
-                self._log("Skipping Step 13 (Sort Icons and Arts): not used for Source Filmmaker.")
-            else:
-                def run_icons() -> None:
-                    icons = core.run_icons(workspace.root, icon_basename=self.model_name, progress=self._log, cancel_check=self._cancelled)
-                    validation = icons.report.get("validation") if isinstance(icons.report.get("validation"), dict) else {"ok": str(icons.report.get("status") or "").lower() == "complete"}
-                    if validation.get("ok") is False:
-                        raise RuntimeError("Icon generation validation failed.")
-                    self._write_marker(13, icons.icon_dir, outputs={"files": str(icons.files_path), "release_icon": str(icons.icon_dir / "release_icon.png")}, report_path=icons.report_path, validation=validation)
-                    self.step_results[13] = {"dir": str(icons.icon_dir), "report": str(icons.report_path), "files": str(icons.files_path)}
+            def run_icons() -> None:
+                icons = core.run_icons(workspace.root, icon_basename=self.model_name, progress=self._log, cancel_check=self._cancelled)
+                validation = icons.report.get("validation") if isinstance(icons.report.get("validation"), dict) else {"ok": str(icons.report.get("status") or "").lower() == "complete"}
+                if validation.get("ok") is False:
+                    raise RuntimeError("Icon generation validation failed.")
+                self._write_marker(13, icons.icon_dir, outputs={"files": str(icons.files_path), "release_icon": str(icons.icon_dir / "release_icon.png")}, report_path=icons.report_path, validation=validation)
+                self.step_results[13] = {"dir": str(icons.icon_dir), "report": str(icons.report_path), "files": str(icons.files_path)}
 
-                self._optional(13, "Sort Icons and Arts", run_icons)
+            self._optional(13, "Sort Icons and Arts", run_icons)
 
             self._stage(14, "Sort QC and Compile", str(proportion_result.final_dir))
             qc_analysis = core.analyze_qc(
@@ -3158,8 +3121,6 @@ class FullImportWorker(QtCore.QThread):
             qc_plan["category_readable"] = self.category_display_name
             qc_plan["display_name"] = self.model_display_name
             qc_plan["copy_to_gmod_addons"] = True
-            qc_plan["copy_to_sfm_usermod"] = bool(self.copy_to_sfm_usermod)
-            qc_plan["nodecal"] = bool(self.nodecal)
             qc_plan["distribution_output_dir"] = self.distribution_output_dir
             qc_result = core.compile_and_compose_qc(proportion_result.final_dir, qc_plan, progress=self._log, cancel_check=self._cancelled)
             validation = qc_result.report.get("validation") if isinstance(qc_result.report.get("validation"), dict) else {}
@@ -3762,7 +3723,6 @@ class ImporterWindow(QtWidgets.QMainWindow):
         # defer all of it to the FIRST showEvent (event-driven, so it waits for the real show
         # regardless of machine speed) instead of firing singleShot(0) timers from the constructor.
         self._deferred_startup_started = False
-        self._install_sorting_on_read_only_tables()
         self.statusBar().showMessage(self._t("app.status.ready", "Ready"))
 
     def showEvent(self, event: QtGui.QShowEvent) -> None:
@@ -3802,137 +3762,6 @@ class ImporterWindow(QtWidgets.QMainWindow):
             BlenderSetupDialog(self).exec()
         except Exception:
             pass
-
-    # --- Click-to-sort table headers -------------------------------------------------------------
-    # Tables whose cells embed interactive editors (combo/spin cell widgets) OR whose itemChanged
-    # handler writes back to the underlying data by ROW index are EXCLUDED for now: a QTableWidget
-    # cannot reorder a cell widget without recreating it, and reordering item rows would make a later
-    # edit map to the wrong data row. They will get a proper rebuild-on-sort in a follow-up. Only the
-    # genuinely read-only display tables (the file lists, model manager, etc.) are wired here.
-    _SORT_EXCLUDED_TABLE_ATTRS = (
-        # cell-widget tables
-        "spine_table", "material_table", "texture_group_table",
-        "collision_bone_table", "qc_bone_table", "qc_physics_table",
-        # editable / itemChanged (row-coupled) tables
-        "sort_table", "material_merge_table", "bodygroup_table", "flex_table",
-        "collision_source_table", "collision_table", "vrd_table", "texture_table",
-        "release_translation_table",
-    )
-
-    def _install_sorting_on_read_only_tables(self) -> None:
-        """Enable click-to-sort headers on every read-only QTableWidget (see exclusion note above)."""
-        excluded = {getattr(self, name, None) for name in self._SORT_EXCLUDED_TABLE_ATTRS}
-        for table in self.findChildren(QtWidgets.QTableWidget):
-            if table in excluded:
-                continue
-            self._install_table_sorting(table)
-
-    def _install_table_sorting(self, table: QtWidgets.QTableWidget) -> None:
-        if table.property("_sort_installed"):
-            return
-        table.setProperty("_sort_installed", True)
-        table.setProperty("_sort_col", -1)
-        table.setProperty("_sort_dir", 0)  # 0 unsorted, 1 ascending, 2 descending
-        header = table.horizontalHeader()
-        header.setSectionsClickable(True)
-        header.sectionClicked.connect(lambda col, t=table: self._on_table_header_clicked(t, col))
-
-    def _on_table_header_clicked(self, table: QtWidgets.QTableWidget, col: int) -> None:
-        prev_col = table.property("_sort_col")
-        prev_col = int(prev_col) if prev_col is not None else -1
-        prev_dir = int(table.property("_sort_dir") or 0)
-        # New column -> ascending; same column -> cycle ascending -> descending -> reset.
-        direction = 1 if col != prev_col else {0: 1, 1: 2, 2: 0}[prev_dir]
-        table.setProperty("_sort_col", col)
-        table.setProperty("_sort_dir", direction)
-        self._apply_table_sort(table, col, direction)
-        header = table.horizontalHeader()
-        header.setSortIndicatorShown(direction != 0)
-        if direction == 1:
-            header.setSortIndicator(col, QtCore.Qt.SortOrder.AscendingOrder)
-        elif direction == 2:
-            header.setSortIndicator(col, QtCore.Qt.SortOrder.DescendingOrder)
-
-    @staticmethod
-    def _cell_is_checkbox(item: QtWidgets.QTableWidgetItem | None) -> bool:
-        # ItemIsUserCheckable is set on EVERY default QTableWidgetItem, so it cannot detect a real
-        # checkbox cell. A checkbox is only drawn when CheckStateRole has actually been set.
-        return item is not None and item.data(QtCore.Qt.ItemDataRole.CheckStateRole) is not None
-
-    @classmethod
-    def _table_cell_sort_text(cls, item: QtWidgets.QTableWidgetItem | None) -> str:
-        """Comparable text for a cell: real checkbox cells -> '0'/'1', otherwise the trimmed text."""
-        if item is None:
-            return ""
-        if cls._cell_is_checkbox(item):
-            return "1" if item.checkState() == QtCore.Qt.CheckState.Checked else "0"
-        return item.text().strip()
-
-    def _apply_table_sort(self, table: QtWidgets.QTableWidget, col: int, direction: int) -> None:
-        rows = table.rowCount()
-        cols = table.columnCount()
-        if rows == 0 or col < 0 or col >= cols:
-            return
-        # Cache the ORIGINAL row order (lists of item objects) so 'reset' can restore it. Re-capture
-        # if the cache is stale (table was repopulated -> cached items no longer belong to it).
-        orig = getattr(table, "_sort_original_rows", None)
-        valid = (
-            isinstance(orig, list)
-            and len(orig) == rows
-            and all((orig[r][0] is None) or (orig[r][0].tableWidget() is table) for r in range(rows))
-        )
-        if not valid:
-            orig = [[table.item(r, c) for c in range(cols)] for r in range(rows)]
-            table._sort_original_rows = orig
-
-        if direction == 0:
-            new_rows = list(orig)
-        else:
-            texts = [self._table_cell_sort_text(orig[r][col]) for r in range(rows)]
-
-            def _is_number(value: str) -> bool:
-                try:
-                    float(value.replace(",", ""))
-                    return True
-                except ValueError:
-                    return False
-
-            non_empty = [t for t in texts if t != ""]
-            bool_tokens = {"0", "1", "true", "false", "yes", "no"}
-            is_checkbox_col = any(self._cell_is_checkbox(orig[r][col]) for r in range(rows))
-            if is_checkbox_col or (non_empty and all(t.lower() in bool_tokens for t in non_empty)):
-                def key_of(value: str) -> object:
-                    return 1 if value.lower() in ("1", "true", "yes") else 0
-            elif non_empty and all(_is_number(t) for t in non_empty):
-                def key_of(value: str) -> object:
-                    return float(value.replace(",", ""))
-            else:
-                def key_of(value: str) -> object:
-                    return value.casefold()
-
-            populated = [r for r in range(rows) if texts[r] != ""]
-            blanks = [r for r in range(rows) if texts[r] == ""]
-            # Stable sort keeps equal keys (and ties on reverse) in original order; blanks always last.
-            populated.sort(key=lambda r: key_of(texts[r]), reverse=(direction == 2))
-            new_rows = [orig[r] for r in populated] + [orig[r] for r in blanks]
-
-        # Re-place the item objects in the new order. Block signals so the move does not fire
-        # itemChanged/selectionChanged storms, and re-apply the prior selection by logical item.
-        selected_first = None
-        sel = table.selectedItems()
-        if sel:
-            selected_first = sel[0]
-        blocker = QtCore.QSignalBlocker(table)  # noqa: F841 (unblocks on delete)
-        for r in range(rows):
-            for c in range(cols):
-                table.takeItem(r, c)
-        for new_r, row_items in enumerate(new_rows):
-            for c, item in enumerate(row_items):
-                if item is not None:
-                    table.setItem(new_r, c, item)
-        del blocker
-        if selected_first is not None and selected_first.tableWidget() is table:
-            table.setCurrentItem(selected_first)
 
     def apply_startup_geometry(self) -> None:
         app = QtWidgets.QApplication.instance()
@@ -4097,8 +3926,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
             combo.addItem(game_icon(icon_path), display, code)
         combo.setToolTip(
             "Target game for porting. Garry's Mod is the default pipeline; "
-            "Left 4 Dead 2 retargets the bone limit and StudioMDL detection; "
-            "Source Filmmaker compiles a posed SFM model with loose usermod files + a .vpk."
+            "Left 4 Dead 2 retargets the bone limit and StudioMDL detection."
         )
         index = combo.findData(self.selected_game)
         if index >= 0:
@@ -4156,153 +3984,36 @@ class ImporterWindow(QtWidgets.QMainWindow):
                 del blocker
         self._refresh_character_selectors()
         self._refresh_gmod_only_visibility()
-        self._refresh_nodecal_checks_for_game()
-        self._refresh_experimental_arms_check()
         # On a live target-game switch (not during initial construction): relabel all
         # GMod<->L4D2 brand text and load the studiomdl path saved for the now-selected game.
         if getattr(self, "_i18n_initialized", False):
             self.apply_i18n()
             self._load_studiomdl_paths_for_game()
-        # Step 9's input button: SFM pulls from Step 7 (Step 8 collision is skipped).
-        if hasattr(self, "detect_collision_blend_button"):
-            self.detect_collision_blend_button.setText(
-                "1. Detect Step 7 Output" if self.selected_game == "sfm" else "1. Detect Step 8 Output"
-            )
 
     def _refresh_gmod_only_visibility(self) -> None:
-        """Hide surfaces that don't apply to the selected target game.
-
-        GMod-only (hidden for L4D2 and SFM): the RTX Remix vertex-limit option (a GMod-only
-        rendering path) and the Model Manager tab (manages garrysmod/addons folders; L4D2 ships
-        a single .vpk and SFM ships loose usermod files -- neither has such a folder to scan).
-        SFM additionally skips Step 8 (collision/physics) and Step 10 (c_arms), so those tabs are
-        hidden in SFM mode."""
-        game = getattr(self, "selected_game", "gmod")
-        gmod = game == "gmod"
-        sfm = game == "sfm"
+        """Hide GMod-only surfaces when L4D2 is the target: the RTX Remix vertex-limit option
+        (a GMod-only rendering path) and the Model Manager tab (which manages garrysmod/addons
+        folders; L4D2 ports ship as a single .vpk with no such folder to scan)."""
+        l4d2 = getattr(self, "selected_game", "gmod") == "l4d2"
         for attr in ("main_rtx_bodygroup_limit_check", "bodygroup_rtx_limit_check", "release_rtx_link_edit"):
             widget = getattr(self, attr, None)
             if isinstance(widget, QtWidgets.QWidget):
-                widget.setVisible(gmod)
+                widget.setVisible(not l4d2)
         rtx_label = (getattr(self, "main_form_labels", {}) or {}).get("rtx_vertex_limit")
         if isinstance(rtx_label, QtWidgets.QWidget):
-            rtx_label.setVisible(gmod)
+            rtx_label.setVisible(not l4d2)
         tabs = getattr(self, "tabs", None)
-        # (content widget attr, visible-for-this-game predicate)
-        conditional_tabs = [
-            (getattr(self, "model_manager_tab", None), gmod),   # GMod-only
-            (getattr(self, "collision_tab", None), not sfm),    # Step 8: not run for SFM
-            (getattr(self, "carms_tab", None), not sfm),        # Step 10: not run for SFM
-        ]
-        if tabs is not None:
-            for content_widget, visible in conditional_tabs:
-                if content_widget is None:
-                    continue
-                index = self.tab_index_for_content_widget(content_widget)
-                if index is None or index < 0:
-                    continue
+        manager_tab = getattr(self, "model_manager_tab", None)
+        if tabs is not None and manager_tab is not None:
+            manager_index = self.tab_index_for_content_widget(manager_tab)
+            if manager_index is not None and manager_index >= 0:
                 try:
-                    tabs.setTabVisible(index, visible)
+                    tabs.setTabVisible(manager_index, not l4d2)
                 except AttributeError:
-                    tabs.tabBar().setTabVisible(index, visible)
-                if not visible and tabs.currentIndex() == index:
+                    tabs.tabBar().setTabVisible(manager_index, not l4d2)
+                if l4d2 and tabs.currentIndex() == manager_index:
                     main_index = self.tab_index_for_content_widget(getattr(self, "main_tab", None))
                     tabs.setCurrentIndex(max(0, main_index))
-        # Show exactly one post-compile install row for the selected game: the addons-install
-        # checkbox for GMod/L4D2, the usermod-install checkbox for SFM.
-        install_form = getattr(self, "qc_install_form", None)
-        if install_form is not None:
-            for check, visible in (
-                (getattr(self, "qc_copy_to_gmod_addons_check", None), not sfm),
-                (getattr(self, "qc_copy_to_sfm_usermod_check", None), sfm),
-            ):
-                if check is None:
-                    continue
-                check.setVisible(visible)
-                label = install_form.labelForField(check)
-                if label is not None:
-                    label.setVisible(visible)
-        # Mirror the same one-row-per-game rule on the main (auto-port) tab.
-        main_sfm_check = getattr(self, "main_copy_to_sfm_usermod_check", None)
-        if isinstance(main_sfm_check, QtWidgets.QWidget):
-            main_sfm_check.setVisible(sfm)
-        main_sfm_label = getattr(self, "main_copy_to_sfm_usermod_label", None)
-        if isinstance(main_sfm_label, QtWidgets.QWidget):
-            main_sfm_label.setVisible(sfm)
-        # SFM-only: the "generate VRD" toggle (procedural skirt bones; off by default for SFM).
-        for attr in ("main_generate_vrd_check", "main_generate_vrd_label"):
-            widget = getattr(self, attr, None)
-            if isinstance(widget, QtWidgets.QWidget):
-                widget.setVisible(sfm)
-        # The $nodecal toggle applies to GMod and L4D2 only; hide it in SFM mode.
-        for attr in ("main_nodecal_check", "texture_nodecal_check"):
-            check = getattr(self, attr, None)
-            if isinstance(check, QtWidgets.QWidget):
-                check.setVisible(not sfm)
-
-    def nodecal_default_for_game(self, game: str | None = None) -> bool:
-        """$nodecal (disable material decals) default: on for L4D2 (bullet/blood decals look wrong
-        on a custom anime survivor mesh), off for Garry's Mod and SFM (the legacy behavior)."""
-        return normalize_game_code(game or getattr(self, "selected_game", "gmod")) == "l4d2"
-
-    def _nodecal_setting_key(self, game: str | None = None) -> str:
-        """Per-game QSettings key, so each target remembers its own $nodecal choice."""
-        return f"material_nodecal_{normalize_game_code(game or getattr(self, 'selected_game', 'gmod'))}"
-
-    def current_nodecal_enabled(self) -> bool:
-        """Effective $nodecal toggle for the selected game (remembered per game, game default otherwise)."""
-        default = self.nodecal_default_for_game()
-        return self.settings_bool(self.settings_store.value(self._nodecal_setting_key(), default), default)
-
-    def _refresh_nodecal_checks_for_game(self) -> None:
-        """Sync both $nodecal checkboxes (main tab + Step 12) to the value remembered for the current game."""
-        value = self.current_nodecal_enabled()
-        for attr in ("main_nodecal_check", "texture_nodecal_check"):
-            check = getattr(self, attr, None)
-            if isinstance(check, QtWidgets.QCheckBox):
-                blocker = QtCore.QSignalBlocker(check)
-                try:
-                    check.setChecked(value)
-                finally:
-                    del blocker
-
-    def on_nodecal_toggled(self, checked: bool) -> None:
-        """Keep the two $nodecal checkboxes in sync, remember the choice per game, and update the live plan."""
-        checked = bool(checked)
-        for attr in ("main_nodecal_check", "texture_nodecal_check"):
-            check = getattr(self, attr, None)
-            if isinstance(check, QtWidgets.QCheckBox) and check.isChecked() != checked:
-                blocker = QtCore.QSignalBlocker(check)
-                try:
-                    check.setChecked(checked)
-                finally:
-                    del blocker
-        self.settings_store.setValue(self._nodecal_setting_key(), checked)
-        if getattr(self, "current_qc_plan", None):
-            self.current_qc_plan["nodecal"] = checked
-
-    def current_experimental_arms_enabled(self) -> bool:
-        """GMod 'use experimental arms' toggle: ON = conform implementation, OFF (default) =
-        proportion-driven c_arms. Single global setting; only takes effect for GMod."""
-        return self.settings_bool(self.settings_store.value("carms_experimental_arms", False), False)
-
-    def _refresh_experimental_arms_check(self) -> None:
-        """Sync the 'use experimental arms' checkbox to the stored value; enable only for GMod."""
-        check = getattr(self, "carms_experimental_check", None)
-        if isinstance(check, QtWidgets.QCheckBox):
-            blocker = QtCore.QSignalBlocker(check)
-            try:
-                check.setChecked(self.current_experimental_arms_enabled())
-                check.setEnabled(normalize_game_code(getattr(self, "selected_game", "gmod")) == "gmod")
-            finally:
-                del blocker
-
-    def on_experimental_arms_toggled(self, checked: bool) -> None:
-        """Remember the 'use experimental arms' choice and update the live QC plan."""
-        checked = bool(checked)
-        self.settings_store.setValue("carms_experimental_arms", checked)
-        if getattr(self, "current_qc_plan", None):
-            self.current_qc_plan["gmod_experimental_arms"] = checked
 
     def _studiomdl_setting_key(self, base: str, game: str | None = None) -> str:
         """Per-game QSettings key for a studiomdl/install path. GMod keeps the legacy key for
@@ -4763,11 +4474,10 @@ class ImporterWindow(QtWidgets.QMainWindow):
         return self._apply_game_brand(text)
 
     def _apply_game_brand(self, text: str) -> str:
-        """In L4D2/SFM mode, relabel the GMod / Garry's Mod brand tokens in user-visible text to
-        the selected target game (L4D2 / Left 4 Dead 2, or SFM / Source Filmmaker) so the interface
-        matches it. Applied centrally to every string that flows through
-        _t()/translate_static_text()/translate_runtime_text(), so buttons, labels, tab titles,
-        dialog titles and messages all relabel together.
+        """In L4D2 mode, relabel the GMod / Garry's Mod brand tokens in user-visible text to
+        L4D2 / Left 4 Dead 2 so the interface matches the selected target game. Applied centrally
+        to every string that flows through _t()/translate_static_text()/translate_runtime_text(),
+        so buttons, labels, tab titles, dialog titles and messages all relabel together.
 
         Deliberately CASE-SENSITIVE and brand-token-only: it never touches lowercase path
         literals ('garrysmod/addons'), output-folder names ('GarrysMod'), or internal settings keys
@@ -4777,8 +4487,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
         repo (the actual repo is NOT renamed). A few strings that intentionally name BOTH games (the
         game selector's own option label + explainer tooltips) or describe the GMod-only RTX Remix
         path are left exactly as authored."""
-        game = getattr(self, "selected_game", "gmod")
-        if not text or game not in ("l4d2", "sfm"):
+        if not text or getattr(self, "selected_game", "gmod") != "l4d2":
             return text
         if (
             text == "Garry's Mod"
@@ -4787,13 +4496,12 @@ class ImporterWindow(QtWidgets.QMainWindow):
             or "Garry's Mod is the default" in text
         ):
             return text
-        full_name, short_name = ("Source Filmmaker", "SFM") if game == "sfm" else ("Left 4 Dead 2", "L4D2")
 
         def _swap(segment: str) -> str:
             return (
-                segment.replace("Garry's Mod", full_name)
-                .replace("GMod", short_name)
-                .replace("Gmod", short_name)
+                segment.replace("Garry's Mod", "Left 4 Dead 2")
+                .replace("GMod", "L4D2")
+                .replace("Gmod", "L4D2")
             )
 
         # Split on http(s) URLs and rewrite only the text BETWEEN them, so a "Gmod"/"GMod" token
@@ -5047,7 +4755,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
             self._set_path_row_text(
                 self.main_source_row,
                 self._t("main.mmd_folder", "MMD model folder"),
-                self._t("main.mmd_folder_hint", "Folder containing the selected PMX/VRM and texture files"),
+                self._t("main.mmd_folder_hint", "Folder containing the selected PMX/VRM/FBX/GLB and texture files"),
             )
         if hasattr(self, "main_gmod_row"):
             self._set_path_row_text(
@@ -5056,11 +4764,11 @@ class ImporterWindow(QtWidgets.QMainWindow):
                 self._t("main.gmod_hint", "Browse to studiomdl.exe or the Garry's Mod install folder"),
             )
         if hasattr(self, "main_pmx_label"):
-            self.main_pmx_label.setText(self._t("main.pmx_model", "PMX/VRM model"))
+            self.main_pmx_label.setText(self._t("main.pmx_model", "PMX/VRM/FBX/GLB model"))
         if hasattr(self, "main_pmx_badge"):
             self.main_pmx_badge.setText(self._t("common.required", "Required"))
         if hasattr(self, "main_pmx_hint"):
-            self.main_pmx_hint.setText(self._t("main.pmx_model_hint", "Defaults to the largest PMX/VRM in the selected folder"))
+            self.main_pmx_hint.setText(self._t("main.pmx_model_hint", "Defaults to the largest Model in the selected folder"))
         if hasattr(self, "main_refresh_pmx_button"):
             self.main_refresh_pmx_button.setText(self._t("common.refresh", "Refresh"))
         for key, widget in getattr(self, "main_form_labels", {}).items():
@@ -5143,7 +4851,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
             self.main_clear_workspace_cache_button.setToolTip(
                 self._t(
                     "main.clear_workspace_cache_tip",
-                    "Delete all generated folders and loose files inside the MMD Character Importer workspaces folder.",
+                    "Delete all generated folders and loose files inside the Character Importer workspaces folder.",
                 )
             )
         if hasattr(self, "main_delete_blender_cache_button"):
@@ -5184,7 +4892,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
 
     def _make_workflow_specs(self) -> dict[int, dict[str, object]]:
         return {
-            1: {"title": "Import MMD Model", "requires": [], "next": 2, "ready": ["analyze_button", "import_button"], "run": ["import_button"], "numbered": [("analyze_button", "1. Analyze"), ("import_button", "2. Import to Blender")]},
+            1: {"title": "Import Model", "requires": [], "next": 2, "ready": ["analyze_button", "import_button"], "run": ["import_button"], "numbered": [("analyze_button", "1. Analyze"), ("import_button", "2. Import to Blender")]},
             2: {"title": "Fix Model", "requires": [1], "next": 3, "ready": ["fix_button"], "run": ["fix_button"], "numbered": [("detect_import_blend_button", "1. Detect Step 1 Output"), ("fix_button", "2. Fix Model")]},
             3: {"title": "Fix Spine Bones", "requires": [2], "next": 4, "ready": ["spine_analyze_button"], "run": ["spine_analyze_button", "spine_apply_button"], "numbered": [("detect_fixed_blend_button", "1. Detect Step 2 Output"), ("spine_analyze_button", "2. Analyze Spine"), ("spine_apply_button", "3. Apply Spine Fix")]},
             4: {"title": "Sort Bones", "requires": [3], "next": 5, "ready": ["sort_analyze_button"], "run": ["sort_analyze_button", "sort_manual_merge_button", "sort_apply_button"], "numbered": [("detect_spine_blend_button", "1. Detect Step 3 Output"), ("sort_analyze_button", "2. Analyze Bones"), ("sort_manual_merge_button", "2B. Apply Manual Merge"), ("sort_apply_button", "3. Apply Auto Merge")]},
@@ -5695,32 +5403,10 @@ class ImporterWindow(QtWidgets.QMainWindow):
             return True
         return self.try_backfill_step_completion(step)
 
-    def steps_skipped_for_game(self) -> set[int]:
-        """Pipeline steps not produced for the selected game, so downstream steps must
-        not block on their completion. SFM skips Step 8 (collision) and Step 10 (c_arms)."""
-        if getattr(self, "selected_game", "gmod") == "sfm":
-            return {8, 10}
-        return set()
-
     def first_missing_dependency(self, step: int) -> int | None:
         spec = self.workflow_specs.get(step, {})
-        skipped = self.steps_skipped_for_game()
-        # Expand requirements, replacing any skipped step with its OWN requirements
-        # (transitively) so e.g. Step 9 depends directly on Step 7 when Step 8 is
-        # skipped for SFM, instead of staying locked on a step that never runs.
-        pending = [int(value) for value in spec.get("requires", [])]
-        seen: set[int] = set()
-        resolved: list[int] = []
-        while pending:
-            required_step = pending.pop()
-            if required_step in seen:
-                continue
-            seen.add(required_step)
-            if required_step in skipped:
-                pending.extend(int(value) for value in self.workflow_specs.get(required_step, {}).get("requires", []))
-            else:
-                resolved.append(required_step)
-        for required_step in resolved:
+        for required in spec.get("requires", []):
+            required_step = int(required)
             if self.step_is_complete(required_step):
                 continue
             if self.dependency_complete_from_selected_input(step, required_step):
@@ -5895,11 +5581,6 @@ class ImporterWindow(QtWidgets.QMainWindow):
     def jump_to_next_step(self, step: int) -> None:
         spec = self.workflow_specs.get(step, {})
         next_step = spec.get("next")
-        # Skip steps not produced for the selected game (SFM: 8 collision, 10 c_arms),
-        # so "next" advances Step 7 -> 9 and Step 9 -> 11 instead of landing on a hidden tab.
-        skipped = self.steps_skipped_for_game()
-        while isinstance(next_step, int) and next_step in skipped:
-            next_step = self.workflow_specs.get(next_step, {}).get("next")
         if not isinstance(next_step, int):
             return
         self.switch_to_step(next_step)
@@ -6025,7 +5706,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
         layout.setSpacing(8)
 
         self.main_intro_label = QtWidgets.QLabel(
-            "One-click import runs the default workflow from PMX/VRM import through QC compile and addon packaging. "
+            "One-click import runs the default workflow from PMX/VRM/FBX/GLB import through QC compile and addon packaging. "
             "Advanced tabs remain available for manual correction when a step needs attention."
         )
         self.main_intro_label.setObjectName("fieldHint")
@@ -6091,16 +5772,16 @@ class ImporterWindow(QtWidgets.QMainWindow):
             "MMD model folder",
             "dir",
             required=True,
-            hint="Folder containing the selected PMX/VRM and texture files",
+            hint="Folder containing the selected PMX/VRM/FBX/GLB and texture files",
         )
         layout.addWidget(self.main_source_row)
 
         pmx_layout = QtWidgets.QGridLayout()
         pmx_header = QtWidgets.QHBoxLayout()
-        self.main_pmx_label = QtWidgets.QLabel("PMX/VRM model")
+        self.main_pmx_label = QtWidgets.QLabel("Model (PMX/VRM/FBX/GLB)")
         self.main_pmx_badge = QtWidgets.QLabel("Required")
         self.main_pmx_badge.setObjectName("requiredBadge")
-        self.main_pmx_hint = QtWidgets.QLabel("Defaults to the largest PMX/VRM in the selected folder")
+        self.main_pmx_hint = QtWidgets.QLabel("Defaults to the largest supported model in the selected folder")
         self.main_pmx_hint.setObjectName("fieldHint")
         pmx_header.addWidget(self.main_pmx_label)
         pmx_header.addWidget(self.main_pmx_badge)
@@ -6156,12 +5837,6 @@ class ImporterWindow(QtWidgets.QMainWindow):
         )
         self.main_clear_custom_normals_hint.setObjectName("fieldHint")
         self.main_clear_custom_normals_hint.setWordWrap(True)
-        self.main_nodecal_check = QtWidgets.QCheckBox("Disable decals on materials ($nodecal)")
-        self.main_nodecal_check.setToolTip(
-            "Adds $nodecal 1 to every material VMT, so bullet/blood decals do not stick to the model. "
-            "Default on for Left 4 Dead 2 (decals look wrong on a custom anime survivor), off for Garry's Mod. "
-            "Mirrors the same checkbox on the Step 12 texture tab."
-        )
         self.main_scale_spin = QtWidgets.QDoubleSpinBox()
         self.main_scale_spin.setRange(0.01, 10.0)
         self.main_scale_spin.setDecimals(3)
@@ -6206,36 +5881,12 @@ class ImporterWindow(QtWidgets.QMainWindow):
         main_clear_custom_normals_layout.addWidget(self.main_clear_custom_normals_check)
         main_clear_custom_normals_layout.addWidget(self.main_clear_custom_normals_hint)
         form.addRow(self.main_form_labels["clear_custom_normals"], main_clear_custom_normals_box)
-        # Spanning row (no separate label) so hiding the checkbox collapses the whole row for SFM.
-        form.addRow(self.main_nodecal_check)
-        self.main_nodecal_check.toggled.connect(self.on_nodecal_toggled)
-        # SFM-only auto-port option (shown only in SFM mode by _refresh_gmod_only_visibility).
-        self.main_copy_to_sfm_usermod_check = QtWidgets.QCheckBox("Put into SFM usermod (loose files)")
-        self.main_copy_to_sfm_usermod_check.setChecked(True)
-        self.main_copy_to_sfm_usermod_check.setToolTip(
-            "Default on. After the auto-port compile, copy the loose model + materials into the detected "
-            "Source Filmmaker game/usermod folder. A distribution folder and a .vpk are always also written."
-        )
-        self.main_copy_to_sfm_usermod_label = QtWidgets.QLabel("SFM usermod install")
-        form.addRow(self.main_copy_to_sfm_usermod_label, self.main_copy_to_sfm_usermod_check)
-        self.main_copy_to_sfm_usermod_check.toggled.connect(lambda _value: self.save_settings())
-        # SFM-only auto-port option (shown only in SFM mode by _refresh_gmod_only_visibility).
-        self.main_generate_vrd_check = QtWidgets.QCheckBox("Generate VRD procedural skirt bones")
-        self.main_generate_vrd_check.setChecked(False)
-        self.main_generate_vrd_check.setToolTip(
-            "Default OFF for Source Filmmaker. When on, the auto-port runs Step 11 and compiles the VRD "
-            "($proceduralbones) skirt/dress helpers into the model. When off, no VRD is generated, it is not "
-            "compiled with the model, and Step 14 will not warn about the missing VRD."
-        )
-        self.main_generate_vrd_label = QtWidgets.QLabel("SFM procedural VRD")
-        form.addRow(self.main_generate_vrd_label, self.main_generate_vrd_check)
-        self.main_generate_vrd_check.toggled.connect(lambda _value: self.save_settings())
         layout.addLayout(form)
         layout.addWidget(self.main_gmod_row)
 
         self.main_preflight_group = QtWidgets.QGroupBox("Preflight")
         preflight_layout = QtWidgets.QVBoxLayout(self.main_preflight_group)
-        self.main_stats_label = QtWidgets.QLabel("Select a PMX/VRM and run preflight.")
+        self.main_stats_label = QtWidgets.QLabel("Select a PMX/VRM/FBX/GLB and run preflight.")
         self.main_stats_label.setWordWrap(True)
         self.main_stats_label.setTextInteractionFlags(QtCore.Qt.TextInteractionFlag.TextSelectableByMouse)
         self.main_warning_label = QtWidgets.QLabel("")
@@ -6514,16 +6165,16 @@ class ImporterWindow(QtWidgets.QMainWindow):
             "MMD model folder",
             "dir",
             required=True,
-            hint="Folder containing the selected PMX/VRM and texture files",
+            hint="Folder containing the selected PMX/VRM/FBX/GLB and texture files",
         )
         layout.addWidget(self.source_row)
 
         pmx_layout = QtWidgets.QGridLayout()
         pmx_header = QtWidgets.QHBoxLayout()
-        self.pmx_label = QtWidgets.QLabel("PMX/VRM model")
+        self.pmx_label = QtWidgets.QLabel("Model (PMX/VRM/FBX/GLB)")
         pmx_badge = QtWidgets.QLabel("Required")
         pmx_badge.setObjectName("requiredBadge")
-        self.pmx_hint = QtWidgets.QLabel("Defaults to the largest PMX/VRM in the selected folder")
+        self.pmx_hint = QtWidgets.QLabel("Defaults to the largest supported model in the selected folder")
         self.pmx_hint.setObjectName("fieldHint")
         pmx_header.addWidget(self.pmx_label)
         pmx_header.addWidget(pmx_badge)
@@ -8753,7 +8404,6 @@ class ImporterWindow(QtWidgets.QMainWindow):
         self.collision_outputs_toggle.toggled.connect(self.set_collision_outputs_visible)
         self.collision_log_toggle.toggled.connect(self.set_collision_log_visible)
 
-        self.collision_tab = tab
         self.tabs.addTab(tab, "8 Sort Collision")
 
     def _build_proportion_tab(self) -> None:
@@ -8928,15 +8578,6 @@ class ImporterWindow(QtWidgets.QMainWindow):
         self.carms_weight_spin.setSingleStep(0.01)
         self.carms_weight_spin.setValue(0.12)
         settings.addRow("Weight threshold", self.carms_weight_spin)
-        self.carms_experimental_check = QtWidgets.QCheckBox("Use experimental arms")
-        self.carms_experimental_check.setToolTip(
-            "GMod only. When checked, the c_arms are built with the experimental implementation "
-            "(the cut arm mesh is conformed onto the standard c_arms skeleton). When unchecked "
-            "(default), the original proportion-driven c_arms are used. Auto-porting always uses "
-            "the unchecked (proportion-driven) version."
-        )
-        self.carms_experimental_check.toggled.connect(self.on_experimental_arms_toggled)
-        settings.addRow("", self.carms_experimental_check)
         self.detect_proportion_export_button = QtWidgets.QPushButton("Detect Step 9 Output")
         self.detect_proportion_export_button.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_FileDialogContentsView))
         settings.addRow("", self.detect_proportion_export_button)
@@ -9350,13 +8991,6 @@ class ImporterWindow(QtWidgets.QMainWindow):
         self.texture_scheme_hint.setObjectName("fieldHint")
         self.texture_scheme_hint.setWordWrap(True)
         settings.addRow("", self.texture_scheme_hint)
-        self.texture_nodecal_check = QtWidgets.QCheckBox("Disable decals on materials ($nodecal)")
-        self.texture_nodecal_check.setToolTip(
-            "Adds $nodecal 1 to every material VMT, so bullet/blood decals do not stick to the model. "
-            "Default on for Left 4 Dead 2, off for Garry's Mod. Mirrors the same checkbox on the main tab."
-        )
-        settings.addRow(self.texture_nodecal_check)
-        self.texture_nodecal_check.toggled.connect(self.on_nodecal_toggled)
         self.detect_texture_mapping_button = QtWidgets.QPushButton("Detect Material Mapping")
         self.detect_texture_mapping_button.setIcon(self.style().standardIcon(QtWidgets.QStyle.StandardPixmap.SP_FileDialogContentsView))
         settings.addRow("", self.detect_texture_mapping_button)
@@ -9815,12 +9449,6 @@ class ImporterWindow(QtWidgets.QMainWindow):
         self.qc_copy_to_gmod_addons_check.setToolTip(
             "Default on. After compile, mirror the composed addon folder into garrysmod/addons under the detected GMod install."
         )
-        self.qc_copy_to_sfm_usermod_check = QtWidgets.QCheckBox("Put into SFM usermod (loose files)")
-        self.qc_copy_to_sfm_usermod_check.setChecked(True)
-        self.qc_copy_to_sfm_usermod_check.setToolTip(
-            "Default on. After compile, copy the loose model + materials into the detected Source Filmmaker "
-            "game/usermod folder. A distribution folder and a .vpk are always also written to the output folder."
-        )
         self.qc_include_mci_metadata_check = QtWidgets.QCheckBox("Include MMD Character Importer metadata JSON")
         self.qc_include_mci_metadata_check.setChecked(True)
         self.qc_include_mci_metadata_check.setToolTip(
@@ -9837,10 +9465,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
         settings.addRow(self.qc_character_label, self._make_character_field(self.qc_character_label))
         settings.addRow("Jiggle direction", self.qc_invert_jiggle_check)
         settings.addRow("GMod addons install", self.qc_copy_to_gmod_addons_check)
-        settings.addRow("SFM usermod install", self.qc_copy_to_sfm_usermod_check)
         settings.addRow("MCI metadata JSON", self.qc_include_mci_metadata_check)
-        # Stored so _refresh_gmod_only_visibility() can show exactly one install row per game.
-        self.qc_install_form = settings
         settings.addRow("Output folder", self._output_folder_row(self.qc_output_edit))
         detect_row = QtWidgets.QHBoxLayout()
         self.detect_qc_outputs_button = QtWidgets.QPushButton("Detect Step Outputs")
@@ -10181,7 +9806,6 @@ class ImporterWindow(QtWidgets.QMainWindow):
         self.qc_model_display_edit.textChanged.connect(lambda _value: self.save_settings())
         self.qc_invert_jiggle_check.toggled.connect(self.on_qc_invert_jiggle_toggled)
         self.qc_copy_to_gmod_addons_check.toggled.connect(lambda _value: self.save_settings())
-        self.qc_copy_to_sfm_usermod_check.toggled.connect(lambda _value: self.save_settings())
         self.qc_include_mci_metadata_check.toggled.connect(self.on_qc_include_mci_metadata_toggled)
         self.detect_qc_outputs_button.clicked.connect(self.detect_qc_step_outputs)
         self.detect_qc_gmod_button.clicked.connect(self.detect_gmod_for_qc)
@@ -10538,17 +10162,6 @@ class ImporterWindow(QtWidgets.QMainWindow):
             main_gmod = str(self.settings_store.value(self._studiomdl_setting_key("qc_gmod_path"), "", str) or "")
         if main_gmod and hasattr(self, "main_gmod_row"):
             self.main_gmod_row.set_value(main_gmod)
-        if hasattr(self, "main_copy_to_sfm_usermod_check"):
-            raw_main_sfm = self.settings_store.value("main_copy_to_sfm_usermod", True)
-            self.main_copy_to_sfm_usermod_check.setChecked(
-                raw_main_sfm.strip().lower() not in {"0", "false", "no", "off"}
-                if isinstance(raw_main_sfm, str)
-                else bool(raw_main_sfm)
-            )
-        if hasattr(self, "main_generate_vrd_check"):
-            self.main_generate_vrd_check.setChecked(
-                self.settings_bool(self.settings_store.value("main_generate_vrd", False), False)
-            )
         # Model Manager is GMod-only, so it always reads the GMod (legacy) studiomdl path.
         model_manager_gmod = str(self.settings_store.value("model_manager_gmod_path", "", str) or "")
         if not model_manager_gmod:
@@ -10670,13 +10283,6 @@ class ImporterWindow(QtWidgets.QMainWindow):
             else:
                 copy_to_addons = bool(raw_copy)
             self.qc_copy_to_gmod_addons_check.setChecked(copy_to_addons)
-        if hasattr(self, "qc_copy_to_sfm_usermod_check"):
-            raw_sfm = self.settings_store.value("qc_copy_to_sfm_usermod", True)
-            if isinstance(raw_sfm, str):
-                copy_to_usermod = raw_sfm.strip().lower() not in {"0", "false", "no", "off"}
-            else:
-                copy_to_usermod = bool(raw_sfm)
-            self.qc_copy_to_sfm_usermod_check.setChecked(copy_to_usermod)
         if hasattr(self, "qc_include_mci_metadata_check"):
             raw_metadata = self.settings_store.value("qc_include_mci_metadata_json", True)
             if isinstance(raw_metadata, str):
@@ -10684,9 +10290,6 @@ class ImporterWindow(QtWidgets.QMainWindow):
             else:
                 include_metadata = bool(raw_metadata)
             self.qc_include_mci_metadata_check.setChecked(include_metadata)
-        # $nodecal checkboxes are remembered per game; sync both to the current game's stored value.
-        self._refresh_nodecal_checks_for_game()
-        self._refresh_experimental_arms_check()
         release_input = str(self.settings_store.value("release_input_dir", "", str) or "")
         if release_input and hasattr(self, "release_input_row"):
             self.release_input_row.set_value(release_input)
@@ -10829,10 +10432,6 @@ class ImporterWindow(QtWidgets.QMainWindow):
                 self.settings_store.setValue("main_pmx_path", str(pmx))
         if hasattr(self, "main_gmod_row"):
             self.settings_store.setValue(self._studiomdl_setting_key("main_gmod_path"), self.main_gmod_row.value())
-        if hasattr(self, "main_copy_to_sfm_usermod_check"):
-            self.settings_store.setValue("main_copy_to_sfm_usermod", self.main_copy_to_sfm_usermod_check.isChecked())
-        if hasattr(self, "main_generate_vrd_check"):
-            self.settings_store.setValue("main_generate_vrd", self.main_generate_vrd_check.isChecked())
         if hasattr(self, "model_manager_gmod_row"):
             self.settings_store.setValue("model_manager_gmod_path", self.model_manager_gmod_row.value())
         if hasattr(self, "main_model_name_edit"):
@@ -10934,8 +10533,6 @@ class ImporterWindow(QtWidgets.QMainWindow):
             self.settings_store.setValue("qc_invert_jiggle_direction", self.qc_invert_jiggle_check.isChecked())
         if hasattr(self, "qc_copy_to_gmod_addons_check"):
             self.settings_store.setValue("qc_copy_to_gmod_addons", self.qc_copy_to_gmod_addons_check.isChecked())
-        if hasattr(self, "qc_copy_to_sfm_usermod_check"):
-            self.settings_store.setValue("qc_copy_to_sfm_usermod", self.qc_copy_to_sfm_usermod_check.isChecked())
         if hasattr(self, "qc_include_mci_metadata_check"):
             self.settings_store.setValue("qc_include_mci_metadata_json", self.qc_include_mci_metadata_check.isChecked())
         if hasattr(self, "release_input_row"):
@@ -11482,83 +11079,27 @@ class ImporterWindow(QtWidgets.QMainWindow):
                 return str(resolved.get("display") or candidate)
         return ""
 
-    def find_sfm_candidate(self) -> str:
-        candidates: list[Path] = []
-        raw = (
-            os.environ.get("STUDIOMDL", "")
-            or os.environ.get("SFM_PATH", "")
-            or os.environ.get("SOURCEFILMMAKER_PATH", "")
-        )
-        if raw:
-            path = Path(raw)
-            candidates.append(path)
-            if path.is_dir():
-                candidates.append(path / "game" / "bin" / "studiomdl.exe")
-                candidates.append(path / "bin" / "studiomdl.exe")
-        steam_dir = core._find_steam_dir()
-        if steam_dir:
-            for lib in core._find_steam_library_folders(steam_dir):
-                base = lib / "steamapps" / "common" / "SourceFilmmaker"
-                candidates.append(base / "game" / "bin" / "studiomdl.exe")
-        candidates.append(Path("C:/Program Files (x86)/Steam/steamapps/common/SourceFilmmaker/game/bin/studiomdl.exe"))
-        seen: set[Path] = set()
-        for candidate in candidates:
-            candidate = safe_resolve_path(candidate)
-            if candidate in seen:
-                continue
-            seen.add(candidate)
-            resolved = resolve_gmod_path_input(str(candidate))
-            if resolved.get("ok"):
-                return str(resolved.get("display") or candidate)
-        return ""
-
     def find_game_studiomdl_candidate(self) -> str:
         """Auto-find the StudioMDL for the currently selected target game."""
-        game = getattr(self, "selected_game", "gmod")
-        if game == "l4d2":
+        if getattr(self, "selected_game", "gmod") == "l4d2":
             return self.find_l4d2_candidate()
-        if game == "sfm":
-            return self.find_sfm_candidate()
         return self.find_gmod_candidate()
 
-    # Folder-name markers that identify each target game's install, used to spot a
-    # studiomdl path saved for a DIFFERENT game than the one currently selected.
-    _GAME_PATH_MARKERS = {
-        "gmod": ("garrysmod",),
-        "l4d2": ("left 4 dead 2", "left4dead2"),
-        "sfm": ("sourcefilmmaker", "source filmmaker"),
-    }
-
-    def _selected_game_studiomdl_label(self) -> str:
-        return {"l4d2": "Left 4 Dead 2", "sfm": "Source Filmmaker"}.get(
-            getattr(self, "selected_game", "gmod"), "GMod"
-        )
-
-    def _selected_game_browse_hint(self) -> str:
-        return {
-            "l4d2": "Browse to 'Left 4 Dead 2/bin/studiomdl.exe'",
-            "sfm": "Browse to 'SourceFilmmaker/game/bin/studiomdl.exe'",
-        }.get(getattr(self, "selected_game", "gmod"), "Browse to garrysmod/bin/studiomdl.exe")
-
     def _studiomdl_path_is_wrong_game(self, resolved: dict[str, object]) -> bool:
-        """True when an already-resolved studiomdl/install path clearly belongs to a
-        DIFFERENT target game than the one currently selected. Used so the Detect button
+        """True when an already-resolved studiomdl/install path clearly belongs to the
+        OTHER target game than the one currently selected. Used so the Detect button
         re-finds the correct game's studiomdl instead of silently keeping a stale path
-        from another game (e.g. a saved Garry's Mod path while L4D2/SFM is selected).
-        Custom/ambiguous paths that match no game's folder are left untouched."""
+        from the other game (e.g. a saved Garry's Mod path while L4D2 is selected).
+        Custom/ambiguous paths that match neither game's folder are left untouched."""
         blob = " ".join(
             str(resolved.get(key) or "") for key in ("display", "studiomdl", "gmod_root", "input")
         ).lower()
-        game = getattr(self, "selected_game", "gmod")
-        for other, markers in self._GAME_PATH_MARKERS.items():
-            if other == game:
-                continue
-            if any(marker in blob for marker in markers):
-                return True
-        return False
+        if getattr(self, "selected_game", "gmod") == "l4d2":
+            return "garrysmod" in blob
+        return "left 4 dead 2" in blob or "left4dead2" in blob
 
     def detect_gmod_for_main(self) -> None:
-        game_label = self._selected_game_studiomdl_label()
+        game_label = "Left 4 Dead 2" if self.selected_game == "l4d2" else "GMod"
         current = resolve_gmod_path_input(self.main_gmod_row.value() if hasattr(self, "main_gmod_row") else "")
         if current.get("ok") and not self._studiomdl_path_is_wrong_game(current):
             found = str(current.get("display") or "")
@@ -11575,7 +11116,11 @@ class ImporterWindow(QtWidgets.QMainWindow):
         detail = str(current.get("error") or "").strip()
         if detail and self.main_gmod_row.value().strip():
             detail = "\n\nCurrent path is not usable:\n" + detail
-        browse_hint = self._selected_game_browse_hint()
+        browse_hint = (
+            "Browse to 'Left 4 Dead 2/bin/studiomdl.exe'"
+            if self.selected_game == "l4d2"
+            else "Browse to garrysmod/bin/studiomdl.exe"
+        )
         self.show_error(
             f"Detect {game_label}",
             f"Could not find {game_label} StudioMDL. {browse_hint} or set STUDIOMDL." + detail,
@@ -12062,18 +11607,6 @@ class ImporterWindow(QtWidgets.QMainWindow):
             bodygroup_scale_factor=self.main_effective_bodygroup_scale(),
             game=self.selected_game,
             survivor=self.current_selected_survivor(),
-            copy_to_sfm_usermod=(
-                self.main_copy_to_sfm_usermod_check.isChecked()
-                if hasattr(self, "main_copy_to_sfm_usermod_check")
-                else True
-            ),
-            nodecal=self.current_nodecal_enabled(),
-            generate_vrd=(
-                # VRD is opt-in for SFM (default off); always generated for GMod/L4D2.
-                bool(self.main_generate_vrd_check.isChecked())
-                if (self.selected_game == "sfm" and hasattr(self, "main_generate_vrd_check"))
-                else True
-            ),
         )
         self.worker.log.connect(self.append_main_log)
         self.worker.progress.connect(self.set_main_progress)
@@ -18439,35 +17972,6 @@ class ImporterWindow(QtWidgets.QMainWindow):
                 return
             candidates.extend(matches)
 
-        # SFM skips Step 8 (collision), so Step 9 runs on the Step 7 flex-sorted blend.
-        if getattr(self, "selected_game", "gmod") == "sfm":
-            for raw in (
-                self.proportion_input_row.value() if hasattr(self, "proportion_input_row") else "",
-                self.settings_store.value("flex_input_blend", "", str),
-                self.flex_sorted_blend_path if hasattr(self, "flex_sorted_blend_path") else "",
-                self.flex_blend_label.text() if hasattr(self, "flex_blend_label") else "",
-            ):
-                add_candidate(raw)
-            workspace_text = self.workspace_edit.text().strip() if hasattr(self, "workspace_edit") else ""
-            if workspace_text:
-                add_sorted_glob(Path(workspace_text), "7_sort_flexes/*_flexes_sorted.blend")
-            add_sorted_glob(core.workspaces_root(), "*/7_sort_flexes/*_flexes_sorted.blend")
-            seen_sfm: set[Path] = set()
-            for candidate in candidates:
-                try:
-                    candidate = candidate.resolve()
-                except Exception:
-                    candidate = candidate.absolute()
-                if candidate in seen_sfm:
-                    continue
-                seen_sfm.add(candidate)
-                if candidate.exists() and candidate.name.endswith(".blend"):
-                    self.proportion_input_row.set_value(str(candidate))
-                    self.switch_to_step(9)
-                    return
-            self.show_error("Detect Step 7 Output", "No Step 7 .blend output was found. Run Step 7 or browse to the flex-sorted blend.")
-            return
-
         for raw in (
             self.proportion_input_row.value() if hasattr(self, "proportion_input_row") else "",
             self.collision_sorted_blend_path,
@@ -19118,12 +18622,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
         self.carms_run_button.setEnabled(False)
         self.detect_proportion_export_button.setEnabled(False)
         self.carms_cancel_button.setEnabled(True)
-        self.worker = CArmsRunWorker(
-            str(input_dir),
-            self.carms_weight_spin.value(),
-            game=self.selected_game,
-            experimental_arms=self.current_experimental_arms_enabled(),
-        )
+        self.worker = CArmsRunWorker(str(input_dir), self.carms_weight_spin.value())
         self.worker.log.connect(self.append_carms_log)
         self.worker.done.connect(self.carms_done)
         self.worker.failed.connect(self.carms_failed)
@@ -22050,7 +21549,7 @@ class ImporterWindow(QtWidgets.QMainWindow):
         self.show_error("Detect Step Outputs", "No Step 9 proportion export folder was found. Run Step 9 or browse to 2_proportion_export.")
 
     def detect_gmod_for_qc(self) -> None:
-        game_label = self._selected_game_studiomdl_label()
+        game_label = "Left 4 Dead 2" if self.selected_game == "l4d2" else "GMod"
         current = resolve_gmod_path_input(self.qc_gmod_row.value() if hasattr(self, "qc_gmod_row") else "")
         if current.get("ok") and not self._studiomdl_path_is_wrong_game(current):
             found = str(current.get("display") or "")
@@ -22067,7 +21566,11 @@ class ImporterWindow(QtWidgets.QMainWindow):
         detail = str(current.get("error") or "").strip()
         if detail and self.qc_gmod_row.value().strip():
             detail = "\n\nCurrent path is not usable:\n" + detail
-        browse_hint = self._selected_game_browse_hint()
+        browse_hint = (
+            "Browse to 'Left 4 Dead 2/bin/studiomdl.exe'"
+            if self.selected_game == "l4d2"
+            else "Browse to garrysmod/bin/studiomdl.exe"
+        )
         self.show_error(
             f"Detect {game_label}",
             f"Could not find {game_label} StudioMDL. {browse_hint} or set STUDIOMDL." + detail,
@@ -22159,8 +21662,6 @@ class ImporterWindow(QtWidgets.QMainWindow):
             self.current_qc_plan["include_mci_metadata_json"] = (
                 bool(self.qc_include_mci_metadata_check.isChecked()) if hasattr(self, "qc_include_mci_metadata_check") else True
             )
-            self.current_qc_plan["nodecal"] = self.current_nodecal_enabled()
-            self.current_qc_plan["gmod_experimental_arms"] = self.current_experimental_arms_enabled()
             self.sync_qc_fields_from_plan(self.current_qc_plan)
             self.populate_qc_bone_table()
         self.refresh_qc_preview()
@@ -22607,14 +22108,9 @@ class ImporterWindow(QtWidgets.QMainWindow):
         plan["copy_to_gmod_addons"] = (
             bool(self.qc_copy_to_gmod_addons_check.isChecked()) if hasattr(self, "qc_copy_to_gmod_addons_check") else False
         )
-        plan["copy_to_sfm_usermod"] = (
-            bool(self.qc_copy_to_sfm_usermod_check.isChecked()) if hasattr(self, "qc_copy_to_sfm_usermod_check") else True
-        )
         plan["include_mci_metadata_json"] = (
             bool(self.qc_include_mci_metadata_check.isChecked()) if hasattr(self, "qc_include_mci_metadata_check") else True
         )
-        plan["nodecal"] = self.current_nodecal_enabled()
-        plan["gmod_experimental_arms"] = self.current_experimental_arms_enabled()
         qc_dir = Path(str(plan.get("qc_dir") or self.qc_output_edit.text().strip() or ""))
         if qc_dir:
             plan["addon_dir"] = str(qc_dir / model)
@@ -22662,9 +22158,6 @@ class ImporterWindow(QtWidgets.QMainWindow):
             plan["distribution_output_dir"] = selected_output
             plan["copy_to_gmod_addons"] = (
                 bool(self.qc_copy_to_gmod_addons_check.isChecked()) if hasattr(self, "qc_copy_to_gmod_addons_check") else False
-            )
-            plan["copy_to_sfm_usermod"] = (
-                bool(self.qc_copy_to_sfm_usermod_check.isChecked()) if hasattr(self, "qc_copy_to_sfm_usermod_check") else True
             )
             plan["include_mci_metadata_json"] = (
                 bool(self.qc_include_mci_metadata_check.isChecked()) if hasattr(self, "qc_include_mci_metadata_check") else True
@@ -23543,24 +23036,8 @@ def main() -> int:
     if dispatched_exit_code is not None:
         return dispatched_exit_code
     crash_log_path = enable_crash_logging()
-    # Establish an explicit default OpenGL surface format BEFORE enabling context
-    # sharing and BEFORE creating the QApplication. Without this, the two
-    # QOpenGLWidgets (model + material preview) share contexts whose format is
-    # whatever the platform/driver picks by default; on some drivers that default
-    # produces a context that is invalid when initializeGL() runs, so the first
-    # glClearColor raises GLError 1282 and crashes. Requesting a plain, widely
-    # supported compatibility-profile context (the same kind ordinary desktop GL
-    # apps get) avoids the rejected/invalid context. Per Qt, calling
-    # setDefaultFormat() before constructing QApplication is the supported way to
-    # make all shared contexts use a consistent, known format.
-    try:
-        _gl_format = QtGui.QSurfaceFormat()
-        _gl_format.setRenderableType(QtGui.QSurfaceFormat.RenderableType.OpenGL)
-        _gl_format.setDepthBufferSize(24)
-        _gl_format.setStencilBufferSize(8)
-        QtGui.QSurfaceFormat.setDefaultFormat(_gl_format)
-    except Exception:
-        pass
+    # Sharing one GL context across the app's two QOpenGLWidgets (model + material preview) is good
+    # practice and harmless; set before QApplication as Qt requires.
     QtCore.QCoreApplication.setAttribute(QtCore.Qt.ApplicationAttribute.AA_ShareOpenGLContexts, True)
     app = QtWidgets.QApplication(sys.argv)
     app.setApplicationName("MMD Character Importer")

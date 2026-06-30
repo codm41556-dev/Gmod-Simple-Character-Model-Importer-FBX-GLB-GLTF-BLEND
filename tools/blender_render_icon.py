@@ -26,7 +26,7 @@ def parse_args() -> argparse.Namespace:
         argv = []
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--pmx", type=Path, required=True)
-    parser.add_argument("--vmd", "--body-vmd", dest="body_vmd", type=Path, required=True)
+    parser.add_argument("--vmd", "--body-vmd", dest="body_vmd", type=Path, required=False, default=None)
     parser.add_argument("--face-vmd", action="append", default=[], type=Path)
     parser.add_argument("--frame", type=int, default=334)
     parser.add_argument("--output-png", type=Path, required=True)
@@ -173,6 +173,35 @@ def import_vrm_model(vrm_path: Path) -> bpy.types.Object:
         bpy.context.view_layer.update()
         print("[Step13 Render] Rotated VRM 0.x scene 180 degrees to face the camera.", flush=True)
     return armatures[0]
+
+
+def import_generic_model(model_path: Path) -> bpy.types.Object:
+    """Import a generic FBX/GLB/GLTF model for icon rendering.
+
+    Uses Blender's native importers (no CATS/MMD Tools needed).
+    The model is already in the workspace blend at this point so the
+    fixed blend is the cleanest source; but since blender_render_icon
+    receives the original source path, we import it directly.
+    """
+    ext = model_path.suffix.lower()
+    print(f"[Step13 Render] Importing generic {ext} model: {model_path}", flush=True)
+    before = set(bpy.data.objects)
+    if ext == ".fbx":
+        bpy.ops.import_scene.fbx(filepath=str(model_path), use_manual_orientation=False)
+    elif ext in {".glb", ".gltf"}:
+        bpy.ops.import_scene.gltf(filepath=str(model_path))
+    else:
+        raise RuntimeError(f"Unsupported generic model extension for icon render: {ext}")
+    imported = [obj for obj in bpy.data.objects if obj not in before]
+    armatures = [obj for obj in imported if obj.type == "ARMATURE"] or [
+        obj for obj in bpy.data.objects if obj.type == "ARMATURE"
+    ]
+    if not armatures:
+        raise RuntimeError(f"Generic model import produced no armature: {model_path}")
+    armature = armatures[0]
+    set_active(armature)
+    print(f"[Step13 Render] Imported armature: {armature.name}", flush=True)
+    return armature
 
 
 def import_model(pmx_path: Path) -> bpy.types.Object:
@@ -940,17 +969,27 @@ def main() -> int:
     args = parse_args()
     if not args.pmx.exists():
         raise FileNotFoundError(args.pmx)
-    is_vrm = args.pmx.suffix.lower() == ".vrm"
-    if not is_vrm and not args.body_vmd.exists():
-        raise FileNotFoundError(args.body_vmd)
+    ext = args.pmx.suffix.lower()
+    is_vrm = ext == ".vrm"
+    is_generic = ext in {".fbx", ".glb", ".gltf"}
+    # VMD posing only applies to PMX models; VRM and generic FBX/GLB skip it.
+    if not is_vrm and not is_generic:
+        if args.body_vmd is None or not args.body_vmd.exists():
+            raise FileNotFoundError(args.body_vmd)
 
     started = time.monotonic()
     print("[Step13 Render] Starting Step 13 icon render.", flush=True)
-    if not is_vrm:
+    if not is_vrm and not is_generic:
         enable_mmd_tools()
     clear_scene()
     setup_world_and_lighting()
-    if is_vrm:
+    if is_generic:
+        armature = import_generic_model(args.pmx)
+        print(
+            "[Step13 Render] VMD posing is not supported for generic FBX/GLB models; rendering the default pose.",
+            flush=True,
+        )
+    elif is_vrm:
         armature = import_vrm_model(args.pmx)
         print(
             "[Step13 Render] VMD posing is not supported for VRM models; rendering the default pose.",

@@ -13,7 +13,6 @@ from pathlib import Path
 
 import bmesh
 import bpy
-import numpy as np
 from mathutils import Vector
 
 
@@ -493,300 +492,6 @@ def file_inventory(output_dir: Path, exported: list[Path], copied_anims: list[Pa
     return files
 
 
-# Bundled STANDARD GMod c_arms skeleton (vendored copy of the stock weapons/c_arms.mdl reference,
-# arms-only, 41 ValveBiped bones at canonical proportions). Used as the conform TARGET so the
-# exported c_arms carries standard arm lengths and bonemerges cleanly onto weapon viewmodels.
-STD_CARMS_SKELETON_SMD = Path(__file__).resolve().parent / "assets" / "std_c_arms_skeleton" / "c_arms.smd"
-
-
-def import_standard_carms_armature() -> bpy.types.Object:
-    """Import the bundled standard GMod c_arms skeleton as a SEPARATE armature (the conform target
-    rest pose). Raises if the vendored asset is missing or no armature is produced."""
-    if not STD_CARMS_SKELETON_SMD.exists():
-        raise RuntimeError(f"Standard c_arms skeleton asset is missing: {STD_CARMS_SKELETON_SMD}")
-    before = set(bpy.data.objects)
-    bpy.ops.import_scene.smd(filepath=str(STD_CARMS_SKELETON_SMD), append="NEW_ARMATURE", upAxis="Z")
-    new_objects = [obj for obj in bpy.data.objects if obj not in before]
-    armature = next((obj for obj in new_objects if obj.type == "ARMATURE"), None)
-    # The skeleton SMD carries no real geometry; drop any dummy object it imported.
-    for obj in new_objects:
-        if obj.type != "ARMATURE":
-            bpy.data.objects.remove(obj, do_unlink=True)
-    if armature is None:
-        raise RuntimeError(f"Standard c_arms skeleton import produced no armature: {STD_CARMS_SKELETON_SMD}")
-    return armature
-
-
-def _vertex_weight(vertex: bpy.types.MeshVertex, group_index: int) -> float:
-    for g in vertex.groups:
-        if g.group == group_index:
-            return g.weight
-    return 0.0
-
-
-def prepare_ulna_weights(char_arm: bpy.types.Object, std_bone_names: set[str]) -> dict[str, object]:
-    """Set up L/R Ulna (ValveBiped forearm-twist) vertex groups on the arm meshes BEFORE the conform.
-
-    The standard c_arms uses Ulna bones (driven by $proceduralbones) so the lower forearm twists with
-    the hand; the stock arm animations expect them. MMD rigs either carry a forearm-twist bone
-    (Japanese 手捩 / a non-standard child of Forearm) or had it merged into Forearm by SCMI's earlier
-    steps. So per side:
-      - if a non-standard child-of-Forearm twist bone exists, MOVE its weights onto Ulna (merge the
-        twist into the standard Ulna) and drop the source group;
-      - otherwise SYNTHESIZE Ulna from a gradient over the lower half of the Forearm (midpoint->wrist,
-        matching the stock distribution).
-    Only vertex-group weight VALUES are created here; the Ulna BONE comes from the standard target
-    skeleton, and the conform preserves these weights and binds them to it on export."""
-    char_bones = {bone.name: bone for bone in char_arm.data.bones}
-    report: dict[str, object] = {}
-    meshes = mesh_objects()
-    for side in ("L", "R"):
-        forearm = f"ValveBiped.Bip01_{side}_Forearm"
-        hand = f"ValveBiped.Bip01_{side}_Hand"
-        ulna = f"ValveBiped.Bip01_{side}_Ulna"
-        if forearm not in char_bones:
-            continue
-        if ulna in char_bones:
-            report[side] = "rig-has-ulna"  # already present; the conform handles it directly
-            continue
-        twist_sources = [child.name for child in char_bones[forearm].children if child.name not in std_bone_names]
-        forearm_head = char_bones[forearm].matrix_local.translation
-        hand_head = char_bones[hand].matrix_local.translation if hand in char_bones else None
-        for obj in meshes:
-            ulna_group = obj.vertex_groups.get(ulna) or obj.vertex_groups.new(name=ulna)
-            if twist_sources:
-                for src_name in twist_sources:
-                    src_group = obj.vertex_groups.get(src_name)
-                    if src_group is None:
-                        continue
-                    for vertex in obj.data.vertices:
-                        weight = _vertex_weight(vertex, src_group.index)
-                        if weight > 0.0:
-                            ulna_group.add([vertex.index], weight, "ADD")
-                    obj.vertex_groups.remove(src_group)
-            elif hand_head is not None:
-                forearm_group = obj.vertex_groups.get(forearm)
-                if forearm_group is None:
-                    continue
-                axis = hand_head - forearm_head
-                length = axis.length
-                if length < 1.0e-6:
-                    continue
-                axis_n = axis / length
-                for vertex in obj.data.vertices:
-                    weight = _vertex_weight(vertex, forearm_group.index)
-                    if weight <= 0.0:
-                        continue
-                    frac = (vertex.co - forearm_head).dot(axis_n) / length  # 0 = elbow, 1 = wrist
-                    share = max(0.0, min(0.75, (frac - 0.5) / 0.5 * 0.75))
-                    if share <= 0.0:
-                        continue
-                    ulna_group.add([vertex.index], weight * share, "REPLACE")
-                    forearm_group.add([vertex.index], weight * (1.0 - share), "REPLACE")
-        report[side] = ("twist:" + ",".join(twist_sources)) if twist_sources else "synthesized"
-    return report
-
-
-def _np3(vec) -> "np.ndarray":
-    return np.array((vec.x, vec.y, vec.z), dtype=float)
-
-
-def _weighted_similarity(a: "np.ndarray", b: "np.ndarray", w: "np.ndarray") -> tuple[float, "np.ndarray"]:
-    """Closed-form weighted Procrustes: the uniform scale s and rotation R (no translation) that
-    minimize sum_i w_i |s R a_i - b_i|^2. Returns (s, R[3x3]); degenerate input -> (1.0, identity)."""
-    if a.shape[0] == 0:
-        return 1.0, np.eye(3)
-    cross = (b * w[:, None]).T @ a  # 3x3 = sum_i w_i b_i a_i^T
-    try:
-        u, _s, vt = np.linalg.svd(cross)
-    except np.linalg.LinAlgError:
-        return 1.0, np.eye(3)
-    correction = np.eye(3)
-    if np.linalg.det(u @ vt) < 0.0:  # forbid reflections
-        correction[2, 2] = -1.0
-    rot = u @ correction @ vt
-    den = float((w * np.einsum("ij,ij->i", a, a)).sum())
-    if den < 1.0e-12:
-        return 1.0, rot
-    num = float((w * np.einsum("ij,ij->i", b, a @ rot.T)).sum())
-    scale = num / den
-    if not np.isfinite(scale) or scale <= 1.0e-4:
-        return 1.0, rot
-    return scale, rot
-
-
-def compute_hierarchical_deform(char_bones: dict, std_bones: dict, matched: list[str], decay: float = 0.5) -> dict:
-    """Per-bone LBS deform matrices from a TOP-DOWN hierarchical similarity fit.
-
-    Walking from the root (Spine4) down every arm/finger chain, for each bone we SNAP its head to the
-    standard head, then solve the uniform scale + rotation about that head that best aligns the bone's
-    whole sub-tree of joints (head AND tail of every descendant) onto the standard skeleton in a
-    least-squares (RMSD) sense. Each joint's weight DECAYS with how far it sits below the bone
-    (decay ** levels), so the many finger bones never dominate the proximal arm fit. Every bone's
-    transform is accumulated onto its parent's (A_bone = T_bone @ A_parent), so the scale + rotation
-    flows smoothly down to the fingertips and the mesh -- which removes the per-finger scale
-    discontinuities a per-bone-independent scale produced. Returns {bone_name: 4x4 numpy matrix}."""
-    matched_set = set(matched)
-    parent_of: dict[str, "str | None"] = {}
-    children: dict[str, list[str]] = {name: [] for name in matched}
-    for name in matched:
-        parent = std_bones[name].parent
-        pname = parent.name if (parent is not None and parent.name in matched_set) else None
-        parent_of[name] = pname
-        if pname is not None:
-            children[pname].append(name)
-
-    def depth_of(name: str) -> int:
-        d = 0
-        cur = parent_of[name]
-        while cur is not None:
-            d += 1
-            cur = parent_of[cur]
-        return d
-
-    depth = {name: depth_of(name) for name in matched}
-    topo = sorted(matched, key=lambda n: depth[n])  # parents before children
-    subtree: dict[str, list[str]] = {}
-
-    def build_subtree(name: str) -> list[str]:
-        out = [name]
-        for child in children[name]:
-            out.extend(build_subtree(child))
-        subtree[name] = out
-        return out
-
-    for name in matched:
-        if name not in subtree:
-            build_subtree(name)
-
-    head0 = {name: _np3(char_bones[name].head_local) for name in matched}
-    tail0 = {name: _np3(char_bones[name].tail_local) for name in matched}
-    head_std = {name: _np3(std_bones[name].head_local) for name in matched}
-    tail_std = {name: _np3(std_bones[name].tail_local) for name in matched}
-
-    def apply4(matrix, point):
-        result = matrix @ np.array((point[0], point[1], point[2], 1.0))
-        return result[:3]
-
-    accum: dict[str, "np.ndarray"] = {}
-    for name in topo:
-        pname = parent_of[name]
-        parent_matrix = accum[pname] if pname is not None else np.eye(4)
-        if not children[name] and pname is not None:
-            # Leaf bone (e.g. a fingertip Finger*2): nothing below it to fit, and a single-point
-            # Procrustes is rank-deficient -> an arbitrary/backward twist and a collapsed scale (the
-            # malformed tips). Its head already sits at the shared joint, so inherit the parent's
-            # scale+rotation verbatim: the tip then continues its finger uniformly.
-            accum[name] = parent_matrix
-            continue
-        head_cur = apply4(parent_matrix, head0[name])
-        a_pts: list = []
-        b_pts: list = []
-        weights: list = []
-        for desc in subtree[name]:
-            weight = decay ** (depth[desc] - depth[name])
-            for mmd_pt, std_pt in ((head0[desc], head_std[desc]), (tail0[desc], tail_std[desc])):
-                a_pts.append(apply4(parent_matrix, mmd_pt) - head_cur)
-                b_pts.append(std_pt - head_std[name])
-                weights.append(weight)
-        scale, rot = _weighted_similarity(np.array(a_pts), np.array(b_pts), np.array(weights))
-        scale_rot = np.eye(4)
-        scale_rot[:3, :3] = scale * rot
-        to_origin = np.eye(4)
-        to_origin[:3, 3] = -head_cur
-        to_std = np.eye(4)
-        to_std[:3, 3] = head_std[name]
-        transform = to_std @ scale_rot @ to_origin  # snap head to standard, scale+rotate about it
-        accum[name] = transform @ parent_matrix
-    return accum
-
-
-def conform_meshes_to_standard(char_arm: bpy.types.Object, std_arm: bpy.types.Object) -> dict[str, object]:
-    """Rest-pose-conform every arm mesh from ``char_arm``'s (MMD-proportion) rest onto ``std_arm``'s
-    STANDARD c_arms rest, via a pure-data linear-blend-skinning bake, then re-bind the meshes to
-    ``std_arm``.
-
-    Skin-weight values and vertex-group memberships are never edited -- only vertex POSITIONS and the
-    bind armature change. This places the arm geometry on the standard c_arms skeleton so the runtime
-    weapon-viewmodel bonemerge (player_manager.AddValidHands) lands on standard-proportion bones and
-    nothing distorts. Pure data (no GUI operators / mode switches) so it is deterministic in
-    ``blender --background``. Raises on a no-op (a bone-name mismatch) rather than silently shipping a
-    distorted arm.
-    """
-    char_bones = {bone.name: bone for bone in char_arm.data.bones}
-    std_bones = {bone.name: bone for bone in std_arm.data.bones}
-    matched = sorted(name for name in std_bones if name in char_bones)
-    if not matched:
-        raise RuntimeError(
-            "c_arms conform: no shared bone names between the character rig and the standard c_arms "
-            "skeleton -- refusing to ship a silently unconformed (distorted) arm."
-        )
-    matched_set = set(matched)
-    # Per-bone deform via a TOP-DOWN hierarchical scale+rotate fit (depth-weighted RMSD over each
-    # bone's sub-tree, head-snapped, accumulated down the chain). This resizes AND re-orients the mesh
-    # onto the standard skeleton smoothly all the way to the fingertips -- fixing both the thin arm
-    # and the per-finger scale discontinuities a per-bone-independent scale produced.
-    deform = compute_hierarchical_deform(char_bones, std_bones, matched)
-    for arm_bone in ("ValveBiped.Bip01_L_Forearm", "ValveBiped.Bip01_L_Hand", "ValveBiped.Bip01_L_Finger2"):
-        if arm_bone in deform:
-            cumulative_scale = float(np.cbrt(abs(np.linalg.det(deform[arm_bone][:3, :3]))))
-            log(f"Conform cumulative scale {arm_bone.split('.')[-1]} = {cumulative_scale:.3f}")
-    total_moved = 0
-    meshes = mesh_objects()
-    for obj in meshes:
-        # A raw vertex-coordinate write desyncs shape keys; first-person arms never flex, so clear them.
-        if obj.data.shape_keys:
-            log(f"Conform: clearing shape keys on {obj.name} (first-person arms do not flex).")
-            obj.shape_key_clear()
-        group_name = {vg.index: vg.name for vg in obj.vertex_groups}
-        for vertex in obj.data.vertices:
-            weighted = [
-                (group_name.get(g.group), g.weight)
-                for g in vertex.groups
-                if g.weight > 0.0 and group_name.get(g.group) in matched_set
-            ]
-            if not weighted:
-                continue  # non-arm vertex: leave at identity (the Step-10 cut drops it anyway)
-            wsum = sum(weight for _name, weight in weighted)
-            if wsum <= 0.0:
-                continue
-            blended = np.zeros((4, 4))
-            for name, weight in weighted:
-                blended += deform[name] * (weight / wsum)
-            homogeneous = np.array((vertex.co.x, vertex.co.y, vertex.co.z, 1.0))
-            new_co = blended @ homogeneous
-            new_vec = Vector((float(new_co[0]), float(new_co[1]), float(new_co[2])))
-            if (new_vec - vertex.co).length > 1.0e-6:
-                total_moved += 1
-            vertex.co = new_vec
-        obj.data.update()
-        # Re-bind to the standard skeleton so the exported reference SMD carries STANDARD bone lengths.
-        obj.parent = std_arm
-        obj.matrix_parent_inverse = std_arm.matrix_world.inverted()
-        for modifier in obj.modifiers:
-            if modifier.type == "ARMATURE":
-                modifier.object = std_arm
-        # The position edit invalidates custom split normals; clear them so the exporter recomputes
-        # clean normals on the conformed geometry (arm meshes rarely carry custom normals).
-        try:
-            if getattr(obj.data, "has_custom_normals", False):
-                obj.data.normals_split_custom_clear()
-        except Exception as exc:
-            log(f"Conform: could not clear custom normals on {obj.name}: {exc}")
-    if total_moved == 0:
-        raise RuntimeError(
-            "c_arms conform: no vertices moved -- the conform was a no-op (bone-name mismatch). "
-            "Refusing to ship a silently unconformed (distorted) arm."
-        )
-    return {
-        "applied": True,
-        "standard_skeleton": STD_CARMS_SKELETON_SMD.name,
-        "matched_bone_count": len(matched),
-        "meshes_conformed": len(meshes),
-        "vertices_moved": total_moved,
-    }
-
-
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--input-dir", type=Path, required=True)
@@ -795,11 +500,6 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--report-json", type=Path, required=True)
     parser.add_argument("--files-json", type=Path, required=True)
     parser.add_argument("--weight-threshold", type=float, default=DEFAULT_WEIGHT_THRESHOLD)
-    parser.add_argument("--game", default="gmod")
-    # GMod only: "use experimental arms" -- when enabled, conform the cut arm mesh onto the standard
-    # c_arms skeleton (the experimental implementation). Default off -> keep the MMD-proportion
-    # skeleton so Step 14 emits the proportion-driven c_arms (the original method).
-    parser.add_argument("--experimental-arms", default="0")
     return parser.parse_args(argv)
 
 
@@ -810,8 +510,6 @@ def run(args: argparse.Namespace) -> dict[str, object]:
     report_json = args.report_json.resolve()
     files_json = args.files_json.resolve()
     threshold = float(args.weight_threshold)
-    game = str(getattr(args, "game", "gmod") or "gmod").strip().lower()
-    experimental_arms = str(getattr(args, "experimental_arms", "0")).strip().lower() in ("1", "true", "yes", "on")
     if not input_dir.exists():
         raise FileNotFoundError(input_dir)
     if threshold <= 0.0:
@@ -830,32 +528,6 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         raise RuntimeError("Required forearm bone(s) missing from imported armature: " + ", ".join(missing_roots))
     log(f"c_arms target bone set contains {len(target_bones)} forearm/hand/finger bone(s).")
     object_reports = prune_all_meshes(target_bones, threshold)
-    # GMod first-person c_arms: conform the cut arm mesh onto the STANDARD c_arms skeleton (rest-pose
-    # retarget) so it bonemerges cleanly onto weapon viewmodels. ONLY when "use experimental arms" is
-    # enabled -- the default (off) keeps the MMD-proportion skeleton so Step 14 emits the original
-    # proportion-driven c_arms. NOT done for L4D2 (its v_arms keep the full-body skeleton + proportion
-    # trick) or SFM (Step 10 is skipped). Runs after the cut; the cut itself is unchanged.
-    conform_report: dict[str, object] = {"applied": False, "game": game, "experimental_arms": experimental_arms}
-    if game == "gmod" and experimental_arms:
-        log("Experimental arms ON: conforming c_arms mesh onto the standard GMod c_arms skeleton (rest-pose retarget).")
-        std_arm = import_standard_carms_armature()
-        std_bone_names = {bone.name for bone in std_arm.data.bones}
-        ulna_report = prepare_ulna_weights(armature, std_bone_names)
-        log(f"Ulna weights: {ulna_report}")
-        conform_report = conform_meshes_to_standard(armature, std_arm)
-        conform_report["game"] = game
-        conform_report["experimental_arms"] = True
-        conform_report["ulna"] = ulna_report
-        log(
-            f"Conform applied: matched {conform_report['matched_bone_count']} bones, moved "
-            f"{conform_report['vertices_moved']} vertices across {conform_report['meshes_conformed']} mesh(es)."
-        )
-        # The meshes are now bound to the standard armature; remove the original MMD-proportion rig so
-        # the Source export writes the standard skeleton unambiguously.
-        if armature.name in bpy.data.objects:
-            bpy.data.objects.remove(armature, do_unlink=True)
-    elif game == "gmod":
-        log("Experimental arms OFF: keeping the MMD-proportion skeleton; Step 14 will emit the proportion-driven c_arms.")
     texture_by_name = material_texture_map(input_dir)
     preview = collect_preview(texture_by_name)
 
@@ -880,7 +552,6 @@ def run(args: argparse.Namespace) -> dict[str, object]:
         "forearm_roots": sorted(FOREARM_ROOTS),
         "target_bones": sorted(target_bones, key=natural_key),
         "import": import_report,
-        "conform": conform_report,
         "bodygroups": object_reports,
         "kept_bodygroup_count": len(kept_reports),
         "removed_bodygroup_count": len(object_reports) - len(kept_reports),

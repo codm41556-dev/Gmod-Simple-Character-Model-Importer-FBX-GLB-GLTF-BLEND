@@ -47,7 +47,7 @@ BAD_OPEN_BRACE_RE = re.compile(r"\((?P<line>\d+)\):\s*-\s*bad command\s+\{", re.
 
 ESSENTIAL_EXACT = {"ZArmTwist_L", "ZArmTwist_R", "ZHandTwist_L", "ZHandTwist_R", "Eye_L", "Eye_R"}
 GENDER_CHOICES = ("female", "male")
-GAME_CHOICES = ("gmod", "l4d2", "sfm")
+GAME_CHOICES = ("gmod", "l4d2")
 GENDER_ANIMATION_INCLUDES = {
     "female": {
         # Playermodel QC needs ONLY the standard GMod player animation packs.
@@ -105,10 +105,9 @@ def normalize_game(value: object) -> str:
 # The 8 L4D2 survivor slots an MMD model can be ported onto (the 4 L4D2 survivors
 # plus the 4 returning L4D1 survivors). The model name/path MUST be the exact
 # survivor slot (custom names are not allowed in L4D2): the character is
-# survivors/survivor_<slot>.mdl and the first-person arms are weapons/arms/v_arms_<slot>_new.mdl
-# for the 4 L4D2 survivors, but the 4 returning L4D1 survivors keep their original arms
-# (v_arms_bill/zoey/francis/louis, no "_new") -- see L4D2_SURVIVOR_ARMS_RELPATH.
-# anim/gesture includes and the vgui survivor panels also use the
+# survivors/survivor_<slot>.mdl and the first-person arms are
+# weapons/arms/v_arms_<slot>_new.mdl (the "_new" suffix is the L4D2 arms
+# convention). anim/gesture includes and the vgui survivor panels also use the
 # exact slot. Internal slot -> in-game name: producer=Rochelle, coach=Coach,
 # gambler=Nick, mechanic=Ellis, namvet=Bill, teenangst=Zoey, biker=Francis,
 # manager=Louis.
@@ -218,98 +217,8 @@ def l4d2_character_modelname(slot: str) -> str:
     return f"survivors/survivor_{normalize_survivor(slot)}.mdl"
 
 
-# First-person arms model path per survivor slot (relative to models/, no extension). The 4 L4D2
-# survivors use the "_new" arms named by their internal anim slot (producer/coach/gambler/mechanic),
-# but the 4 returning L4D1 survivors keep their ORIGINAL L4D1 arms, named by the in-game character
-# WITHOUT the "_new" suffix (Bill/Zoey/Francis/Louis) -- verified against the base-game v_arms_*.mdl
-# headers in L4D2_Support/default_c_arm_l4d1. A custom survivor only shows up in first person if it
-# overrides the EXACT arms path the game loads for that character; the L4D1 slots cannot use the
-# v_arms_<slot>_new pattern (the game never loads v_arms_namvet_new.mdl, so those arms stayed the
-# default -- issue #124).
-L4D2_SURVIVOR_ARMS_RELPATH = {
-    "producer": "weapons/arms/v_arms_producer_new",
-    "coach": "weapons/arms/v_arms_coach_new",
-    "gambler": "weapons/arms/v_arms_gambler_new",
-    "mechanic": "weapons/arms/v_arms_mechanic_new",
-    "namvet": "weapons/arms/v_arms_bill",
-    "teenangst": "weapons/arms/v_arms_zoey",
-    "biker": "weapons/arms/v_arms_francis",
-    "manager": "weapons/arms/v_arms_louis",
-}
-
-
-def l4d2_arms_relpath(slot: str) -> str:
-    """Arms model path relative to models/ (no extension) for the survivor the game actually loads."""
-    survivor = normalize_survivor(slot)
-    return L4D2_SURVIVOR_ARMS_RELPATH.get(survivor, f"weapons/arms/v_arms_{survivor}_new")
-
-
 def l4d2_arms_modelname(slot: str) -> str:
-    return f"{l4d2_arms_relpath(slot)}.mdl"
-
-
-# The exact $includemodel set each survivor's base-game model uses, verbatim from TwentyCat's
-# l4d2_survivors_converter same-slot wrapper QCs. The 4 main survivors are just anim_<slot> +
-# gestures_<slot>, but the L4D1 survivors pull extra/aliased anim models (Zoey also loads producer
-# anims; Francis/Louis use the *_animloader + Biker anim set), so a naive "anim_<slot>" would
-# reference models that don't exist and the $declaresequence names would not resolve. Strings kept
-# verbatim, including the few without a "survivors/" prefix.
-L4D2_SURVIVOR_INCLUDEMODELS = {
-    "producer": ["survivors/anim_producer.mdl", "survivors/gestures_producer.mdl"],
-    "coach": ["survivors/anim_coach.mdl", "survivors/gestures_coach.mdl"],
-    "gambler": ["survivors/anim_gambler.mdl", "survivors/gestures_gambler.mdl"],
-    "mechanic": ["survivors/anim_mechanic.mdl", "survivors/gestures_mechanic.mdl"],
-    "namvet": ["survivors/anim_NamVet.mdl", "survivors/gestures_namvet.mdl"],
-    "teenangst": [
-        "survivors/anim_teenangst.mdl",
-        "survivors/gestures_TeenAngst.mdl",
-        "survivors/anim_producer.mdl",
-        "survivors/anim_gestures.mdl",
-    ],
-    "biker": [
-        "survivors/anim_biker_animloader.mdl",
-        "anim_biker_own_anims.mdl",
-        "survivors/anim_Biker.mdl",
-        "survivors/gestures_biker.mdl",
-    ],
-    "manager": [
-        "survivors/anim_louis_animloader.mdl",
-        "anim_louis_own_anims.mdl",
-        "survivors/anim_Biker.mdl",
-        "survivors/gestures_biker.mdl",
-    ],
-}
-
-
-def l4d2_includemodel_lines(slot: str) -> list[str]:
-    survivor = normalize_survivor(slot)
-    includes = L4D2_SURVIVOR_INCLUDEMODELS.get(survivor) or [
-        f"survivors/anim_{survivor}.mdl",
-        f"survivors/gestures_{survivor}.mdl",
-    ]
-    return [f'$includemodel "{include}" \n' for include in includes]
-
-
-def l4d2_reference_sequences_path(slot: str) -> Path:
-    return Path(__file__).resolve().parent / "l4d2_reference_sequences" / f"{normalize_survivor(slot)}.txt"
-
-
-def l4d2_declaresequence_lines(slot: str) -> list[str]:
-    """The selected survivor's full ordered base-game sequence-name list, emitted as $declaresequence.
-
-    This is the fix for the multiplayer survivor T-pose (issue #105). A survivor REPLACEMENT prepends
-    its own local sequences (reference/ragdoll/proportions) before $includemodel, which shifts the
-    index of every included anim/gesture sequence. L4D2 transmits animation across the network by
-    integer sequence INDEX, so the server addresses the wrong sequence and remote clients render the
-    bind pose (= T-pose); single-player resolves locally by name and looks fine. Forward-declaring
-    every included sequence here, in canonical order, re-pins them to the indices the server expects.
-    Lists are bundled verbatim from TwentyCat's l4d2_survivors_converter wrapper QCs (the names are
-    Valve base-game sequence names)."""
-    path = l4d2_reference_sequences_path(slot)
-    if not path.exists():
-        return []
-    names = [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.strip()]
-    return [f'$declaresequence "{name}" \n' for name in names]
+    return f"weapons/arms/v_arms_{normalize_survivor(slot)}_new.mdl"
 
 
 def gendered_reference_name(plan: dict, anims_dir: Path, warnings: list | None = None) -> str:
@@ -329,101 +238,6 @@ def gendered_reference_name(plan: dict, anims_dir: Path, warnings: list | None =
             )
         return "reference_female"
     return reference
-
-
-# Stock GMod c_arms standard skeleton (decompiled weapons/c_arms.mdl). The first-person c_arms
-# bonemerge onto the weapon viewmodel, whose arm bones use the STOCK c_arms proportions
-# (UpperArm 6.028 / Forearm 11.693 / Hand 11.481) -- which match the MALE player reference but NOT
-# the female one. So the proportion-trick subtract MUST go against the stock c_arms arm proportions,
-# not the gendered player reference; otherwise non-male characters' first-person arms are displaced
-# (issue #121). build_carms_proportion_reference() builds a c_arms-specific reference for the GMod
-# proportion-driven c_arms.
-CARMS_STOCK_REFERENCE_SMD = Path(__file__).resolve().parent / "assets" / "std_c_arms_skeleton" / "c_arms_stock_reference.smd"
-# Override only the arm chain; the spine/neck/head roots keep the character pose (zero delta).
-CARMS_REFERENCE_ROOT_BONES = {"ValveBiped.Bip01_Spine4", "ValveBiped.Bip01_Neck1", "ValveBiped.Bip01_Head1"}
-
-
-def _read_smd_frame0_poses(smd_path: Path) -> dict[str, str]:
-    """Return {bone_name: 'px py pz rx ry rz'} from an SMD's skeleton frame 0."""
-    text = smd_path.read_text(encoding="utf-8", errors="replace").splitlines()
-    nodes_start = next(i for i, ln in enumerate(text) if ln.strip() == "nodes")
-    id_to_name: dict[int, str] = {}
-    i = nodes_start + 1
-    while i < len(text) and text[i].strip() != "end":
-        m = re.match(r'\s*(\d+)\s+"([^"]+)"', text[i])
-        if m:
-            id_to_name[int(m.group(1))] = m.group(2)
-        i += 1
-    skel_start = next(j for j in range(i, len(text)) if text[j].strip() == "skeleton")
-    j = skel_start + 1
-    while j < len(text) and not text[j].strip().startswith("time"):
-        j += 1
-    j += 1
-    poses: dict[str, str] = {}
-    while j < len(text) and text[j].strip() != "end":
-        parts = text[j].split()
-        if parts and parts[0].lstrip("-").isdigit() and len(parts) >= 7 and int(parts[0]) in id_to_name:
-            poses[id_to_name[int(parts[0])]] = " ".join(parts[1:7])
-        j += 1
-    return poses
-
-
-def build_carms_proportion_reference(carms_work: Path) -> str | None:
-    """Write anims/c_arms_reference.smd = the character's proportions.smd with the ARM-CHAIN bones'
-    frame-0 poses overridden to the stock c_arms standard, so the proportion-trick subtract delta is
-    (character - c_arms_standard) for the arms (the value the runtime viewmodel bonemerge expects --
-    this is what makes non-male first-person arms land correctly, issue #121) and ZERO for every
-    other bone (they are not rendered or merged). Returns "c_arms_reference", or None when
-    proportions.smd / the stock reference is unavailable so the caller can fall back to the gendered
-    reference (preserving the old behaviour rather than failing the compile)."""
-    proportions = carms_work / "anims" / "proportions.smd"
-    if not proportions.exists() or not CARMS_STOCK_REFERENCE_SMD.exists():
-        return None
-    try:
-        stock_poses = _read_smd_frame0_poses(CARMS_STOCK_REFERENCE_SMD)
-    except Exception as exc:
-        emit(f"c_arms reference: could not read the stock c_arms poses ({exc}); using the gendered reference.")
-        return None
-    override = {name: pose for name, pose in stock_poses.items() if name not in CARMS_REFERENCE_ROOT_BONES}
-    if not override:
-        return None
-    text = proportions.read_text(encoding="utf-8", errors="replace").splitlines()
-    try:
-        nodes_start = next(i for i, ln in enumerate(text) if ln.strip() == "nodes")
-    except StopIteration:
-        return None
-    id_to_name: dict[int, str] = {}
-    i = nodes_start + 1
-    while i < len(text) and text[i].strip() != "end":
-        m = re.match(r'\s*(\d+)\s+"([^"]+)"', text[i])
-        if m:
-            id_to_name[int(m.group(1))] = m.group(2)
-        i += 1
-    out = list(text)
-    j = next((k for k in range(i, len(out)) if out[k].strip() == "skeleton"), None)
-    if j is None:
-        return None
-    j += 1
-    while j < len(out) and not out[j].strip().startswith("time"):
-        j += 1
-    j += 1
-    replaced = 0
-    while j < len(out) and out[j].strip() != "end":
-        parts = out[j].split()
-        if parts and parts[0].lstrip("-").isdigit() and len(parts) >= 7:
-            name = id_to_name.get(int(parts[0]))
-            if name in override:
-                lead = re.match(r"(\s*)", out[j]).group(1)
-                out[j] = f"{lead}{parts[0]} {override[name]}"
-                replaced += 1
-        j += 1
-    if replaced == 0:
-        return None
-    (carms_work / "anims" / "c_arms_reference.smd").write_text("\n".join(out) + "\n", encoding="utf-8")
-    emit(f"c_arms proportion reference: overrode {replaced} arm-chain bone(s) onto the stock c_arms standard.")
-    return "c_arms_reference"
-
-
 HBOX_GROUPS = {
     "ValveBiped.Bip01_Pelvis": 3,
     "ValveBiped.Bip01_L_Thigh": 6,
@@ -855,76 +669,10 @@ def detect_l4d2(explicit_root: str = "", explicit_studiomdl: str = "") -> dict[s
     return {"install_root": "", "game_dir": "", "studiomdl_path": "", "source": "not_found", "checked": checked}
 
 
-def validate_sfm_root(root: Path) -> dict[str, str] | None:
-    # Source Filmmaker layout: <SourceFilmmaker>/game/bin/studiomdl.exe (+ vpk.exe)
-    # and <SourceFilmmaker>/game/usermod/gameinfo.txt (the loose-file content mod dir).
-    # Accept the SourceFilmmaker root, its "game" folder, or the "usermod" folder.
-    name = root.name.lower()
-    if name == "usermod" and (root / "gameinfo.txt").exists():
-        install_root = root.parent
-        game_dir = root
-    elif name == "game" and (root / "bin" / "studiomdl.exe").exists():
-        install_root = root
-        game_dir = root / "usermod"
-    elif (root / "game" / "bin" / "studiomdl.exe").exists():
-        install_root = root / "game"
-        game_dir = install_root / "usermod"
-    else:
-        install_root = root
-        game_dir = root / "usermod"
-    studiomdl = install_root / "bin" / "studiomdl.exe"
-    if studiomdl.exists() and (game_dir / "gameinfo.txt").exists():
-        return {"install_root": str(install_root), "game_dir": str(game_dir), "studiomdl_path": str(studiomdl)}
-    return None
-
-
-def detect_sfm(explicit_root: str = "", explicit_studiomdl: str = "") -> dict[str, Any]:
-    candidates: list[Path] = []
-    if explicit_studiomdl:
-        exe = Path(explicit_studiomdl)
-        if exe.exists():
-            # studiomdl lives in <game>/bin, so its grandparent is the <game> install root.
-            hit = validate_sfm_root(exe.parent.parent)
-            if hit:
-                hit["source"] = "explicit_studiomdl"
-                return hit
-    for raw in [explicit_root, os.environ.get("SFM_PATH", ""), os.environ.get("SOURCEFILMMAKER_PATH", "")]:
-        if raw:
-            candidates.append(Path(raw))
-    env_studiomdl = os.environ.get("STUDIOMDL", "")
-    if env_studiomdl:
-        exe = Path(env_studiomdl)
-        if exe.exists():
-            candidates.append(exe.parent.parent)
-    for library in steam_library_roots():
-        candidates.append(library / "steamapps" / "common" / "SourceFilmmaker")
-    seen: set[str] = set()
-    checked: list[str] = []
-    for candidate in candidates:
-        try:
-            candidate = candidate.resolve()
-        except Exception:
-            pass
-        key = str(candidate).lower()
-        if key in seen:
-            continue
-        seen.add(key)
-        checked.append(str(candidate))
-        hit = validate_sfm_root(candidate)
-        if hit:
-            hit["source"] = "detected"
-            hit["checked"] = checked
-            return hit
-    return {"install_root": "", "game_dir": "", "studiomdl_path": "", "source": "not_found", "checked": checked}
-
-
 def detect_game(game: str, explicit_root: str = "", explicit_studiomdl: str = "") -> dict[str, Any]:
     """Detect the Source install (studiomdl + game dir) for the target game."""
-    target = normalize_game(game)
-    if target == "l4d2":
+    if normalize_game(game) == "l4d2":
         return detect_l4d2(explicit_root, explicit_studiomdl)
-    if target == "sfm":
-        return detect_sfm(explicit_root, explicit_studiomdl)
     return detect_gmod(explicit_root, explicit_studiomdl)
 
 
@@ -1205,39 +953,6 @@ def is_facial_flex_bone(name: str, node: SmdNode, nodes: dict[int, SmdNode]) -> 
     return essential_ancestor(node, nodes) == "ValveBiped.Bip01_Head1"
 
 
-def is_frontal_head_flex_bone(
-    node: SmdNode,
-    nodes: dict[int, SmdNode],
-    head_pos: tuple[float, float, float] | None,
-    direct_children: int,
-    front_margin: float,
-) -> bool:
-    """A childless bone sitting clearly in front of the head pivot (issue #103).
-
-    Structural counterpart to the name-based is_facial_flex_bone(): flex/
-    expression detail bones (eyes, mouth, teeth, tongue, cheeks and any unnamed
-    or localized facial helpers) live on the face -- in front of the Head1 pivot
-    -- and are leaf bones, because the source drives the face with flexes, not
-    bone chains. They must never become jigglebones, even when their names are
-    unrecognized. This catches the cases the token list misses.
-
-    "Front" is the -Y side of the head pivot in the standardized skeleton frame
-    (matching the $attachment "eyes"/"mouth" offsets and orientation_code()).
-    The caller scales front_margin to ~0.45x the neck->head length so genuine
-    facial bones (~1 head-radius forward) qualify while near-pivot side
-    accessories (earrings, short floating ribbons) do not. The caller also only
-    applies this to non-hinted bones, so named hair/ribbon/cloth (bangs included)
-    stay jiggle-eligible.
-    """
-    if direct_children != 0:
-        return False
-    if head_pos is None:
-        return False
-    if essential_ancestor(node, nodes) != "ValveBiped.Bip01_Head1":
-        return False
-    return node.global_pos[1] < head_pos[1] - front_margin
-
-
 def weighted_stats_from_smds(smds: list[SmdData], nodes: dict[int, SmdNode]) -> dict[str, dict[str, Any]]:
     stats: dict[str, dict[str, Any]] = {
         node.name: {"weighted_vertices": 0, "weight_sum": 0.0, "pos_sum": [0.0, 0.0, 0.0]}
@@ -1388,19 +1103,6 @@ def classify_jigglebones(nodes: dict[int, SmdNode], stats: dict[str, dict[str, A
     else:
         extent = 1.0
     near_threshold = max(0.18, extent * 0.012)
-    # Issue #103: stricter head jigglebone selection (both GMod and L4D2). A
-    # non-hinted childless bone must sit at least this far in front (toward the
-    # face, -Y) of the head pivot to be treated as a flex/expression bone. The
-    # margin scales to ~0.45x the neck->head length so genuine facial bones
-    # (eyes/mouth/teeth ~1 head-radius forward) qualify while near-pivot side
-    # accessories (earrings, short floating ribbons) are spared.
-    head_pos = landmarks.get("ValveBiped.Bip01_Head1")
-    neck_pos = landmarks.get("ValveBiped.Bip01_Neck1")
-    if head_pos is not None and neck_pos is not None:
-        head_scale = math.sqrt(sum((head_pos[i] - neck_pos[i]) ** 2 for i in range(3)))
-    else:
-        head_scale = extent * 0.05
-    front_margin = max(0.5, head_scale * 0.45)
     jiggle_hints = (
         "hair", "cape", "ribbon", "plait", "ear", "tail", "skirt", "sleeve", "cloth", "clothes",
         "coat", "robe", "dress", "collar", "belt", "chain", "boot", "breast", "butt", "chest",
@@ -1471,7 +1173,6 @@ def classify_jigglebones(nodes: dict[int, SmdNode], stats: dict[str, dict[str, A
                 warnings.append("Low-confidence jiggle classification; verify manually.")
             else:
                 confidence = 0.7
-        direct_children = direct_child_counts.get(node.index, 0)
         # Guard rail: flex-driven facial detail bones under Head1 (eyes/brows/
         # nose/tongue/teeth/lips/eyelids/mouth) never jiggle. Excluding
         # jiggle-hinted names (hint_hit) keeps real accessories such as hairclips
@@ -1481,19 +1182,7 @@ def classify_jigglebones(nodes: dict[int, SmdNode], stats: dict[str, dict[str, A
             jiggle_type = "Not Jiggle"
             reason = "flex-driven facial detail bone under Head1; never a jigglebone"
             confidence = 0.95
-        # Guard rail (issue #103): structural flex-bone filter. A non-hinted
-        # childless bone clearly in front of the head pivot is a flex/expression
-        # helper even when its name is unrecognized or localized -- catches the
-        # cases the FACIAL_FLEX_TOKENS list above misses. Hinted bones (hair/
-        # bangs/ribbon/cloth) also sit in front but stay jiggle-eligible.
-        if (
-            jiggle_type != "Not Jiggle"
-            and not hint_hit
-            and is_frontal_head_flex_bone(node, nodes, head_pos, direct_children, front_margin)
-        ):
-            jiggle_type = "Not Jiggle"
-            reason = "flex-driven facial bone in front of head with no children; never a jigglebone"
-            confidence = 0.93
+        direct_children = direct_child_counts.get(node.index, 0)
         if jiggle_type != "Not Jiggle" and direct_children > 4:
             jiggle_type = "Not Jiggle"
             reason = f"hub bone with {direct_children} direct children (more than 4); defaulted to no jiggle"
@@ -1779,16 +1468,9 @@ def refresh_input_availability_warnings(plan: dict[str, Any], warnings: list[str
     (and must warn when an input vanished after the analyze).
     """
     inputs = plan.get("inputs", {}) if isinstance(plan.get("inputs"), dict) else {}
-    # SFM ships loose models + materials only (no GMod spawn-menu icons), so a missing Step 13 icon
-    # dir is expected and must not warn. VRD ($proceduralbones) is also opt-in / off by default for
-    # SFM, so a missing Step 11 VRD is expected and must not warn either.
-    sfm = normalize_game(plan.get("game")) == "sfm"
-    skip_keys = {"step13_dir", "step11_vrd"} if sfm else set()
     messages = {message for _key, message in INPUT_AVAILABILITY_WARNINGS}
     warnings[:] = [warning for warning in warnings if str(warning) not in messages]
     for key, message in INPUT_AVAILABILITY_WARNINGS:
-        if key in skip_keys:
-            continue
         path_text = str(inputs.get(key) or "")
         if not path_text or not Path(path_text).exists():
             warnings.append(message)
@@ -1834,12 +1516,7 @@ def analyze(input_path: Path, author: str = "", category: str = "", model_name: 
                 "female reference pose. Re-run Step 9 to regenerate both reference animations."
             )
     texture_manifest = Path(discovered["step12_manifest"])
-    # SFM: VRD ($proceduralbones) is opt-in and off by default, so a missing Step 11 VRD is
-    # expected and must not warn.
-    vrd_warning_skip = {"step11_vrd"} if normalize_game(game) == "sfm" else set()
     for key, message in INPUT_AVAILABILITY_WARNINGS:
-        if key in vrd_warning_skip:
-            continue
         if not Path(str(discovered.get(key) or "")).exists():
             warnings.append(message)
 
@@ -1878,6 +1555,13 @@ def analyze(input_path: Path, author: str = "", category: str = "", model_name: 
         )
     safe_category = safe_internal_identifier(category or "SheepyLord", "SheepyLord")
     material_rows = material_plan_rows(texture_manifest)
+    if not material_rows:
+        # No Step 12 manifest — try to build material rows from the FBX/GLB
+        # source texture folder so VMTs and VTFs are still generated.
+        material_rows = generic_material_rows_from_workspace(
+            Path(discovered["workspace_root"]),
+            discovered["smd_files"],
+        )
     texturegroups = load_texture_groups_config(discovered.get("workspace_root"))
     plan = {
         "version": 1,
@@ -1907,7 +1591,6 @@ def analyze(input_path: Path, author: str = "", category: str = "", model_name: 
         "physics_collision_text_lines": physics_collision_text_lines,
         "invert_jiggle_direction": False,
         "include_mci_metadata_json": True,
-        "nodecal": normalize_game(game) == "l4d2",
         "material_rows": material_rows,
         "texturegroups": texturegroups,
         "warnings": warnings,
@@ -1940,6 +1623,249 @@ def analyze(input_path: Path, author: str = "", category: str = "", model_name: 
     emit(f"Wrote QC plan: {paths['plan']}")
     return {"analysis": analysis, "plan": plan, "paths": {key: str(value) for key, value in paths.items()}}
 
+
+
+# Image extensions that VTFCmd can convert and Source Engine accepts.
+TEXTURE_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".bmp", ".tga"}
+
+
+def generic_material_rows_from_workspace(workspace_root: Path, smd_files: list[str]) -> list[dict[str, Any]]:
+    """Build material_rows for generic (FBX/GLB) imports that bypass Step 12.
+
+    Reads the Step 1 import report to confirm this is a generic import, then
+    scans the source-assets folder for image files and matches them to the
+    material names embedded in the exported SMDs.  Returns an empty list for
+    PMX/VRM workspaces (Step 12 covers those).
+    """
+    import_report_path = workspace_root / "1_import_mmd_model" / "blender_import_report.json"
+    if not import_report_path.exists():
+        return []
+    try:
+        import_report = json.loads(import_report_path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+
+    # Only activate for generic imports; PMX/VRM are handled by Step 12.
+    if str(import_report.get("format") or "").strip().lower() != "generic":
+        return []
+
+    # Collect all material names referenced in the exported SMDs.
+    smd_material_names: set[str] = set()
+    for smd_path_str in smd_files:
+        smd_path = Path(smd_path_str)
+        if not smd_path.exists() or smd_path.name.lower() == "physics.smd":
+            continue
+        try:
+            smd_data = parse_smd(smd_path, include_triangles=True)
+            smd_material_names.update(smd_data.material_names)
+        except Exception:
+            pass
+
+    # Find all image files in the source assets folder.
+    source_assets = workspace_root / "0_source_mmd_assets"
+    if not source_assets.exists():
+        return []
+    image_files: list[Path] = []
+    for ext in TEXTURE_IMAGE_EXTENSIONS:
+        image_files.extend(source_assets.rglob(f"*{ext}"))
+        image_files.extend(source_assets.rglob(f"*{ext.upper()}"))
+    # Deduplicate and sort for determinism.
+    seen_stems: set[str] = set()
+    unique_images: list[Path] = []
+    for img in sorted(image_files, key=lambda p: natural_key(p.name)):
+        key = img.stem.lower()
+        if key not in seen_stems:
+            seen_stems.add(key)
+            unique_images.append(img)
+
+    if not unique_images:
+        return []
+
+    # Build a stem->path lookup for fast matching.
+    image_by_stem: dict[str, Path] = {img.stem.lower(): img for img in unique_images}
+
+    # PBR/texture-channel suffix tokens, ordered by priority. A texture is
+    # classified by the FIRST hint group whose token appears in its stem.
+    # Non-diffuse channels (masks, normals, specular/gloss, AO, roughness,
+    # metallic) must never be picked as a $basetexture, even if they happen
+    # to share more raw characters with the material name than the actual
+    # diffuse map does — e.g. "..._mat" shares "ma" with "..._mask01" but
+    # that is a coincidence of spelling, not a semantic match.
+    _DIFFUSE_HINTS = ("_dif", "_diff", "_diffuse", "_col", "_color", "_colour",
+                       "_albedo", "_base", "_d", "_tex", "_texture", "_main",
+                       "_mat", "_material")
+    _NON_DIFFUSE_HINTS = (
+        "_norm", "_normal", "_nrm", "_n",
+        "_mask", "_msk", "_alpha", "_opacity",
+        "_gloss", "_glossiness", "_spec", "_specular", "_rough", "_roughness",
+        "_metal", "_metallic", "_ao", "_occlusion", "_orm", "_rma",
+        "_emissive", "_emission", "_height", "_disp", "_displacement",
+        "_bump",
+    )
+
+    def classify_channel(stem_lower: str) -> str:
+        """Return 'diffuse', 'non_diffuse', or 'unknown' for an image stem."""
+        # Strip trailing digits so numbered variants (mask01, mask02, spec2)
+        # still match their base channel token.
+        trimmed = re.sub(r"\d+$", "", stem_lower)
+        # Longest-hint-first so e.g. "_normal" matches before a coincidental
+        # short overlap; check non-diffuse first since those are the ones we
+        # must never misclassify as diffuse.
+        for hint in sorted(_NON_DIFFUSE_HINTS, key=len, reverse=True):
+            if trimmed.endswith(hint):
+                return "non_diffuse"
+        for hint in sorted(_DIFFUSE_HINTS, key=len, reverse=True):
+            if trimmed.endswith(hint):
+                return "diffuse"
+        return "unknown"
+
+    def find_texture_for(name: str) -> Path | None:
+        """Try to find a texture file matching a material/SMD name.
+
+        Strategy (in order):
+        1. Exact stem match.
+        2. Among images sharing the material's base prefix (everything
+           before the last underscore-separated channel token), pick the
+           one classified as 'diffuse'. Never pick a 'non_diffuse' image.
+        3. Longest common prefix among diffuse-or-unknown images only
+           (mask/normal/gloss/etc. images are excluded from this race).
+        4. Image stem contained in material name or vice versa, again
+           excluding non_diffuse images.
+        """
+        name_lower = name.lower()
+
+        # 1. Exact match.
+        candidate = image_by_stem.get(name_lower)
+        if candidate:
+            return candidate
+
+        # Partition candidate images: never select a non_diffuse one.
+        diffuse_images = {s: i for s, i in image_by_stem.items() if classify_channel(s) == "diffuse"}
+        unknown_images = {s: i for s, i in image_by_stem.items() if classify_channel(s) == "unknown"}
+        safe_images = {**unknown_images, **diffuse_images}  # diffuse preferred via ordering below
+
+        # 2. If there is exactly one diffuse-classified image anywhere in the
+        #    source folder, and the material name itself isn't clearly a
+        #    different specific channel (e.g. a material literally named
+        #    "...norm"), prefer it outright — this covers the common case of
+        #    a single diffuse map plus several auxiliary maps, with a
+        #    generic/ambiguous material name like "*_mat".
+        material_channel = classify_channel(name_lower)
+        if material_channel != "non_diffuse" and len(diffuse_images) == 1:
+            return next(iter(diffuse_images.values()))
+
+        # 3. Longest common prefix among safe (non-mask/normal/etc.) images,
+        #    preferring diffuse-classified ones on ties.
+        best_path: Path | None = None
+        best_len = 0
+        best_is_diffuse = False
+        for stem, img in safe_images.items():
+            common = 0
+            for a, b in zip(name_lower, stem):
+                if a == b:
+                    common += 1
+                else:
+                    break
+            if common == 0:
+                continue
+            is_diffuse = stem in diffuse_images
+            if (common > best_len
+                    or (common == best_len and is_diffuse and not best_is_diffuse)):
+                best_len = common
+                best_path = img
+                best_is_diffuse = is_diffuse
+
+        if best_path is not None and best_len >= max(3, len(name_lower) // 2):
+            return best_path
+
+        # 4. Substring match, still excluding non_diffuse images.
+        for stem, img in safe_images.items():
+            if stem in name_lower or name_lower in stem:
+                return img
+
+        return None
+
+    rows: list[dict[str, Any]] = []
+
+    # First pass: one row per SMD material name (preserves game-side names).
+    # claimed_textures prevents two SMD material names from being assigned the
+    # same source image (which would cause VTFCmd to produce two identically
+    # sized VTFs, the second of which overwrites the first and the third SMD
+    # slot then picks a wrong fallback image like a mask map).
+    covered_images: set[str] = set()
+    claimed_textures: set[str] = set()  # absolute paths already assigned
+    for index, mat_name in enumerate(sorted(smd_material_names, key=natural_key), start=1):
+        output_name = safe_name(mat_name, f"mat_{index:03d}")
+        texture = find_texture_for(mat_name)
+        # If the best-match texture was already claimed by an earlier material,
+        # try to find a different unclaimed image before giving up.
+        if texture and str(texture) in claimed_textures:
+            alt = None
+            name_lower = mat_name.lower()
+            for stem, img in image_by_stem.items():
+                if str(img) in claimed_textures:
+                    continue
+                if stem in name_lower or name_lower in stem:
+                    alt = img
+                    break
+            texture = alt  # may be None — will warn below
+        base_png = str(texture) if texture else ""
+        if texture:
+            covered_images.add(texture.stem.lower())
+            claimed_textures.add(str(texture))
+        # Tag whether the texture has a real alpha channel so compose_materials
+        # can decide whether to emit $alphatest in the VMT.
+        tex_has_alpha = False
+        if texture:
+            if texture.suffix.lower() in {".jpg", ".jpeg"}:
+                tex_has_alpha = False
+            elif texture.suffix.lower() in {".png", ".tga", ".bmp"}:
+                try:
+                    from PIL import Image as _PilImage
+                    with _PilImage.open(texture) as _img:
+                        tex_has_alpha = "A" in _img.getbands() or _img.mode in {"P", "LA", "RGBA", "PA"}
+                except Exception:
+                    tex_has_alpha = True  # assume alpha if we can't check
+        rows.append({
+            "uid": f"mat_{index:03d}",
+            "material_name": mat_name,
+            "output_name": output_name,
+            "base_png": base_png,
+            "normal_png": "",
+            "normal_status": "",
+            "phongexp_png": "",
+            "selfillum_png": "",
+            "pbr_enabled": [],
+            "has_alpha": tex_has_alpha,
+            "warnings": [] if base_png else [f"No texture image found for material '{mat_name}'."],
+        })
+
+    # Second pass: any texture images NOT matched to an SMD material get their
+    # own row so they still end up in the addon (avoids silent missing textures).
+    offset = len(rows) + 1
+    for img in unique_images:
+        if img.stem.lower() in covered_images:
+            continue
+        # Skip obvious non-diffuse maps (normals, roughness, metallic, etc.).
+        stem_low = img.stem.lower()
+        if any(token in stem_low for token in ("_n", "_normal", "_nrm", "_rough", "_metal", "_ao", "_orm", "_spec", "_exp")):
+            continue
+        output_name = safe_name(img.stem, f"mat_{offset:03d}")
+        rows.append({
+            "uid": f"mat_{offset:03d}",
+            "material_name": img.stem,
+            "output_name": output_name,
+            "base_png": str(img),
+            "normal_png": "",
+            "normal_status": "",
+            "phongexp_png": "",
+            "selfillum_png": "",
+            "pbr_enabled": [],
+            "warnings": ["Texture not matched to any SMD material; added as standalone material."],
+        })
+        offset += 1
+
+    return rows
 
 def material_plan_rows(manifest_path: Path) -> list[dict[str, Any]]:
     if not manifest_path.exists():
@@ -2037,9 +1963,8 @@ def prepare_qc_source(plan: dict[str, Any]) -> Path:
 
 
 def qc_model_header(plan: dict[str, Any], pm: bool = False, arms: bool = False) -> list[str]:
-    # L4D2 requires exact, non-custom model paths: the character is survivors/survivor_<slot>.mdl
-    # and the arms come from l4d2_arms_modelname (v_arms_<slot>_new for L4D2 survivors,
-    # v_arms_bill/zoey/francis/louis for the L4D1 survivors).
+    # L4D2 requires exact, non-custom model paths: the character is
+    # survivors/survivor_<slot>.mdl and the arms are weapons/arms/v_arms_<slot>_new.mdl.
     if normalize_game(plan.get("game")) == "l4d2":
         slot = normalize_survivor(plan.get("survivor"))
         name = l4d2_arms_modelname(slot) if arms else l4d2_character_modelname(slot)
@@ -2323,28 +2248,6 @@ def validate_texturegroups(plan: dict[str, Any]) -> list[str]:
     return warnings
 
 
-def sfm_idle_sequence(source_dir: Path) -> tuple[str, bool]:
-    """Pick the SFM static-idle source; returns (path_without_or_with_name, is_anim_smd).
-
-    SFM uses a single static idle (no proportion subtract/autoplay). The model's
-    bind pose (captured `$definebone`) is the MMD-proportioned pose, so the idle
-    just needs to hold that pose. Prefer the skeleton-only proportioned animation
-    `anims/proportions.smd`: it carries the proportioned pose (idempotent with the
-    bind) AND studiomdl reliably loads it as a 1-frame idle even alongside
-    `$definebone`. A mesh bodygroup SMD (which has `triangles`) can be read as
-    geometry under `$definebone`, making studiomdl report "no animations found",
-    so it is only a last-resort fallback.
-    """
-    if (source_dir / "anims" / "proportions.smd").exists():
-        return ("anims/proportions", True)
-    if (source_dir / "Body.smd").exists():
-        return ("Body.smd", False)
-    for smd in sorted(source_dir.glob("*.smd"), key=lambda p: natural_key(p.name)):
-        if smd.name.lower() != "physics.smd":
-            return (smd.name, False)
-    return ("anims/proportions", True)
-
-
 def base_qc_lines(
     plan: dict[str, Any],
     source_dir: Path,
@@ -2356,16 +2259,10 @@ def base_qc_lines(
     include_flexes: bool = True,
     for_definebone_capture: bool = False,
 ) -> list[str]:
-    target = normalize_game(plan.get("game"))
-    l4d2 = target == "l4d2"
-    sfm = target == "sfm"
+    l4d2 = normalize_game(plan.get("game")) == "l4d2"
     lines: list[str] = []
     lines.append('// Created by MMD Character Importer Step 14\n\n')
     lines.extend(qc_model_header(plan, pm=pm))
-    if sfm:
-        # SFM's older studiomdl needs $maxverts raised to accept the new model
-        # format (the "single number" the SFM expert described).
-        lines.append("$maxverts 65530 \n\n")
     bodygroups = plan.get("bodygroups") if isinstance(plan.get("bodygroups"), list) else None
     lines.extend(bodygroup_qc_blocks(source_dir, include_flexes=include_flexes, bodygroups=bodygroups))
     lines.append('$surfaceprop "flesh" \n\n')
@@ -2424,9 +2321,6 @@ def base_qc_lines(
         # reference where the realignment is idempotent.
         if not for_definebone_capture:
             lines.extend(l4d2_ik_lines(survivor_bones))
-    elif sfm:
-        # SFM models are posed in the SFM timeline; no IK chains/locks.
-        pass
     else:
         lines.append('$ikchain "rhand" "ValveBiped.Bip01_R_Hand" knee 0.707 0.707 0 \n')
         lines.append('$ikchain "lhand" "ValveBiped.Bip01_L_Hand" knee 0.707 0.707 0 \n')
@@ -2434,56 +2328,25 @@ def base_qc_lines(
         lines.append('$ikchain "lfoot" "ValveBiped.Bip01_L_Foot" knee 0.707 -0.707 0 \n\n')
         lines.append('$ikautoplaylock "rfoot" 0.7 0.1 \n')
         lines.append('$ikautoplaylock "lfoot" 0.7 0.1 \n\n')
-    if sfm:
-        # SFM: a single static idle holding the proportioned pose. No proportion
-        # subtract/autoplay, no ragdoll, no $includemodel, no collision -- per the
-        # expert's example QC. The idle source is the skeleton-only proportioned
-        # animation (studiomdl-safe under $definebone); see sfm_idle_sequence().
-        idle_src, is_anim = sfm_idle_sequence(source_dir)
-        if is_anim:
-            lines.append(f'$sequence "idle" "{idle_src}" fps 1 \n\n')
-        else:
-            lines.append('$sequence "idle" \n{\n')
-            lines.append(f'\t"{idle_src}"\n')
-            lines.append('}\n\n')
-        return lines
     reference_name = gendered_reference_name(plan, source_dir / "anims")
     lines.append(f'$sequence reference "anims/{reference_name}" fps 1 \n')
     lines.append('$origin 0 0 -2.50 \n\n')
     lines.append('$animation a_proportions "anims/proportions" subtract reference 0 \n\n')
+    lines.append('$sequence proportions a_proportions predelta autoplay \n\n')
+    lines.append('$Sequence "ragdoll" {\n')
+    lines.append('\t"anims/proportions"\n')
+    lines.append('\tactivity "ACT_DIERAGDOLL" 1\n')
+    lines.append('\tfadein 0.2\n')
+    lines.append('\tfadeout 0.2\n')
+    lines.append('\tfps 60\n')
+    lines.append('}\n\n')
     if l4d2:
-        # L4D2 survivor MULTIPLAYER sequence-index alignment (issue #105). A survivor REPLACEMENT must
-        # reproduce the base-game sequence INDEX layout: the local idle ('reference', index 0) and
-        # 'ragdoll' (1), then EVERY included anim/gesture sequence forward-declared in canonical order
-        # ($declaresequence, indices 2..N) so $includemodel fills exactly the indices the MP server
-        # addresses by number, and finally the proportions autoplay delta tacked on at the END (hidden)
-        # where it can't shift the included indices. Without this the server plays the wrong index ->
-        # remote clients see the bind/T-pose (single-player resolves by name, so it looks fine there).
-        # SCMI previously emitted 'proportions' at index 1, shifting every included sequence. The
-        # $declaresequence list + the per-slot $includemodel set are the base-game survivor's, bundled
-        # verbatim from TwentyCat's l4d2_survivors_converter (the proven fix for #105).
-        lines.append('$Sequence "ragdoll" {\n')
-        lines.append('\t"anims/proportions"\n')
-        lines.append('\tactivity "ACT_DIERAGDOLL" 1\n')
-        lines.append('\tfadein 0.2\n')
-        lines.append('\tfadeout 0.2\n')
-        lines.append('\tfps 60\n')
-        lines.append('}\n\n')
-        declare_lines = l4d2_declaresequence_lines(plan.get("survivor"))
-        if declare_lines:
-            lines.extend(declare_lines)
-            lines.append("\n")
-        lines.append('$sequence proportions a_proportions predelta autoplay hidden \n\n')
-        lines.extend(l4d2_includemodel_lines(plan.get("survivor")))
+        # Include the base-game survivor animation set for the selected slot so
+        # the model animates with that survivor's movement/gesture animations.
+        slot = normalize_survivor(plan.get("survivor"))
+        lines.append(f'$includemodel "survivors/anim_{slot}.mdl" \n')
+        lines.append(f'$includemodel "survivors/gestures_{slot}.mdl" \n')
     else:
-        lines.append('$sequence proportions a_proportions predelta autoplay \n\n')
-        lines.append('$Sequence "ragdoll" {\n')
-        lines.append('\t"anims/proportions"\n')
-        lines.append('\tactivity "ACT_DIERAGDOLL" 1\n')
-        lines.append('\tfadein 0.2\n')
-        lines.append('\tfadeout 0.2\n')
-        lines.append('\tfps 60\n')
-        lines.append('}\n\n')
         gender_includes = GENDER_ANIMATION_INCLUDES[normalize_gender(plan.get("gender"))]
         for include in (gender_includes["player"] if pm else gender_includes["npc"]):
             lines.append(f'$includemodel "{include}" \n')
@@ -3494,35 +3357,6 @@ def convert_one_vtf(vtfcmd: Path, image_path: Path, output_dir: Path) -> Path:
             shutil.rmtree(scratch, ignore_errors=True)
 
 
-def l4d2_shared_material_root(author: str, model_name: str, game: str) -> str:
-    """Path (under materials/) of the generic shared textures (normal/phong_exp/lightwarp).
-
-    GMod uses an author-level folder (models/<author>/shared). For L4D2 that collides across EVERY
-    addon by the same author -- two enabled addons shipping the same file path are flagged as a
-    conflict in the L4D2 add-ons menu even when they replace different survivors -- so L4D2
-    namespaces it PER-MODEL (models/<author>/<model>/shared) to keep each VPK self-contained."""
-    if normalize_game(game) == "l4d2":
-        return f"models/{author}/{model_name}/shared"
-    return f"models/{author}/shared"
-
-
-# Material-name tokens that keep alpha-test transparency in SFM. The SFM expert
-# removes transparency from almost every material (it disables the in-editor
-# outline/"Lines" feature, turning the model fully transparent) EXCEPT materials
-# used for eyes, effects, or those with a background texture (black background) --
-# where the alpha is actually load-bearing. We keep $alphatest for materials whose
-# name matches one of these, and drop it for the rest.
-SFM_ALPHATEST_KEEP_HINTS = (
-    "eye", "effect", "fx", "glass", "tear", "cornea", "highlight",
-    "halo", "glow", "star", "transparent", "alpha", "decal", "screen",
-)
-
-
-def sfm_material_keeps_alphatest(material_name: str) -> bool:
-    lname = str(material_name or "").strip().lower()
-    return any(token in lname for token in SFM_ALPHATEST_KEEP_HINTS)
-
-
 def write_vmt(
     path: Path,
     author: str,
@@ -3531,56 +3365,41 @@ def write_vmt(
     has_normal: bool,
     phongexp_texture: str | None = None,
     selfillum_mask: str | None = None,
-    game: str = "gmod",
-    nodecal: bool = False,
+    has_alpha: bool = True,
 ) -> None:
-    target = normalize_game(game)
-    sfm = target == "sfm"
-    shared = l4d2_shared_material_root(author, model_name, game)
-    bump = f"models/{author}/{model_name}/{material_name}_n" if has_normal else f"{shared}/normal"
+    bump = f"models/{author}/{model_name}/{material_name}_n" if has_normal else f"models/{author}/shared/normal"
     # A per-material phong-exponent map (Step 12 PBR scheme) carries gloss in
     # red and metallic in alpha, replacing the shared static exponent. When
     # absent (legacy/auto-port), fall back to the shared texture so the VMT is
     # byte-identical to before.
-    phong = phongexp_texture or f"{shared}/phong_exp"
+    phong = phongexp_texture or f"models/{author}/shared/phong_exp"
     phong_fresnel = "[0.0 1.5 2]" if has_normal else "[0.0 0.5 1]"
-    # SFM keeps alpha-test only for eye/effect/transparent materials; GMod/L4D2
-    # keep it on every material (unchanged, byte-identical).
-    include_alphatest = (not sfm) or sfm_material_keeps_alphatest(material_name)
+    # Only emit $alphatest when the texture actually carries an alpha channel.
+    # For opaque formats (JPEG) the absence of alpha means there is nothing to
+    # cut out — emitting $alphatest on an RGB-only texture causes Source Engine
+    # to treat luminance as alpha and punch holes through dark areas of the mesh.
+    alphatest_lines = (
+        '\t$alphatest "1"\n'
+        "\t$alphatestreference 0.5\n"
+        '\t$allowalphatocoverage "1"\n'
+    ) if has_alpha else ""
     body = (
         "VertexLitGeneric\n"
         "{\n"
         f'\t$basetexture "models/{author}/{model_name}/{material_name}"\n'
         f'\t$bumpmap "{bump}"\n'
         '\t$nocull "1"\n'
-    )
-    # $nodecal stops decals (bullet/blood marks) from sticking to the material. Default off keeps
-    # GMod/SFM output byte-identical; the Step 12 / main-interface toggle turns it on (default on
-    # for L4D2 survivors, where decals on a custom anime mesh look wrong).
-    if nodecal:
-        body += '\t$nodecal "1"\n'
-    if include_alphatest:
-        body += (
-            '\t$alphatest "1"\n'
-            "\t$alphatestreference 0.5\n"
-        )
-    body += (
-        '\t$allowalphatocoverage "1"\n'
-        f'\t$lightwarptexture "{shared}/lightwarptexture"\n'
+        + alphatest_lines +
+        f'\t$lightwarptexture "models/{author}/shared/lightwarptexture"\n'
         '\t$phong "1"\n'
         '\t$phongboost "1"\n'
         '\t$phongalbedotint "1"\n'
         f'\t$phongexponenttexture "{phong}"\n'
         f'\t$phongfresnelranges "{phong_fresnel}"\n'
+        '\t$rimlight "1"\n'
+        '\t$rimlightexponent "2"\n'
+        '\t$rimlightboost "2"\n'
     )
-    # SFM drops rim light ("re-lighting" / raylight): unnecessary for SFM (it is
-    # not a game), per the expert. GMod/L4D2 keep it (unchanged).
-    if not sfm:
-        body += (
-            '\t$rimlight "1"\n'
-            '\t$rimlightexponent "2"\n'
-            '\t$rimlightboost "2"\n'
-        )
     if selfillum_mask:
         body += (
             '\t$selfillum "1"\n'
@@ -3593,10 +3412,6 @@ def write_vmt(
 def compose_materials(plan: dict[str, Any], addon_dir: Path) -> tuple[list[dict[str, Any]], list[str], list[str]]:
     author = str(plan["author"])
     model = str(plan["model_name"])
-    game = normalize_game(plan.get("game"))
-    # $nodecal toggle (set by the GUI); falls back to the game default (on for L4D2) when the plan
-    # predates the key, so old/external plans still get the expected behavior.
-    nodecal = bool(plan.get("nodecal", game == "l4d2"))
     out_dir = addon_dir / "materials" / "models" / author / model
     out_dir.mkdir(parents=True, exist_ok=True)
     warnings: list[str] = []
@@ -3664,15 +3479,24 @@ def compose_materials(plan: dict[str, Any], addon_dir: Path) -> tuple[list[dict[
         except Exception as exc:
             warnings.append(str(exc))
         vmt = out_dir / f"{material_name}.vmt"
-        write_vmt(vmt, author, model, material_name, has_normal, phongexp_texture, selfillum_mask, game=game, nodecal=nodecal)
+        # Detect whether the source image has a real alpha channel.
+        # JPEG files are always RGB (no alpha); PNG/TGA may or may not have one.
+        # We check the row flag first (set by generic_material_rows_from_workspace),
+        # then fall back to inspecting the image with Pillow if available.
+        has_alpha = bool(row.get("has_alpha", True))  # default True preserves PMX behaviour
+        if has_alpha and base_png_raw and Path(base_png_raw).suffix.lower() in {".jpg", ".jpeg"}:
+            has_alpha = False  # JPEGs never have alpha
+        elif has_alpha and base_png_raw and Path(base_png_raw).is_file():
+            try:
+                from PIL import Image as _PilImage
+                with _PilImage.open(base_png_raw) as _img:
+                    has_alpha = "A" in _img.getbands() or _img.mode in {"P", "LA", "RGBA", "PA"}
+            except Exception:
+                pass  # if Pillow fails, keep has_alpha as-is
+        write_vmt(vmt, author, model, material_name, has_normal, phongexp_texture, selfillum_mask, has_alpha=has_alpha)
         files.append(file_row(vmt, "material_vmt"))
     shared_src = ROOT / "reference" / "li_zhiyan_npc" / "a_pack" / "materials" / "models" / "sheepylord" / "shared"
-    # Mirror l4d2_shared_material_root(): per-model for L4D2 (self-contained, no cross-addon
-    # conflict), author-level for GMod (byte-identical).
-    if game == "l4d2":
-        shared_dst = addon_dir / "materials" / "models" / author / model / "shared"
-    else:
-        shared_dst = addon_dir / "materials" / "models" / author / "shared"
+    shared_dst = addon_dir / "materials" / "models" / author / "shared"
     shared_dst.mkdir(parents=True, exist_ok=True)
     for name in ("lightwarptexture.vtf", "normal.vtf", "phong_exp.vtf"):
         src = shared_src / name
@@ -4166,23 +3990,6 @@ def find_gmad_executable(gmod: dict[str, Any]) -> Path:
     raise FileNotFoundError(f"gmad.exe was not found. Searched: {searched or 'PATH'}")
 
 
-def addon_tree_has_long_paths(addon_dir: Path, limit: int = 250) -> bool:
-    """True if any file under addon_dir has a full path at/over `limit` chars.
-
-    vpk.exe and gmad.exe are not long-path aware: past Windows MAX_PATH (260) they
-    silently fail (exit 1, no output, no archive). Such trees must be packaged through
-    a short staging directory. `limit` is below 260 to leave margin for the staged
-    name. Mirrors the non-ASCII staging trigger.
-    """
-    try:
-        for item in addon_dir.rglob("*"):
-            if item.is_file() and len(str(item)) >= limit:
-                return True
-    except OSError:
-        return True
-    return False
-
-
 def package_addon_gma(addon_dir: Path, output_gma: Path, gmod: dict[str, Any], log_path: Path) -> Path:
     gmad = find_gmad_executable(gmod)
     output_gma = output_gma.with_suffix(".gma")
@@ -4194,7 +4001,7 @@ def package_addon_gma(addon_dir: Path, output_gma: Path, gmod: dict[str, Any], l
     staged_output: Path | None = None
     scratch: Path | None = None
     try:
-        if not path_is_ascii(addon_dir) or not path_is_ascii(output_gma) or addon_tree_has_long_paths(addon_dir):
+        if not path_is_ascii(addon_dir) or not path_is_ascii(output_gma):
             scratch = external_safe_dir_for(output_gma, "gmad")
             if scratch.exists():
                 shutil.rmtree(scratch)
@@ -4234,7 +4041,7 @@ def l4d2_compiled_relpaths(slot: str, has_arms: bool) -> list[str]:
     slot = normalize_survivor(slot)
     rels = [f"survivors/survivor_{slot}"]
     if has_arms:
-        rels.append(l4d2_arms_relpath(slot))
+        rels.append(f"weapons/arms/v_arms_{slot}_new")
     return rels
 
 
@@ -4264,36 +4071,6 @@ def copy_compiled_outputs_l4d2(game_dir: Path, addon_dir: Path, slot: str, has_a
         if not found:
             errors.append(f"Compiled L4D2 model files not found for models/{rel} in {game_dir}")
     return files, errors
-
-
-def write_l4d2_addonimage(plan: dict[str, Any], addon_dir: Path) -> Path | None:
-    """Generate the L4D2 add-on thumbnail (addonimage.jpg) from the Step 13 release icon.
-
-    L4D2 shows ``addonimage.jpg`` (a 512x512 JPG, matching the workshop convention) as the add-on's
-    thumbnail in the Add-ons menu; without it the menu falls back to the generic red '4' placeholder.
-    Reuses the Step 13 icon output the user pointed at. Returns None (with the caller warning) if no
-    source icon or PIL is available -- the addon still works, just without a custom thumbnail."""
-    step13 = Path(str(plan.get("inputs", {}).get("step13_dir") or ""))
-    source = next(
-        (step13 / name for name in ("release_icon.png", "SPIC.png", "E.png", "E.jpg") if (step13 / name).exists()),
-        None,
-    )
-    if source is None:
-        return None
-    try:
-        from PIL import Image
-    except Exception:
-        return None
-    target = addon_dir / "addonimage.jpg"
-    try:
-        with Image.open(source) as image:
-            image = image.convert("RGB")
-            if image.size != (512, 512):
-                image = image.resize((512, 512), Image.LANCZOS)
-            image.save(target, "JPEG", quality=90)
-    except Exception:
-        return None
-    return target
 
 
 def write_l4d2_addoninfo(plan: dict[str, Any], addon_dir: Path) -> Path:
@@ -4359,7 +4136,7 @@ def package_addon_vpk(addon_dir: Path, output_vpk: Path, gmod: dict[str, Any], l
     actual_addon_dir = addon_dir
     scratch: Path | None = None
     try:
-        if not path_is_ascii(addon_dir) or not path_is_ascii(output_vpk) or addon_tree_has_long_paths(addon_dir):
+        if not path_is_ascii(addon_dir) or not path_is_ascii(output_vpk):
             scratch = external_safe_dir_for(output_vpk, "vpk")
             if scratch.exists():
                 shutil.rmtree(scratch)
@@ -4376,110 +4153,6 @@ def package_addon_vpk(addon_dir: Path, output_vpk: Path, gmod: dict[str, Any], l
     finally:
         if scratch is not None and scratch.exists():
             shutil.rmtree(scratch, ignore_errors=True)
-
-
-def matrix_to_xyz_radians(m: list[list[float]]) -> tuple[float, float, float]:
-    """Inverse of rotation_matrix_xyz (which builds Rz·Ry·Rx): recover (rx, ry, rz) radians.
-    Used to re-express a bone's accumulated GLOBAL rotation as a root local rotation."""
-    cy = math.sqrt(m[0][0] * m[0][0] + m[1][0] * m[1][0])
-    if cy > 1.0e-8:
-        rx = math.atan2(m[2][1], m[2][2])
-        ry = math.atan2(-m[2][0], cy)
-        rz = math.atan2(m[1][0], m[0][0])
-    else:  # gimbal lock (cos(ry) ~ 0)
-        rx = math.atan2(-m[1][2], m[1][1])
-        ry = math.atan2(-m[2][0], cy)
-        rz = 0.0
-    return (rx, ry, rz)
-
-
-def compose_global_rotation(name: str, poses: dict[str, SmdBonePose]) -> list[list[float]]:
-    """Accumulate root->name local rotations into name's global rotation matrix."""
-    chain: list[str] = []
-    current = name
-    guard: set[str] = set()
-    while current and current in poses and current not in guard:
-        guard.add(current)
-        chain.append(current)
-        current = poses[current].parent
-    chain.reverse()  # root first
-    rot = [[1.0, 0.0, 0.0], [0.0, 1.0, 0.0], [0.0, 0.0, 1.0]]
-    for bone_name in chain:
-        rot = matmul(rot, rotation_matrix_xyz(*poses[bone_name].local_rot))
-    return rot
-
-
-# The GMod c_arms root: the arms hang off Spine4 (matching the bones a weapon viewmodel
-# carries and what models/weapons/c_arms_animations.mdl is authored against).
-CARMS_ROOT_BONE = "ValveBiped.Bip01_Spine4"
-
-
-def carms_minimal_definebones(carms_work: Path) -> list[str]:
-    """GMod c_arms $definebone block: a MINIMAL arms-only skeleton -- Spine4 root plus only the
-    bones the cut mesh is weighted to, closed over parents up to Spine4 -- with the character's
-    FINAL proportions BAKED into the bone rest positions. This mirrors a hand-made GMod c_arms
-    (issue #121): no full-body skeleton and no runtime proportion-trick delta, so nothing
-    re-drives the bones on top of the weapon-viewmodel bonemerge (which displaced the arms on
-    non-Valve-standard custom weapons).
-
-    Positions come from the proportioned SMD node blocks already present in carms_work: the
-    Step-10 cut meshes and the copied anims/proportions.smd both carry the FULL proportioned
-    skeleton (Blender Source Tools writes every node), even though the pruned mesh itself only
-    weights to forearm-and-below. No mesh re-cut and no new definebone capture are required."""
-    poses = collect_smd_bone_poses(carms_work)
-    if not poses:
-        return []
-    # Bones the pruned arm mesh is actually skinned to (forearm/hand/fingers + any arm-deform
-    # helper the mesh uses). UpperArm/Clavicle/Spine4 are pulled in by the parent closure below.
-    used: set[str] = set()
-    for smd_path in sorted(carms_work.glob("*.smd"), key=lambda item: natural_key(item.name)):
-        try:
-            smd = parse_smd(smd_path, include_triangles=True)
-        except Exception as exc:
-            emit(f"c_arms minimal skeleton: skipped unreadable SMD {smd_path.name}: {exc}")
-            continue
-        id_to_name = {bone_id: node.name for bone_id, node in smd.nodes.items()}
-        for triangle in smd.triangles:
-            for vertex in triangle["vertices"]:
-                for bone_id, weight in vertex["weights"]:
-                    if weight > 0.0 and bone_id in id_to_name:
-                        used.add(id_to_name[bone_id])
-    # Close over parents up to (and including) the Spine4 root.
-    keep: set[str] = set()
-    for name in used:
-        current = name
-        guard: set[str] = set()
-        while current and current in poses and current not in guard:
-            guard.add(current)
-            keep.add(current)
-            if current == CARMS_ROOT_BONE:
-                break
-            current = poses[current].parent
-    if CARMS_ROOT_BONE in poses:
-        keep.add(CARMS_ROOT_BONE)
-    subset = {name: poses[name] for name in keep if name in poses}
-    if not subset:
-        return []
-    # Re-root Spine4: zero its position and bake its GLOBAL rotation, so the arm chain keeps the
-    # correct orientation once the spine above it is dropped (as the hand-made c_arms does).
-    if CARMS_ROOT_BONE in subset:
-        root_global = compose_global_rotation(CARMS_ROOT_BONE, poses)
-        subset[CARMS_ROOT_BONE] = SmdBonePose(
-            name=CARMS_ROOT_BONE,
-            parent="",
-            local_pos=(0.0, 0.0, 0.0),
-            local_rot=matrix_to_xyz_radians(root_global),
-            source_smd=subset[CARMS_ROOT_BONE].source_smd,
-        )
-    # Any other kept bone whose parent fell outside the minimal set becomes a root too (rare:
-    # an arm-deform helper whose ancestor chain does not pass through Spine4).
-    for name, pose in list(subset.items()):
-        if name != CARMS_ROOT_BONE and pose.parent and pose.parent not in subset:
-            subset[name] = SmdBonePose(
-                name=name, parent="", local_pos=pose.local_pos, local_rot=pose.local_rot, source_smd=pose.source_smd
-            )
-    ordered = order_smd_definebone_names(subset)
-    return [make_definebone_from_smd_pose(subset[name]) for name in ordered]
 
 
 def build_carms_qc(plan: dict[str, Any], source_dir: Path, definebones: list[str]) -> Path | None:
@@ -4505,63 +4178,24 @@ def build_carms_qc(plan: dict[str, Any], source_dir: Path, definebones: list[str
     lines.append(f'$cdmaterials "models/{plan["author"]}/{plan["model_name"]}/" \n\n')
     lines.append('$cbox 0 0 0 0 0 0 \n\n')
     lines.append('$bbox -13 -13 0 13 13 72 \n\n')
-    game = normalize_game(plan.get("game"))
-    # "Use experimental arms" (GMod only, default OFF): when ON, Step 10 conformed the arm mesh onto
-    # the standard c_arms skeleton, so we emit the minimal/conform c_arms below. When OFF (default,
-    # and always for L4D2), the c_arms keeps the full-body skeleton + proportion trick (the original
-    # method). Auto-porting never sets this key, so it gets the proportion-driven arms.
-    experimental_arms = bool(plan.get("gmod_experimental_arms", False))
-    if game == "l4d2" or (game == "gmod" and not experimental_arms):
-        # Proportion-driven first-person arms: the full-body skeleton + proportion trick + ragdoll +
-        # foot IK + a static idle. This is L4D2's v_arms (kept byte-identical so its sensitive
-        # sequence layout is not disturbed) AND the default/original GMod c_arms. The arms bonemerge
-        # onto the weapon viewmodel at runtime.
-        lines.extend(definebones)
-        lines.append('$ikchain "rhand" "ValveBiped.Bip01_R_Hand" knee 0.707 0.707 0 \n')
-        lines.append('$ikchain "lhand" "ValveBiped.Bip01_L_Hand" knee 0.707 0.707 0 \n')
-        lines.append('$ikchain "rfoot" "ValveBiped.Bip01_R_Foot" knee 0.707 -0.707 0 \n')
-        lines.append('$ikchain "lfoot" "ValveBiped.Bip01_L_Foot" knee 0.707 -0.707 0 \n\n')
-        lines.append('$ikautoplaylock "rfoot" 0.7 0.1 \n')
-        lines.append('$ikautoplaylock "lfoot" 0.7 0.1 \n\n')
-        # GMod: subtract against the STOCK c_arms arm proportions (issue #121 -- the c_arms bonemerge
-        # uses the stock/male arm lengths, so the female player reference displaces the arms). L4D2
-        # keeps its survivor-specific gendered reference unchanged.
-        carms_reference = None
-        if game == "gmod":
-            carms_reference = build_carms_proportion_reference(carms_work)
-        if not carms_reference:
-            carms_reference = gendered_reference_name(plan, carms_work / "anims")
-        lines.append(f'$sequence reference "anims/{carms_reference}" fps 1 \n')
-        lines.append('$origin 0 0 -2.40 \n\n')
-        lines.append('$animation a_proportions "anims/proportions" subtract reference 0 \n\n')
-        lines.append('$sequence proportions a_proportions predelta autoplay \n\n')
-        lines.append('$Sequence "ragdoll" {\n\t"anims/proportions"\n\tactivity "ACT_DIERAGDOLL" 1\n\tfadein 0.2\n\tfadeout 0.2\n\tfps 60\n}\n\n')
+    lines.extend(definebones)
+    lines.append('$ikchain "rhand" "ValveBiped.Bip01_R_Hand" knee 0.707 0.707 0 \n')
+    lines.append('$ikchain "lhand" "ValveBiped.Bip01_L_Hand" knee 0.707 0.707 0 \n')
+    lines.append('$ikchain "rfoot" "ValveBiped.Bip01_R_Foot" knee 0.707 -0.707 0 \n')
+    lines.append('$ikchain "lfoot" "ValveBiped.Bip01_L_Foot" knee 0.707 -0.707 0 \n\n')
+    lines.append('$ikautoplaylock "rfoot" 0.7 0.1 \n')
+    lines.append('$ikautoplaylock "lfoot" 0.7 0.1 \n\n')
+    carms_reference = gendered_reference_name(plan, carms_work / "anims")
+    lines.append(f'$sequence reference "anims/{carms_reference}" fps 1 \n')
+    lines.append('$origin 0 0 -2.40 \n\n')
+    lines.append('$animation a_proportions "anims/proportions" subtract reference 0 \n\n')
+    lines.append('$sequence proportions a_proportions predelta autoplay \n\n')
+    lines.append('$Sequence "ragdoll" {\n\t"anims/proportions"\n\tactivity "ACT_DIERAGDOLL" 1\n\tfadein 0.2\n\tfadeout 0.2\n\tfps 60\n}\n\n')
+    if normalize_game(plan.get("game")) == "l4d2":
+        # L4D2 first-person arms (v_arms_<slot>_new): a static idle from the
+        # proportion pose; the arms bonemerge onto the weapon viewmodel at runtime.
         lines.append('$sequence "idle" {\n\t"anims/proportions"\n\tfadein 0.2\n\tfadeout 0.2\n\tfps 30\n}\n')
     else:
-        # GMod EXPERIMENTAL c_arms (issue #121, "use experimental arms" ON): the arm MESH is
-        # rest-pose-conformed onto the STANDARD c_arms skeleton in Step 10
-        # (blender_sort_carms.py conform_meshes_to_standard), so the cut
-        # SMDs now carry standard ValveBiped arm proportions. carms_minimal_definebones therefore
-        # reads STANDARD bone positions straight from the conformed SMD -- no proportion trick and no
-        # MMD-proportion bake -- which is what bonemerges cleanly onto weapon viewmodels. Like the
-        # stock weapons/c_arms.mdl, no local $sequence is emitted; the included animation model
-        # supplies the first-person hand/finger poses (a local idle from the MMD-proportion
-        # anims/proportions would fight the now-standard skeleton).
-        minimal_definebones = carms_minimal_definebones(carms_work)
-        if not minimal_definebones or not any('_Hand"' in line for line in minimal_definebones):
-            # Safety net: if the cut SMDs could not be read / under-collected, fall back to the
-            # captured definebones so the c_arms still compiles.
-            emit("c_arms minimal skeleton under-collected; falling back to captured definebones.")
-            minimal_definebones = definebones
-        lines.extend(minimal_definebones)
-        # Forearm-twist Ulna procedural bones (matches the good human port) so the lower forearm
-        # twists with the hand. Emit ONLY when the Ulna bones are actually defined (Step 10 weighted
-        # them), so the VRD never references an undeclared bone.
-        if any('_Ulna"' in line for line in minimal_definebones):
-            vrd_src = Path(__file__).resolve().parent / "assets" / "std_c_arms_skeleton" / "c_arms_ulna.vrd"
-            if vrd_src.exists():
-                shutil.copyfile(vrd_src, carms_work / "c_arms_ulna.vrd")
-                lines.append('$proceduralbones "c_arms_ulna.vrd" \n')
         lines.append('$includemodel "weapons/c_arms_animations.mdl" \n')
     qc = carms_work / "pm_carms.qc"
     write_lines(qc, lines)
@@ -4610,8 +4244,6 @@ def compose(plan_path: Path) -> dict[str, Any]:
     category = str(plan["character_category"])
     model = str(plan["model_name"])
     l4d2 = normalize_game(plan.get("game")) == "l4d2"
-    sfm = normalize_game(plan.get("game")) == "sfm"
-    single_model = l4d2 or sfm  # no GMod-style "_pm" playermodel variant
     survivor_slot = normalize_survivor(plan.get("survivor"))
 
     initial_qc = source_dir / "compile_initial.qc"
@@ -4802,8 +4434,8 @@ def compose(plan_path: Path) -> dict[str, Any]:
             raise RuntimeError(f"StudioMDL missing parent definebone retry did not clear warnings for {qc_path.name}. See {retry_log}")
         return retry_output, True
 
-    # L4D2 + SFM compile a single model (no GMod-style "_pm" playermodel).
-    stems = [model] if single_model else [model, f"{model}_pm"]
+    # L4D2 compiles a single survivor model (no GMod-style "_pm" playermodel).
+    stems = [model] if l4d2 else [model, f"{model}_pm"]
     if carms_qc:
         stems.append(f"{model}_arms")
 
@@ -4819,7 +4451,7 @@ def compose(plan_path: Path) -> dict[str, Any]:
             compile_log_path("compile_main", log_suffix),
         )
         pm_repaired = False
-        if not single_model:
+        if not l4d2:
             emit("Compiling player model.")
             _pm_output, pm_repaired = compile_with_definebone_repair(
                 f"player{('_' + log_suffix) if log_suffix else ''}",
@@ -4847,15 +4479,14 @@ def compose(plan_path: Path) -> dict[str, Any]:
                     main_qc,
                     compile_log_path("compile_main_after_carms_definebone_repair", log_suffix),
                 )
-                if not single_model:
+                if not l4d2:
                     _pm_output, _ = compile_with_definebone_repair(
                         f"player_after_carms_repair{('_' + log_suffix) if log_suffix else ''}",
                         pm_qc,
                         compile_log_path("compile_pm_after_carms_definebone_repair", log_suffix),
                     )
 
-    if not carms_qc and not sfm:
-        # SFM does not use c_arms (Step 10 is skipped), so its absence is expected -- no warning.
+    if not carms_qc:
         warnings.append("Step 10 c_arms output was not found; c_arms QC and Lua hands registration were skipped.")
     fallback_compile_used = False
     oversized_smd_split_applied = False
@@ -4983,15 +4614,7 @@ def compose(plan_path: Path) -> dict[str, Any]:
         # MCI metadata / addon.json are skipped.
         addoninfo_path = write_l4d2_addoninfo(plan, addon_dir)
         generated_files.append(file_row(addoninfo_path, "addoninfo"))
-        addonimage_path = write_l4d2_addonimage(plan, addon_dir)
-        if addonimage_path is not None:
-            generated_files.append(file_row(addonimage_path, "addonimage"))
-        else:
-            warnings.append("Step 13 release icon not found; addon ships without addonimage.jpg (L4D2 shows the default thumbnail).")
-    elif sfm:
-        # SFM ships loose models + materials only: no GMod lua/spawn-icons/MCI
-        # metadata/addon.json and no L4D2 addoninfo.
-        emit("SFM: composing loose model + materials only (no GMod lua/spawn-icons/metadata).")
+        warnings.append("L4D2 survivor select-panel images (vgui/s_panel_<slot>*) are not generated yet.")
     else:
         icon_files, icon_warnings = compose_icons(plan, addon_dir)
         generated_files.extend(icon_files)
@@ -5013,10 +4636,6 @@ def compose(plan_path: Path) -> dict[str, Any]:
         for rel in l4d2_compiled_relpaths(survivor_slot, carms_qc is not None):
             if not (addon_dir / "models" / f"{rel}.mdl").exists():
                 errors.append(f"L4D2 compiled .mdl missing from addon folder: models/{rel}.mdl")
-    elif sfm:
-        model_dir = addon_dir / "models" / author / category
-        if not (model_dir / f"{model}.mdl").exists():
-            errors.append("Main .mdl output is missing from the final SFM model folder.")
     else:
         required_lua = addon_dir / "lua" / "autorun" / f"{model}_{author}.lua"
         if not required_lua.exists():
@@ -5028,30 +4647,20 @@ def compose(plan_path: Path) -> dict[str, Any]:
     if not any(mat_dir.glob("*.vmt")):
         warnings.append("No material VMT files were written.")
 
-    # L4D2 ships as a single .vpk; the unpacked addon folder is not needed in-game. SFM always
-    # also gets a .vpk (alongside the loose distribution folder, per the user's choice). Package
-    # the VPK once here and deliver it below. GMod keeps copying the unpacked addon folder + a .gma.
-    packaged_vpk_path: Path | None = None
+    # L4D2 ships as a single .vpk; the unpacked addon folder is not needed in-game. Package the
+    # VPK once here and deliver ONLY that file to the distribution folder and the game addons
+    # (below). GMod keeps copying the unpacked addon folder + a .gma.
+    l4d2_vpk_path: Path | None = None
     if l4d2:
         try:
             emit("Packaging final addon VPK.")
-            packaged_vpk_path = package_addon_vpk(
+            l4d2_vpk_path = package_addon_vpk(
                 addon_dir, qc_dir / f"survivor_{survivor_slot}_{model}.vpk", gmod, qc_dir / "vpk_create.log"
             )
-            generated_files.append(file_row(packaged_vpk_path, "vpk_package"))
-            emit(f"Wrote VPK package: {packaged_vpk_path}")
+            generated_files.append(file_row(l4d2_vpk_path, "vpk_package"))
+            emit(f"Wrote VPK package: {l4d2_vpk_path}")
         except Exception as exc:
             errors.append(f"Failed to package addon VPK: {exc}")
-    elif sfm:
-        try:
-            emit("Packaging SFM addon VPK.")
-            packaged_vpk_path = package_addon_vpk(
-                addon_dir, qc_dir / f"{model}_{author}.vpk", gmod, qc_dir / "vpk_create.log"
-            )
-            generated_files.append(file_row(packaged_vpk_path, "vpk_package"))
-            emit(f"Wrote VPK package: {packaged_vpk_path}")
-        except Exception as exc:
-            errors.append(f"Failed to package SFM addon VPK: {exc}")
 
     distribution_output_dir = Path(str(plan.get("distribution_output_dir") or "")).expanduser()
     distribution_addon_dir = Path("")
@@ -5070,7 +4679,6 @@ def compose(plan_path: Path) -> dict[str, Any]:
             distribution_output_dir.mkdir(parents=True, exist_ok=True)
             if not l4d2:
                 # L4D2 delivers only the .vpk (below); the unpacked addon folder is not needed.
-                # GMod and SFM both copy the unpacked folder (SFM: loose model + materials).
                 distribution_addon_dir = distribution_output_dir / addon_dir.name
                 if same_resolved_path(distribution_addon_dir, addon_dir):
                     generated_files.append(folder_row(distribution_addon_dir, "distribution_addon_folder", ["Already composed in this folder."]))
@@ -5084,13 +4692,12 @@ def compose(plan_path: Path) -> dict[str, Any]:
                 else:
                     copytree_clean(compile_source_copy_dir, distribution_compile_source_dir)
                     generated_files.append(folder_row(distribution_compile_source_dir, "distribution_qc_compile_source"))
-            if l4d2 or sfm:
-                # Deliver the packaged .vpk. L4D2 ships only the vpk; SFM also keeps the
-                # loose folder copied above.
-                if packaged_vpk_path and packaged_vpk_path.exists():
-                    distribution_gma = distribution_output_dir / packaged_vpk_path.name
-                    if not same_resolved_path(distribution_gma, packaged_vpk_path):
-                        shutil.copyfile(packaged_vpk_path, distribution_gma)
+            if l4d2:
+                # Deliver only the .vpk packaged above; the unpacked folder is omitted.
+                if l4d2_vpk_path and l4d2_vpk_path.exists():
+                    distribution_gma = distribution_output_dir / l4d2_vpk_path.name
+                    if not same_resolved_path(distribution_gma, l4d2_vpk_path):
+                        shutil.copyfile(l4d2_vpk_path, distribution_gma)
                     generated_files.append(file_row(distribution_gma, "vpk_package"))
                     emit(f"Copied VPK package to distribution folder: {distribution_gma}")
             else:
@@ -5102,58 +4709,36 @@ def compose(plan_path: Path) -> dict[str, Any]:
         except Exception as exc:
             errors.append(f"Failed to copy/package addon to selected output folder: {exc}")
 
-    # SFM uses its own "put into usermod" toggle (default on); GMod/L4D2 use copy_to_gmod_addons.
-    install_to_game = bool(plan.get("copy_to_sfm_usermod", True)) if sfm else bool(plan.get("copy_to_gmod_addons", False))
-    if install_to_game:
+    if bool(plan.get("copy_to_gmod_addons", False)):
         try:
-            target_game_dir = Path(str(gmod.get("game_dir") or ""))
-            if not target_game_dir.exists():
-                raise RuntimeError(f"Game directory was not found: {target_game_dir}")
-            if sfm:
-                # SFM uses loose files in the usermod content dir (game_dir = usermod):
-                # overlay models/ + materials/ without disturbing other SFM content.
-                emit("Installing loose model + materials into SFM usermod.")
-                installed_any = False
-                for sub in ("models", "materials"):
-                    src = addon_dir / sub
-                    if src.exists():
-                        dst = target_game_dir / sub
-                        shutil.copytree(src, dst, dirs_exist_ok=True)
-                        generated_files.append(folder_row(dst, "sfm_usermod_folder"))
-                        installed_any = True
-                gmod_addons_dir = target_game_dir
-                gmod_addon_dir = target_game_dir  # report/open points at the usermod folder
-                if installed_any:
-                    emit(f"Installed loose SFM content into: {target_game_dir}")
+            gmod_game_dir = Path(str(gmod.get("game_dir") or ""))
+            if not gmod_game_dir.exists():
+                raise RuntimeError(f"Game directory was not found: {gmod_game_dir}")
+            gmod_addons_dir = gmod_game_dir / "addons"
+            gmod_addons_dir.mkdir(parents=True, exist_ok=True)
+            if l4d2:
+                # L4D2 installs the single .vpk into addons/; the unpacked folder is not needed.
+                emit("Installing addon VPK to detected L4D2 addons folder.")
+                if l4d2_vpk_path and l4d2_vpk_path.exists():
+                    installed_vpk = gmod_addons_dir / l4d2_vpk_path.name
+                    if not same_resolved_path(installed_vpk, l4d2_vpk_path):
+                        shutil.copyfile(l4d2_vpk_path, installed_vpk)
+                    generated_files.append(file_row(installed_vpk, "gmod_addons_vpk"))
+                    gmod_addon_dir = gmod_addons_dir  # report/open points at the addons folder
+                    emit(f"Installed addon VPK: {installed_vpk}")
                 else:
-                    errors.append("SFM composed folder had no models/ or materials/ to install into usermod.")
+                    errors.append("L4D2 addon VPK was not packaged, so nothing was installed to the addons folder.")
             else:
-                gmod_addons_dir = target_game_dir / "addons"
-                gmod_addons_dir.mkdir(parents=True, exist_ok=True)
-                if l4d2:
-                    # L4D2 installs the single .vpk into addons/; the unpacked folder is not needed.
-                    emit("Installing addon VPK to detected L4D2 addons folder.")
-                    if packaged_vpk_path and packaged_vpk_path.exists():
-                        installed_vpk = gmod_addons_dir / packaged_vpk_path.name
-                        if not same_resolved_path(installed_vpk, packaged_vpk_path):
-                            shutil.copyfile(packaged_vpk_path, installed_vpk)
-                        generated_files.append(file_row(installed_vpk, "gmod_addons_vpk"))
-                        gmod_addon_dir = gmod_addons_dir  # report/open points at the addons folder
-                        emit(f"Installed addon VPK: {installed_vpk}")
-                    else:
-                        errors.append("L4D2 addon VPK was not packaged, so nothing was installed to the addons folder.")
+                emit("Installing composed addon folder to detected GMod addons folder.")
+                gmod_addon_dir = gmod_addons_dir / addon_dir.name
+                if same_resolved_path(gmod_addon_dir, addon_dir):
+                    generated_files.append(folder_row(gmod_addon_dir, "gmod_addons_folder", ["Already composed in this folder."]))
                 else:
-                    emit("Installing composed addon folder to detected GMod addons folder.")
-                    gmod_addon_dir = gmod_addons_dir / addon_dir.name
-                    if same_resolved_path(gmod_addon_dir, addon_dir):
-                        generated_files.append(folder_row(gmod_addon_dir, "gmod_addons_folder", ["Already composed in this folder."]))
-                    else:
-                        copytree_clean(addon_dir, gmod_addon_dir)
-                        generated_files.append(folder_row(gmod_addon_dir, "gmod_addons_folder"))
-                    emit(f"Installed composed addon folder: {gmod_addon_dir}")
+                    copytree_clean(addon_dir, gmod_addon_dir)
+                    generated_files.append(folder_row(gmod_addon_dir, "gmod_addons_folder"))
+                emit(f"Installed composed addon folder: {gmod_addon_dir}")
         except Exception as exc:
-            label = "SFM usermod" if sfm else ("L4D2" if l4d2 else "GMod")
-            errors.append(f"Failed to copy addon to {label}: {exc}")
+            errors.append(f"Failed to copy addon to {'L4D2' if l4d2 else 'GMod'} addons: {exc}")
 
     files_json = qc_dir / "qc_files.json"
     report_json = qc_dir / "qc_report.json"
@@ -5188,7 +4773,6 @@ def compose(plan_path: Path) -> dict[str, Any]:
         "compile_source_copy_dir": str(compile_source_copy_dir),
         "distribution_compile_source_dir": str(distribution_compile_source_dir) if str(distribution_compile_source_dir) != "." else "",
         "copy_to_gmod_addons": bool(plan.get("copy_to_gmod_addons", False)),
-        "copy_to_sfm_usermod": bool(plan.get("copy_to_sfm_usermod", True)),
         "include_mci_metadata_json": include_mci_metadata_json,
         "studiomdl_logs": studiomdl_logs,
         "flex_compile_enabled": flex_compile_enabled,
