@@ -1684,10 +1684,13 @@ def generic_material_rows_from_workspace(workspace_root: Path, smd_files: list[s
     # Build a stem->path lookup for fast matching.
     image_by_stem: dict[str, Path] = {img.stem.lower(): img for img in unique_images}
 
-    # Common diffuse/albedo suffix tokens — prefer these when multiple
+# Common diffuse/albedo suffix tokens — prefer these when multiple
     # images share a common prefix with the material name.
     _DIFFUSE_HINTS = ("_dif", "_diff", "_diffuse", "_col", "_color", "_colour",
                       "_albedo", "_base", "_d", "_tex", "_texture", "_main")
+    
+    # ADD THIS: Penalize obvious non-diffuse maps so they don't accidentally win prefix ties
+    _NON_DIFFUSE_HINTS = ("_n", "_normal", "_nrm", "_rough", "_metal", "_ao", "_orm", "_spec", "_exp", "_mask", "mask")
 
     def find_texture_for(name: str) -> Path | None:
         """Try to find a texture file matching a material/SMD name.
@@ -1707,8 +1710,9 @@ def generic_material_rows_from_workspace(workspace_root: Path, smd_files: list[s
         # 2. Longest common prefix among all images. Among ties, prefer
         #    images whose stem contains a diffuse hint.
         best_path: Path | None = None
+        best_score = -100
         best_len = 0
-        best_is_diffuse = False
+
         for stem, img in image_by_stem.items():
             # Compute shared prefix length.
             common = 0
@@ -1719,12 +1723,21 @@ def generic_material_rows_from_workspace(workspace_root: Path, smd_files: list[s
                     break
             if common == 0:
                 continue
+            
             is_diffuse = any(hint in stem for hint in _DIFFUSE_HINTS)
-            if (common > best_len
-                    or (common == best_len and is_diffuse and not best_is_diffuse)):
-                best_len = common
+            is_non_diffuse = any(hint in stem for hint in _NON_DIFFUSE_HINTS)
+            
+            # Use a scoring system to overwhelm coincidental letter matches
+            score = common
+            if is_diffuse:
+                score += 15
+            if is_non_diffuse:
+                score -= 15
+
+            if score > best_score:
+                best_score = score
                 best_path = img
-                best_is_diffuse = is_diffuse
+                best_len = common
 
         # Accept the prefix match only if it's at least half the material name.
         if best_path is not None and best_len >= max(3, len(name_lower) // 2):
