@@ -187,28 +187,6 @@ def rescale_to_source_units(armature_obj, mesh_objects: list) -> None:
     for mesh in mesh_objects:
         mesh.select_set(True)
 
-    # Complex rigs (Rigify-style and similar) often have multiple objects
-    # sharing one mesh datablock (linked duplicates -- e.g. mirrored eyelids,
-    # symmetric visor halves). transform_apply() refuses to bake scale into a
-    # mesh with more than one user, since that would distort every object
-    # sharing it differently. Make a single-user copy of each linked mesh
-    # first so the bake can proceed safely; this only affects the working
-    # copy in this throwaway scene, never the original source file.
-    multi_user_meshes = [mesh for mesh in mesh_objects if mesh.data and mesh.data.users > 1]
-    if multi_user_meshes:
-        print(f"Making {len(multi_user_meshes)} multi-user mesh(es) single-user before scaling.")
-        bpy.ops.object.select_all(action="DESELECT")
-        for mesh in multi_user_meshes:
-            mesh.select_set(True)
-        bpy.context.view_layer.objects.active = multi_user_meshes[0]
-        bpy.ops.object.make_single_user(object=True, obdata=True)
-        # Restore the full selection (armature + all meshes) for the resize/apply below.
-        bpy.ops.object.select_all(action="DESELECT")
-        armature_obj.select_set(True)
-        bpy.context.view_layer.objects.active = armature_obj
-        for mesh in mesh_objects:
-            mesh.select_set(True)
-
     bpy.ops.transform.resize(value=(scale_factor, scale_factor, scale_factor))
     bpy.ops.object.transform_apply(location=False, rotation=False, scale=True)
     print("Scale applied.")
@@ -221,25 +199,15 @@ def import_generic_model(
     source_dir: str | None = None,
 ) -> None:
     """Main import routine."""
+    bpy.ops.wm.read_factory_settings(use_empty=True)
+
     ext = Path(input_path).suffix.lower()
     print(f"Importing {input_path} as {ext} ...")
-
-    # For .blend files, open_mainfile() below fully replaces the scene, so the
-    # empty-scene reset is unnecessary (and would be instantly discarded).
-    if ext != ".blend":
-        bpy.ops.wm.read_factory_settings(use_empty=True)
 
     if ext == ".fbx":
         bpy.ops.import_scene.fbx(filepath=input_path, use_manual_orientation=False)
     elif ext in {".glb", ".gltf"}:
         bpy.ops.import_scene.gltf(filepath=input_path)
-    elif ext == ".blend":
-        # .blend files are opened directly rather than imported. We open the
-        # source file itself (not append/link) so the working scene becomes
-        # an editable copy; the output is later saved to a different path
-        # (workspace.blend_path), so the original source .blend on disk is
-        # never overwritten.
-        bpy.ops.wm.open_mainfile(filepath=input_path)
     else:
         raise ValueError(f"Unsupported extension: {ext}")
 

@@ -1684,53 +1684,18 @@ def generic_material_rows_from_workspace(workspace_root: Path, smd_files: list[s
     # Build a stem->path lookup for fast matching.
     image_by_stem: dict[str, Path] = {img.stem.lower(): img for img in unique_images}
 
-    # PBR/texture-channel suffix tokens, ordered by priority. A texture is
-    # classified by the FIRST hint group whose token appears in its stem.
-    # Non-diffuse channels (masks, normals, specular/gloss, AO, roughness,
-    # metallic) must never be picked as a $basetexture, even if they happen
-    # to share more raw characters with the material name than the actual
-    # diffuse map does — e.g. "..._mat" shares "ma" with "..._mask01" but
-    # that is a coincidence of spelling, not a semantic match.
+    # Common diffuse/albedo suffix tokens — prefer these when multiple
+    # images share a common prefix with the material name.
     _DIFFUSE_HINTS = ("_dif", "_diff", "_diffuse", "_col", "_color", "_colour",
-                       "_albedo", "_base", "_d", "_tex", "_texture", "_main",
-                       "_mat", "_material")
-    _NON_DIFFUSE_HINTS = (
-        "_norm", "_normal", "_nrm", "_n",
-        "_mask", "_msk", "_alpha", "_opacity",
-        "_gloss", "_glossiness", "_spec", "_specular", "_rough", "_roughness",
-        "_metal", "_metallic", "_ao", "_occlusion", "_orm", "_rma",
-        "_emissive", "_emission", "_height", "_disp", "_displacement",
-        "_bump",
-    )
-
-    def classify_channel(stem_lower: str) -> str:
-        """Return 'diffuse', 'non_diffuse', or 'unknown' for an image stem."""
-        # Strip trailing digits so numbered variants (mask01, mask02, spec2)
-        # still match their base channel token.
-        trimmed = re.sub(r"\d+$", "", stem_lower)
-        # Longest-hint-first so e.g. "_normal" matches before a coincidental
-        # short overlap; check non-diffuse first since those are the ones we
-        # must never misclassify as diffuse.
-        for hint in sorted(_NON_DIFFUSE_HINTS, key=len, reverse=True):
-            if trimmed.endswith(hint):
-                return "non_diffuse"
-        for hint in sorted(_DIFFUSE_HINTS, key=len, reverse=True):
-            if trimmed.endswith(hint):
-                return "diffuse"
-        return "unknown"
+                      "_albedo", "_base", "_d", "_tex", "_texture", "_main")
 
     def find_texture_for(name: str) -> Path | None:
         """Try to find a texture file matching a material/SMD name.
 
         Strategy (in order):
         1. Exact stem match.
-        2. Among images sharing the material's base prefix (everything
-           before the last underscore-separated channel token), pick the
-           one classified as 'diffuse'. Never pick a 'non_diffuse' image.
-        3. Longest common prefix among diffuse-or-unknown images only
-           (mask/normal/gloss/etc. images are excluded from this race).
-        4. Image stem contained in material name or vice versa, again
-           excluding non_diffuse images.
+        2. Longest common prefix match, preferring diffuse-hinted names.
+        3. Image stem contained in material name or vice versa.
         """
         name_lower = name.lower()
 
@@ -1739,27 +1704,13 @@ def generic_material_rows_from_workspace(workspace_root: Path, smd_files: list[s
         if candidate:
             return candidate
 
-        # Partition candidate images: never select a non_diffuse one.
-        diffuse_images = {s: i for s, i in image_by_stem.items() if classify_channel(s) == "diffuse"}
-        unknown_images = {s: i for s, i in image_by_stem.items() if classify_channel(s) == "unknown"}
-        safe_images = {**unknown_images, **diffuse_images}  # diffuse preferred via ordering below
-
-        # 2. If there is exactly one diffuse-classified image anywhere in the
-        #    source folder, and the material name itself isn't clearly a
-        #    different specific channel (e.g. a material literally named
-        #    "...norm"), prefer it outright — this covers the common case of
-        #    a single diffuse map plus several auxiliary maps, with a
-        #    generic/ambiguous material name like "*_mat".
-        material_channel = classify_channel(name_lower)
-        if material_channel != "non_diffuse" and len(diffuse_images) == 1:
-            return next(iter(diffuse_images.values()))
-
-        # 3. Longest common prefix among safe (non-mask/normal/etc.) images,
-        #    preferring diffuse-classified ones on ties.
+        # 2. Longest common prefix among all images. Among ties, prefer
+        #    images whose stem contains a diffuse hint.
         best_path: Path | None = None
         best_len = 0
         best_is_diffuse = False
-        for stem, img in safe_images.items():
+        for stem, img in image_by_stem.items():
+            # Compute shared prefix length.
             common = 0
             for a, b in zip(name_lower, stem):
                 if a == b:
@@ -1768,18 +1719,19 @@ def generic_material_rows_from_workspace(workspace_root: Path, smd_files: list[s
                     break
             if common == 0:
                 continue
-            is_diffuse = stem in diffuse_images
+            is_diffuse = any(hint in stem for hint in _DIFFUSE_HINTS)
             if (common > best_len
                     or (common == best_len and is_diffuse and not best_is_diffuse)):
                 best_len = common
                 best_path = img
                 best_is_diffuse = is_diffuse
 
+        # Accept the prefix match only if it's at least half the material name.
         if best_path is not None and best_len >= max(3, len(name_lower) // 2):
             return best_path
 
-        # 4. Substring match, still excluding non_diffuse images.
-        for stem, img in safe_images.items():
+        # 3. Substring match.
+        for stem, img in image_by_stem.items():
             if stem in name_lower or name_lower in stem:
                 return img
 

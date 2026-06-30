@@ -48,19 +48,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--clear-custom-normals", dest="clear_custom_normals", action="store_true", default=False)
     parser.add_argument("--keep-custom-normals", dest="clear_custom_normals", action="store_false")
     parser.add_argument("--vrm-spine-merge", dest="vrm_spine_merge", action="store_true", default=False)
-    parser.add_argument(
-        "--skip-cats-fix",
-        dest="skip_cats_fix",
-        action="store_true",
-        default=False,
-        help=(
-            "Skip CATS' fix_armature_warning/translate/convert_to_valve passes. "
-            "Used for generic FBX/GLB/blend imports whose bones were already "
-            "renamed to ValveBiped names by the heuristic mapper in Step 1, and "
-            "for armature structures (e.g. Rigify control/mechanism/deform "
-            "layers) that CATS explicitly refuses to process."
-        ),
-    )
     return parser.parse_args(argv)
 
 
@@ -534,10 +521,7 @@ def main() -> int:
     print("Starting MMD Character Importer Blender step 2.")
     print(f"Opening imported blend: {args.input_blend}")
     bpy.ops.wm.open_mainfile(filepath=str(args.input_blend))
-    if args.skip_cats_fix:
-        print("Generic import: CATS add-on is not required for this model and will not be loaded.")
-    else:
-        enable_cats()
+    enable_cats()
     make_single_user()
     spine_accessory_protection = protect_misdetected_spine_accessories()
     if args.clear_custom_normals:
@@ -545,16 +529,9 @@ def main() -> int:
     else:
         print("Skipping custom split normal cleanup before model fix.")
         initial_cleared_custom_normals = 0
-    if args.skip_cats_fix:
-        print(
-            "Skipping CATS fix_armature/translate/convert_to_valve passes "
-            "(generic FBX/GLB/blend import: bones already use ValveBiped "
-            "names from Step 1's heuristic mapping)."
-        )
-    else:
-        fix_armature_twice()
-        translate_with_cats()
-        convert_to_valve()
+    fix_armature_twice()
+    translate_with_cats()
+    convert_to_valve()
     vrm_spine_merge = merge_vrm_spine2_into_spine1() if args.vrm_spine_merge else None
     if args.clear_custom_normals:
         final_cleared_custom_normals = clear_custom_normals("after model fix")

@@ -2700,7 +2700,7 @@ def analyze_vrm(vrm_path: Path, source_dir: Path | None = None) -> PmxAnalysis:
     return analysis
     
 def analyze_generic(path: Path, source_dir: Path | None = None) -> PmxAnalysis:
-    """Create a minimal analysis stub for FBX/GLB/GLTF/blend models.
+    """Create a minimal analysis stub for FBX/GLB/GLTF models.
 
     The real validation happens inside Blender. This just gives the workspace
     builder a valid PmxAnalysis container so it can construct folder paths.
@@ -2715,7 +2715,7 @@ def analyze_generic(path: Path, source_dir: Path | None = None) -> PmxAnalysis:
     analysis.vertex_count = 0  # We'll count it in Blender
     analysis.bone_count = 0
     analysis.warnings = [
-        "Generic FBX/GLB/GLTF/blend format detected. "
+        "Generic FBX/GLB/GLTF format detected. "
         "Skeleton validation is skipped; relying on heuristic bone mapping."
     ]
     return analysis
@@ -2725,7 +2725,7 @@ def analyze_model_file(path: Path, source_dir: Path | None = None) -> PmxAnalysi
     """Analyze a supported model file by extension."""
     if path.suffix.lower() == ".vrm":
         return analyze_vrm(path, source_dir)
-    if path.suffix.lower() in {".fbx", ".glb", ".gltf", ".blend"}:
+    if path.suffix.lower() in {".fbx", ".glb", ".gltf"}:
         return analyze_generic(path, source_dir)
     return analyze_pmx(path, source_dir)
 
@@ -3196,7 +3196,7 @@ def import_pmx_to_blender(
     setup = ensure_portable_blender(progress, cancel_check=cancel_check)
     ext = pmx_path.suffix.lower()
     is_vrm = ext == ".vrm"
-    is_generic = ext in {".fbx", ".glb", ".gltf", ".blend"}
+    is_generic = ext in {".fbx", ".glb", ".gltf"}
 
     if is_generic:
         import_script = BLENDER_GENERIC_IMPORT_SCRIPT
@@ -3311,20 +3311,9 @@ def fix_imported_blend(
         str(fix_report_path),
     ]
     command.append("--clear-custom-normals" if clear_custom_normals else "--keep-custom-normals")
-    model_format = workspace_model_format(input_blend)
-    if model_format == "vrm":
+    if workspace_model_format(input_blend) == "vrm":
         command.append("--vrm-spine-merge")
         emit(progress, "VRM model detected: Spine2 will be merged into Spine1 after the ValveBiped conversion.")
-    elif model_format == "generic":
-        # Generic FBX/GLB/blend imports may carry non-MMD rig structures
-        # (e.g. Rigify control/mechanism/deform bone layers) that CATS'
-        # fix_armature_warning operator explicitly refuses to process
-        # ("Rigify and Metarig armatures are not supported"). Skip CATS'
-        # MMD-specific armature fix pass for these; our own heuristic bone
-        # mapping (Step 1) and spine fix (Step 3) already handle the
-        # ValveBiped conversion without needing CATS here.
-        command.append("--skip-cats-fix")
-        emit(progress, "Generic model detected: skipping CATS armature fix (handled by heuristic bone mapping instead).")
     emit(progress, f"Starting Blender fix step: {input_blend}")
     started = time.monotonic()
     run_process_streamed(
@@ -5673,8 +5662,7 @@ def find_model_files(folder: Path) -> list[Path]:
         list(folder.rglob("*.vrm")) +
         list(folder.rglob("*.fbx")) +
         list(folder.rglob("*.glb")) +
-        list(folder.rglob("*.gltf")) +
-        list(folder.rglob("*.blend"))
+        list(folder.rglob("*.gltf"))
     )
     return sorted(matches, key=lambda path: (-path.stat().st_size, str(path).lower()))
 
