@@ -154,3 +154,8 @@ For a portable-folder build, keep `_internal` beside the executable and launch:
 ```powershell
 .\release\GmodSimpleMMDCharacterImporter_portable\GmodSimpleMMDCharacterImporter.exe
 ```
+
+
+Here is the full release: https://drive.google.com/file/d/17N6h-cXUCOF70WZfwSgaJayQKUTTXoik/view?usp=sharing
+
+I cannot seem to upload it in the "releases", since there is a file limit
